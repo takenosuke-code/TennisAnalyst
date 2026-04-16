@@ -1,0 +1,583 @@
+'use client'
+
+import { useState, useEffect, useRef, useCallback } from 'react'
+
+/* ------------------------------------------------------------------ */
+/*  YouTube IFrame API types                                          */
+/* ------------------------------------------------------------------ */
+declare global {
+  interface Window {
+    YT: {
+      Player: new (
+        elementId: string,
+        config: {
+          videoId: string
+          events?: {
+            onReady?: () => void
+          }
+        },
+      ) => YTPlayer
+    }
+    onYouTubeIframeAPIReady: (() => void) | undefined
+  }
+}
+
+interface YTPlayer {
+  getCurrentTime: () => number
+  destroy: () => void
+}
+
+/* ------------------------------------------------------------------ */
+/*  Types                                                             */
+/* ------------------------------------------------------------------ */
+type ShotType = 'forehand' | 'backhand' | 'serve' | 'volley'
+type CameraAngle = 'side' | 'behind' | 'front' | 'court_level'
+
+interface SavedClip {
+  proName: string
+  shotType: ShotType
+  cameraAngle: CameraAngle
+  duration: number
+  status: 'saved' | 'error'
+}
+
+interface ProEntry {
+  name: string
+  nationality?: string
+}
+
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                           */
+/* ------------------------------------------------------------------ */
+function extractVideoId(url: string): string | null {
+  // youtube.com/watch?v=ID
+  const longMatch = url.match(/[?&]v=([a-zA-Z0-9_-]{11})/)
+  if (longMatch) return longMatch[1]
+  // youtu.be/ID
+  const shortMatch = url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/)
+  if (shortMatch) return shortMatch[1]
+  return null
+}
+
+function formatTime(seconds: number | null): string {
+  if (seconds === null) return '--:--.-'
+  const mins = Math.floor(seconds / 60)
+  const secs = seconds % 60
+  return `${mins}:${secs < 10 ? '0' : ''}${secs.toFixed(1)}`
+}
+
+/* ------------------------------------------------------------------ */
+/*  Component                                                         */
+/* ------------------------------------------------------------------ */
+export default function TagClipsPage() {
+  /* --- YouTube state --- */
+  const [youtubeUrl, setYoutubeUrl] = useState('')
+  const [videoId, setVideoId] = useState<string | null>(null)
+  const [urlError, setUrlError] = useState<string | null>(null)
+  const [ytReady, setYtReady] = useState(false)
+  const playerRef = useRef<YTPlayer | null>(null)
+  const apiLoadedRef = useRef(false)
+
+  /* --- Timestamps --- */
+  const [startTime, setStartTime] = useState<number | null>(null)
+  const [endTime, setEndTime] = useState<number | null>(null)
+
+  /* --- Metadata --- */
+  const [proName, setProName] = useState('')
+  const [nationality, setNationality] = useState('')
+  const [shotType, setShotType] = useState<ShotType | null>(null)
+  const [cameraAngle, setCameraAngle] = useState<CameraAngle | null>(null)
+
+  /* --- Pros list --- */
+  const [pros, setPros] = useState<ProEntry[]>([])
+
+  /* --- Save state --- */
+  const [saving, setSaving] = useState(false)
+  const [saveResult, setSaveResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const [savedClips, setSavedClips] = useState<SavedClip[]>([])
+
+  /* ---------------------------------------------------------------- */
+  /*  Load YouTube IFrame API                                         */
+  /* ---------------------------------------------------------------- */
+  useEffect(() => {
+    if (apiLoadedRef.current) return
+    if (window.YT) {
+      apiLoadedRef.current = true
+      return
+    }
+    const tag = document.createElement('script')
+    tag.src = 'https://www.youtube.com/iframe_api'
+    document.head.appendChild(tag)
+    apiLoadedRef.current = true
+  }, [])
+
+  /* ---------------------------------------------------------------- */
+  /*  Create / recreate player when videoId changes                   */
+  /* ---------------------------------------------------------------- */
+  useEffect(() => {
+    if (!videoId) return
+
+    let cancelled = false
+
+    const initPlayer = () => {
+      if (cancelled) return
+      // Destroy previous player if any
+      if (playerRef.current) {
+        playerRef.current.destroy()
+        playerRef.current = null
+      }
+      setYtReady(false)
+      playerRef.current = new window.YT.Player('yt-player', {
+        videoId,
+        events: {
+          onReady: () => {
+            if (!cancelled) setYtReady(true)
+          },
+        },
+      })
+    }
+
+    if (window.YT && window.YT.Player) {
+      initPlayer()
+    } else {
+      window.onYouTubeIframeAPIReady = initPlayer
+    }
+
+    return () => {
+      cancelled = true
+    }
+  }, [videoId])
+
+  /* ---------------------------------------------------------------- */
+  /*  Fetch pros                                                      */
+  /* ---------------------------------------------------------------- */
+  useEffect(() => {
+    fetch('/api/pros')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data: ProEntry[]) => setPros(Array.isArray(data) ? data : []))
+      .catch(() => {
+        /* non-critical — datalist simply stays empty */
+      })
+  }, [])
+
+  /* ---------------------------------------------------------------- */
+  /*  Handlers                                                        */
+  /* ---------------------------------------------------------------- */
+  const handleLoad = useCallback(() => {
+    setUrlError(null)
+    const id = extractVideoId(youtubeUrl)
+    if (!id) {
+      setUrlError('Invalid YouTube URL. Use youtube.com/watch?v=... or youtu.be/...')
+      return
+    }
+    setVideoId(id)
+    setStartTime(null)
+    setEndTime(null)
+    setSaveResult(null)
+  }, [youtubeUrl])
+
+  const handleMarkStart = useCallback(() => {
+    if (!playerRef.current) return
+    setStartTime(playerRef.current.getCurrentTime())
+    setSaveResult(null)
+  }, [])
+
+  const handleMarkEnd = useCallback(() => {
+    if (!playerRef.current) return
+    setEndTime(playerRef.current.getCurrentTime())
+    setSaveResult(null)
+  }, [])
+
+  const handleReset = useCallback(() => {
+    setStartTime(null)
+    setEndTime(null)
+    setProName('')
+    setNationality('')
+    setShotType(null)
+    setCameraAngle(null)
+    setSaveResult(null)
+  }, [])
+
+  const proNameIsKnown = pros.some(
+    (p) => p.name.toLowerCase() === proName.trim().toLowerCase(),
+  )
+
+  const canSave =
+    videoId &&
+    startTime !== null &&
+    endTime !== null &&
+    endTime > startTime &&
+    proName.trim() !== '' &&
+    shotType !== null &&
+    cameraAngle !== null &&
+    !saving
+
+  const handleSave = useCallback(async () => {
+    if (!canSave) return
+    setSaving(true)
+    setSaveResult(null)
+
+    const body = {
+      youtubeUrl,
+      startTime,
+      endTime,
+      proName: proName.trim(),
+      nationality: proNameIsKnown ? undefined : nationality.trim() || undefined,
+      shotType,
+      cameraAngle,
+    }
+
+    try {
+      const res = await fetch('/api/admin/tag-clip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || `Server error ${res.status}`)
+      }
+      setSaveResult({ ok: true, msg: 'Clip saved successfully!' })
+      setSavedClips((prev) => [
+        ...prev,
+        {
+          proName: proName.trim(),
+          shotType: shotType!,
+          cameraAngle: cameraAngle!,
+          duration: endTime! - startTime!,
+          status: 'saved',
+        },
+      ])
+      handleReset()
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      setSaveResult({ ok: false, msg: message })
+      setSavedClips((prev) => [
+        ...prev,
+        {
+          proName: proName.trim(),
+          shotType: shotType ?? 'forehand',
+          cameraAngle: cameraAngle ?? 'side',
+          duration: endTime !== null && startTime !== null ? endTime - startTime : 0,
+          status: 'error',
+        },
+      ])
+    } finally {
+      setSaving(false)
+    }
+  }, [
+    canSave,
+    youtubeUrl,
+    startTime,
+    endTime,
+    proName,
+    proNameIsKnown,
+    nationality,
+    shotType,
+    cameraAngle,
+    handleReset,
+  ])
+
+  /* ---------------------------------------------------------------- */
+  /*  Derived                                                         */
+  /* ---------------------------------------------------------------- */
+  const duration =
+    startTime !== null && endTime !== null && endTime > startTime
+      ? endTime - startTime
+      : null
+
+  /* ---------------------------------------------------------------- */
+  /*  Render                                                          */
+  /* ---------------------------------------------------------------- */
+  const SHOT_TYPES: ShotType[] = ['forehand', 'backhand', 'serve', 'volley']
+  const CAMERA_ANGLES: CameraAngle[] = ['side', 'behind', 'front', 'court_level']
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 py-8">
+      {/* Header */}
+      <div className="mb-8">
+        <h1 className="text-3xl font-black text-white mb-2">Tag Clips</h1>
+        <p className="text-white/50">
+          Tag tennis clips from YouTube videos and add them to the pro database.
+        </p>
+      </div>
+
+      {/* YouTube URL input */}
+      <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6">
+        <label className="block text-sm font-semibold text-white mb-2">YouTube URL</label>
+        <div className="flex gap-3">
+          <input
+            type="text"
+            value={youtubeUrl}
+            onChange={(e) => setYoutubeUrl(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleLoad()}
+            placeholder="https://www.youtube.com/watch?v=..."
+            className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50 transition-colors"
+          />
+          <button
+            onClick={handleLoad}
+            className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl transition-colors flex-shrink-0"
+          >
+            Load
+          </button>
+        </div>
+        {urlError && <p className="text-red-400 text-sm mt-2">{urlError}</p>}
+      </div>
+
+      {/* YouTube Player */}
+      {videoId && (
+        <div className="rounded-2xl border border-white/10 bg-black overflow-hidden mb-6">
+          <div className="aspect-video">
+            <div id="yt-player" className="w-full h-full" />
+          </div>
+        </div>
+      )}
+
+      {/* Mark Start / Mark End */}
+      {videoId && (
+        <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6">
+          <div className="flex flex-wrap items-center gap-4">
+            <button
+              onClick={handleMarkStart}
+              disabled={!ytReady}
+              className="px-5 py-2.5 bg-white/10 hover:bg-white/15 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl border border-white/10 transition-colors"
+            >
+              Mark Start
+            </button>
+            <button
+              onClick={handleMarkEnd}
+              disabled={!ytReady}
+              className="px-5 py-2.5 bg-white/10 hover:bg-white/15 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl border border-white/10 transition-colors"
+            >
+              Mark End
+            </button>
+
+            <div className="flex items-center gap-3 text-sm ml-auto">
+              <span className="text-white/50">
+                Start:{' '}
+                <span className="text-white font-mono">{formatTime(startTime)}</span>
+              </span>
+              <span className="text-white/30">|</span>
+              <span className="text-white/50">
+                End:{' '}
+                <span className="text-white font-mono">{formatTime(endTime)}</span>
+              </span>
+              {duration !== null && (
+                <>
+                  <span className="text-white/30">|</span>
+                  <span className="text-emerald-400 font-mono font-medium">
+                    {duration.toFixed(1)}s
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+          {startTime !== null && endTime !== null && endTime <= startTime && (
+            <p className="text-red-400 text-sm mt-2">
+              End time must be after start time.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Metadata form */}
+      {videoId && (
+        <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6 space-y-5">
+          <h2 className="text-lg font-semibold text-white">Clip Metadata</h2>
+
+          {/* Pro name */}
+          <div>
+            <label className="block text-sm font-medium text-white/70 mb-1.5">
+              Pro Name
+            </label>
+            <input
+              type="text"
+              list="pro-names"
+              value={proName}
+              onChange={(e) => setProName(e.target.value)}
+              placeholder="e.g. Roger Federer"
+              className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50 transition-colors"
+            />
+            <datalist id="pro-names">
+              {pros.map((p) => (
+                <option key={p.name} value={p.name} />
+              ))}
+            </datalist>
+          </div>
+
+          {/* Nationality — only shown for new pros */}
+          {proName.trim() !== '' && !proNameIsKnown && (
+            <div>
+              <label className="block text-sm font-medium text-white/70 mb-1.5">
+                Nationality{' '}
+                <span className="text-white/40">(new pro)</span>
+              </label>
+              <input
+                type="text"
+                value={nationality}
+                onChange={(e) => setNationality(e.target.value)}
+                placeholder="e.g. Switzerland"
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50 transition-colors"
+              />
+            </div>
+          )}
+
+          {/* Shot type */}
+          <div>
+            <label className="block text-sm font-medium text-white/70 mb-2">
+              Shot Type
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {SHOT_TYPES.map((st) => (
+                <button
+                  key={st}
+                  onClick={() => setShotType(st)}
+                  className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors border ${
+                    shotType === st
+                      ? 'bg-emerald-500 border-emerald-500 text-white'
+                      : 'bg-white/5 border-white/10 text-white/60 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  {st.charAt(0).toUpperCase() + st.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Camera angle */}
+          <div>
+            <label className="block text-sm font-medium text-white/70 mb-2">
+              Camera Angle
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {CAMERA_ANGLES.map((ca) => (
+                <button
+                  key={ca}
+                  onClick={() => setCameraAngle(ca)}
+                  className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors border ${
+                    cameraAngle === ca
+                      ? 'bg-emerald-500 border-emerald-500 text-white'
+                      : 'bg-white/5 border-white/10 text-white/60 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  {ca
+                    .split('_')
+                    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+                    .join(' ')}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Action buttons */}
+      {videoId && (
+        <div className="flex items-center gap-4 mb-6">
+          <button
+            onClick={handleSave}
+            disabled={!canSave}
+            className="px-6 py-3 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors flex items-center gap-2"
+          >
+            {saving && (
+              <svg
+                className="animate-spin h-4 w-4"
+                viewBox="0 0 24 24"
+                fill="none"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
+              </svg>
+            )}
+            {saving ? 'Saving...' : 'Save Clip'}
+          </button>
+
+          <button
+            onClick={handleReset}
+            className="px-6 py-3 bg-white/10 hover:bg-white/15 text-white font-semibold rounded-xl border border-white/10 transition-colors"
+          >
+            Reset
+          </button>
+
+          {saveResult && (
+            <p
+              className={`text-sm font-medium ${
+                saveResult.ok ? 'text-emerald-400' : 'text-red-400'
+              }`}
+            >
+              {saveResult.msg}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Saved clips table */}
+      {savedClips.length > 0 && (
+        <div className="rounded-2xl border border-white/10 bg-white/[0.02] overflow-hidden">
+          <div className="p-4 border-b border-white/5">
+            <h2 className="text-lg font-semibold text-white">
+              Saved Clips{' '}
+              <span className="text-white/40 font-normal text-sm">
+                ({savedClips.length})
+              </span>
+            </h2>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-white/5 text-white/40 text-left">
+                  <th className="px-4 py-3 font-medium">Pro</th>
+                  <th className="px-4 py-3 font-medium">Shot</th>
+                  <th className="px-4 py-3 font-medium">Angle</th>
+                  <th className="px-4 py-3 font-medium">Duration</th>
+                  <th className="px-4 py-3 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {savedClips.map((clip, i) => (
+                  <tr key={i} className="border-b border-white/5 last:border-0">
+                    <td className="px-4 py-3 text-white">{clip.proName}</td>
+                    <td className="px-4 py-3 text-white/70 capitalize">{clip.shotType}</td>
+                    <td className="px-4 py-3 text-white/70 capitalize">
+                      {clip.cameraAngle.replace('_', ' ')}
+                    </td>
+                    <td className="px-4 py-3 text-white/70 font-mono">
+                      {clip.duration.toFixed(1)}s
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full ${
+                          clip.status === 'saved'
+                            ? 'bg-emerald-500/10 text-emerald-400'
+                            : 'bg-red-500/10 text-red-400'
+                        }`}
+                      >
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${
+                            clip.status === 'saved' ? 'bg-emerald-400' : 'bg-red-400'
+                          }`}
+                        />
+                        {clip.status === 'saved' ? 'Saved' : 'Error'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

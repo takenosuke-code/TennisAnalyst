@@ -39,3 +39,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# large video/model files — never commit these
+pro-videos/
+public/pro-videos/
+*.mp4
+*.task
+
+# python
+__pycache__/
+*.pyc

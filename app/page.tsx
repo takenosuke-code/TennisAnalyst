@@ -1,65 +1,178 @@
-import Image from "next/image";
+import Link from 'next/link'
 
-export default function Home() {
+const FEATURES = [
+  {
+    icon: '🎯',
+    title: 'Joint Tracking',
+    desc: 'MediaPipe AI marks 33 body landmarks, shoulders, elbows, wrists, knees, on every frame.',
+  },
+  {
+    icon: '🌊',
+    title: 'Swing Path Trails',
+    desc: 'See your racket-hand motion path traced in real-time as a smooth Bezier curve.',
+  },
+  {
+    icon: '👁️',
+    title: 'Toggle Any Joint',
+    desc: 'Show or hide individual joint groups to focus on what matters for your shot.',
+  },
+  {
+    icon: '⚡',
+    title: 'Pro Comparison',
+    desc: 'Overlay your skeleton on Federer, Nadal, Djokovic and more. See the difference instantly.',
+  },
+  {
+    icon: '🤖',
+    title: 'AI Coaching',
+    desc: 'Claude analyzes your joint angles vs the pro and gives you ranked, actionable coaching cues.',
+  },
+  {
+    icon: '📐',
+    title: 'Side by Side',
+    desc: 'Synchronized video playback. Scrub both videos in lockstep at any speed.',
+  },
+]
+
+const PROS = [
+  { name: 'Roger Federer', flag: '🇨🇭', shots: ['Forehand', 'Serve'] },
+  { name: 'Rafael Nadal', flag: '🇪🇸', shots: ['Forehand', 'Backhand'] },
+  { name: 'Novak Djokovic', flag: '🇷🇸', shots: ['Return', 'Serve'] },
+  { name: 'Serena Williams', flag: '🇺🇸', shots: ['Serve', 'Forehand'] },
+]
+
+export default function HomePage() {
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+    <div className="min-h-screen">
+      {/* Hero */}
+      <section className="relative overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-br from-emerald-900/30 via-transparent to-blue-900/20" />
+        <div className="relative max-w-5xl mx-auto px-4 pt-24 pb-20 text-center">
+          <div className="inline-flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 rounded-full px-4 py-1.5 text-emerald-400 text-sm font-medium mb-8">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            AI-powered swing analysis
+          </div>
+
+          <h1 className="text-5xl md:text-7xl font-black text-white leading-tight mb-6">
+            Play like
+            <br />
+            <span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">
+              the pros
+            </span>
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+
+          <p className="text-white/60 text-xl max-w-2xl mx-auto mb-10 leading-relaxed">
+            Upload your swing video. Get instant AI pose tracking, joint-by-joint comparison to
+            professional players, and personalized coaching feedback.
           </p>
+
+          <div className="flex flex-col sm:flex-row gap-4 justify-center">
+            <Link
+              href="/analyze"
+              className="px-8 py-4 bg-emerald-500 hover:bg-emerald-400 text-white font-bold rounded-2xl text-lg transition-all hover:scale-105 hover:shadow-lg hover:shadow-emerald-500/25"
+            >
+              Analyze My Swing
+            </Link>
+            <Link
+              href="/pros"
+              className="px-8 py-4 bg-white/10 hover:bg-white/15 text-white font-bold rounded-2xl text-lg transition-all border border-white/10"
+            >
+              Browse Pro Database
+            </Link>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+      </section>
+
+      {/* Feature grid */}
+      <section className="max-w-6xl mx-auto px-4 py-20">
+        <h2 className="text-3xl font-bold text-white text-center mb-12">
+          Everything you need to level up
+        </h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {FEATURES.map((f) => (
+            <div
+              key={f.title}
+              className="rounded-2xl border border-white/5 bg-white/[0.03] p-6 hover:bg-white/[0.06] transition-colors"
+            >
+              <div className="text-3xl mb-3">{f.icon}</div>
+              <h3 className="text-white font-semibold text-lg mb-2">{f.title}</h3>
+              <p className="text-white/50 text-sm leading-relaxed">{f.desc}</p>
+            </div>
+          ))}
         </div>
-      </main>
+      </section>
+
+      {/* How it works */}
+      <section className="border-t border-white/5 py-20">
+        <div className="max-w-4xl mx-auto px-4 text-center">
+          <h2 className="text-3xl font-bold text-white mb-12">How it works</h2>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+            {[
+              { n: '1', label: 'Upload', desc: 'Drop your swing video (MP4/MOV)' },
+              { n: '2', label: 'Track', desc: 'AI extracts 33 joint landmarks from every frame' },
+              { n: '3', label: 'Compare', desc: 'Pick a pro and shot type to compare against' },
+              { n: '4', label: 'Improve', desc: 'Get ranked coaching cues from Claude' },
+            ].map((step) => (
+              <div key={step.n} className="flex flex-col items-center gap-3">
+                <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-black text-xl">
+                  {step.n}
+                </div>
+                <h3 className="text-white font-semibold">{step.label}</h3>
+                <p className="text-white/50 text-sm">{step.desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Pro database preview */}
+      <section className="max-w-5xl mx-auto px-4 py-20">
+        <div className="flex items-center justify-between mb-8">
+          <h2 className="text-3xl font-bold text-white">Pro Database</h2>
+          <Link href="/pros" className="text-emerald-400 hover:text-emerald-300 text-sm font-medium">
+            View all →
+          </Link>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {PROS.map((pro) => (
+            <Link
+              key={pro.name}
+              href="/pros"
+              className="rounded-2xl border border-white/10 bg-white/5 p-5 hover:bg-white/[0.08] transition-colors"
+            >
+              <div className="text-3xl mb-3">{pro.flag}</div>
+              <h3 className="text-white font-semibold text-sm mb-2">{pro.name}</h3>
+              <div className="flex flex-wrap gap-1">
+                {pro.shots.map((s) => (
+                  <span
+                    key={s}
+                    className="text-xs bg-white/10 text-white/60 px-2 py-0.5 rounded-full"
+                  >
+                    {s}
+                  </span>
+                ))}
+              </div>
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      {/* CTA */}
+      <section className="border-t border-white/5 py-20 text-center">
+        <div className="max-w-xl mx-auto px-4">
+          <h2 className="text-3xl font-bold text-white mb-4">
+            Ready to see the difference?
+          </h2>
+          <p className="text-white/50 mb-8">
+            No sign-up required. Upload your video and get instant feedback.
+          </p>
+          <Link
+            href="/analyze"
+            className="inline-block px-8 py-4 bg-emerald-500 hover:bg-emerald-400 text-white font-bold rounded-2xl text-lg transition-all hover:scale-105"
+          >
+            Start Analyzing Free
+          </Link>
+        </div>
+      </section>
     </div>
-  );
+  )
 }
