@@ -87,7 +87,11 @@ export async function POST(request: NextRequest) {
   const projectRoot = process.cwd()
   const ffmpegDir = join(projectRoot, 'pro-videos', 'bin')
   const ffmpegBin = join(ffmpegDir, 'ffmpeg')
-  const previewDir = join(projectRoot, 'public', 'clip-previews')
+  // Previews are written to a NON-public directory and streamed through an
+  // auth-gated GET handler. Previously we dropped them under public/ where
+  // anyone who knew the UUID could fetch them; moving them out of public/
+  // means only admin-authenticated requests can read back the files.
+  const previewDir = join(os.tmpdir(), 'tennisiq-clip-previews')
   if (!existsSync(previewDir)) mkdirSync(previewDir, { recursive: true })
   cleanOldPreviews(previewDir)
 
@@ -159,7 +163,10 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       previewId,
-      videoUrl: `/clip-previews/${previewFilename}`,
+      // Client fetches this with the admin header, converts the response to
+      // a blob URL, and feeds that into <video src>. We no longer expose a
+      // directly-browsable path under /public/.
+      videoUrl: `/api/admin/preview-clip/${previewId}`,
       durationSec: (endTime - startTime) / speedFactor,
       speedFactor,
     })

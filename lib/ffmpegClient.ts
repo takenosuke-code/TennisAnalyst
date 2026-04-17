@@ -3,9 +3,10 @@
 // 60-second serverless function cap and the absence of a native ffmpeg
 // binary in production.
 //
-// The WASM core is loaded on first use from unpkg via toBlobURL so we don't
-// have to bundle ~30MB into every page. Subsequent calls reuse the same
-// FFmpeg instance.
+// Core files are copied from @ffmpeg/core into public/ffmpeg/ at install
+// time (see scripts/copy-ffmpeg-core.mjs) so the browser loads them from
+// our own origin instead of unpkg — no third-party CDN, no supply-chain
+// attack surface. Files are lazy-loaded on first use via toBlobURL.
 
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { toBlobURL, fetchFile } from '@ffmpeg/util'
@@ -15,8 +16,7 @@ let _loadingPromise: Promise<FFmpeg> | null = null
 
 // Single-threaded core — works without COOP/COEP headers. Slower than the
 // -mt core but fine for short swing clips (a few seconds).
-const CORE_BASE_URL =
-  'https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd'
+const CORE_BASE_URL = '/ffmpeg'
 
 export async function getFFmpeg(onProgress?: (ratio: number) => void): Promise<FFmpeg> {
   if (_ffmpeg) {

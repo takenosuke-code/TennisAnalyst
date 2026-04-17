@@ -44,6 +44,9 @@ next-env.d.ts
 pro-videos/
 public/pro-videos/
 public/clip-previews/
+# copied from node_modules/@ffmpeg/core by scripts/copy-ffmpeg-core.mjs at
+# install time; too large to commit but needed by the deployed bundle
+public/ffmpeg/
 *.mp4
 *.task
 *.zip

@@ -433,6 +433,9 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
       }
 
       // YouTube path (server-side yt-dlp + ffmpeg, local-only in practice).
+      // Server returns a previewId we then pull from an auth-gated endpoint
+      // and wrap in a blob: URL for <video>, so the preview file never sits
+      // under public/ where anyone who guessed the UUID could grab it.
       const res = await fetch('/api/admin/preview-clip', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...adminAuthHeaders() },
@@ -448,7 +451,19 @@ function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
         throw new Error(text || `Server error ${res.status}`)
       }
       const data = (await res.json()) as { videoUrl: string }
-      setPreviewUrl(data.videoUrl)
+      const fileRes = await fetch(data.videoUrl, { headers: adminAuthHeaders() })
+      if (fileRes.status === 401) {
+        clearAdminToken()
+        onLockOut()
+        return
+      }
+      if (!fileRes.ok) throw new Error(`Failed to fetch preview (${fileRes.status})`)
+      const previewFileBlob = await fileRes.blob()
+      const url = URL.createObjectURL(previewFileBlob)
+      setPreviewUrl((prev) => {
+        if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev)
+        return url
+      })
       setPreviewedSpeedFactor(speedFactor)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error'
