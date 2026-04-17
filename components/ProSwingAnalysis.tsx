@@ -21,6 +21,7 @@ const DEVIATION_STYLES: Record<DeviationLevel, { bg: string; text: string; borde
   good: { bg: 'bg-emerald-500/15', text: 'text-emerald-300', border: 'border-emerald-500/30' },
   moderate: { bg: 'bg-amber-500/15', text: 'text-amber-300', border: 'border-amber-500/30' },
   poor: { bg: 'bg-red-500/15', text: 'text-red-300', border: 'border-red-500/30' },
+  unknown: { bg: 'bg-zinc-500/15', text: 'text-zinc-400', border: 'border-zinc-500/30' },
 }
 
 function getFrameAtPhase(

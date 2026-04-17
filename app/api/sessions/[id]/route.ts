@@ -11,6 +11,7 @@ export async function GET(
     .from('user_sessions')
     .select('id, blob_url, shot_type, status, error_message, created_at')
     .eq('id', id)
+    .gt('expires_at', new Date().toISOString())
     .single()
 
   if (error) {

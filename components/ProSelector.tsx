@@ -29,7 +29,7 @@ export default function ProSelector({ compact = false }: ProSelectorProps) {
     setActivePro(pro)
     setLoadingSwing(swing.id)
     try {
-      const res = await fetch(`/api/pro-swings/${swing.id}`)
+      const res = await fetch(`/api/pro-swings/${swing.id}?include=keypoints`)
       if (!res.ok) throw new Error('Failed to load swing data')
       const fullSwing: ProSwing = await res.json()
       setActiveProSwing(fullSwing)

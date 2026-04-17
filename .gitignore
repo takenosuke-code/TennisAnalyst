@@ -51,3 +51,5 @@ public/clip-previews/
 # python
 __pycache__/
 *.pyc
+__MACOSX/
+.claude/

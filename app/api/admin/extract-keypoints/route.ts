@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { supabase } from '@/lib/supabase'
+import { supabaseAdmin as supabase } from '@/lib/supabase'
 
 const EXTRACT_TIMEOUT_MS = 120_000
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024
 
 export async function POST(request: NextRequest) {
   let body
@@ -31,7 +33,7 @@ export async function POST(request: NextRequest) {
 
   if (fetchError || !swing) {
     return NextResponse.json(
-      { error: `Swing not found: ${fetchError?.message ?? 'no data'}` },
+      { error: 'Swing not found' },
       { status: 404 }
     )
   }
@@ -44,16 +46,6 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  // 2. Resolve the video path on disk
-  const videoPath = path.join(process.cwd(), 'public', videoUrl)
-  if (!existsSync(videoPath)) {
-    return NextResponse.json(
-      { error: `Video file not found on disk: ${videoUrl}` },
-      { status: 404 }
-    )
-  }
-
-  // 3. Shell out to the Python extraction script
   const scriptPath = path.join(
     process.cwd(),
     'railway-service',
@@ -64,6 +56,53 @@ export async function POST(request: NextRequest) {
       { error: 'Extraction script not found at railway-service/extract_clip_keypoints.py' },
       { status: 500 }
     )
+  }
+
+  // Resolve video to a local path. Remote blob URLs get downloaded to a tmp
+  // file; legacy relative paths (e.g. /pro-videos/foo.mp4) resolve under public/.
+  const isRemote = /^https?:\/\//i.test(videoUrl)
+  let videoPath: string
+  let tmpDir: string | null = null
+
+  if (isRemote) {
+    try {
+      const res = await fetch(videoUrl)
+      if (!res.ok) {
+        return NextResponse.json(
+          { error: `Failed to fetch video (${res.status})` },
+          { status: 502 }
+        )
+      }
+      const contentLength = Number(res.headers.get('content-length') ?? '0')
+      if (contentLength && contentLength > MAX_VIDEO_BYTES) {
+        return NextResponse.json(
+          { error: 'Video exceeds max size' },
+          { status: 413 }
+        )
+      }
+      const buf = Buffer.from(await res.arrayBuffer())
+      if (buf.length > MAX_VIDEO_BYTES) {
+        return NextResponse.json(
+          { error: 'Video exceeds max size' },
+          { status: 413 }
+        )
+      }
+      tmpDir = mkdtempSync(path.join(tmpdir(), 'extract-kp-'))
+      videoPath = path.join(tmpDir, 'video.mp4')
+      writeFileSync(videoPath, buf)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown download error'
+      console.error('[/api/admin/extract-keypoints] Download error:', message)
+      return NextResponse.json({ error: 'Failed to download video' }, { status: 502 })
+    }
+  } else {
+    videoPath = path.join(process.cwd(), 'public', videoUrl)
+    if (!existsSync(videoPath)) {
+      return NextResponse.json(
+        { error: 'Video file not found on disk' },
+        { status: 404 }
+      )
+    }
   }
 
   let result: {
@@ -104,6 +143,14 @@ export async function POST(request: NextRequest) {
     const message = err instanceof Error ? err.message : 'Unknown extraction error'
     console.error('[/api/admin/extract-keypoints] Extraction error:', message)
     return NextResponse.json({ error: message }, { status: 500 })
+  } finally {
+    if (tmpDir) {
+      try {
+        rmSync(tmpDir, { recursive: true, force: true })
+      } catch {
+        // best-effort cleanup
+      }
+    }
   }
 
   // 4. Update the Supabase pro_swings row
@@ -120,7 +167,7 @@ export async function POST(request: NextRequest) {
   if (updateError) {
     console.error('[/api/admin/extract-keypoints] Supabase update error:', updateError.message)
     return NextResponse.json(
-      { error: `Failed to update swing: ${updateError.message}` },
+      { error: 'Failed to update swing data' },
       { status: 500 }
     )
   }

@@ -1,16 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { supabase } from '@/lib/supabase'
+import { supabaseAdmin as supabase } from '@/lib/supabase'
 import { put } from '@vercel/blob'
 import { execFileSync } from 'child_process'
 import { mkdtempSync, unlinkSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import os from 'os'
+import { VALID_SHOT_TYPES, type ShotType } from '@/lib/shotTypeConfig'
 
-const VALID_SHOT_TYPES = ['forehand', 'backhand', 'serve', 'volley'] as const
 const VALID_CAMERA_ANGLES = ['side', 'behind', 'front', 'court_level'] as const
 const ALLOWED_SPEED_FACTORS = [1 / 4, 1 / 3, 1 / 2, 1, 2, 3, 4] as const
 
-type ShotType = (typeof VALID_SHOT_TYPES)[number]
 type CameraAngle = (typeof VALID_CAMERA_ANGLES)[number]
 
 const YOUTUBE_URL_PATTERN = /^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//
@@ -158,8 +157,9 @@ export async function POST(request: NextRequest) {
     .from('pros')
     .select('id, name')
   if (prosFetchErr) {
+    console.error('[tag-clip] Pros fetch error:', prosFetchErr.message)
     return NextResponse.json(
-      { error: `Failed to fetch pros: ${prosFetchErr.message}` },
+      { error: 'Failed to fetch pros' },
       { status: 500 }
     )
   }
@@ -290,9 +290,8 @@ export async function POST(request: NextRequest) {
         .single()
 
       if (insertError || !newPro) {
-        throw new Error(
-          `Failed to create pro: ${insertError?.message ?? 'Unknown error'}`
-        )
+        console.error('[tag-clip] Pro insert error:', insertError?.message)
+        throw new Error('Failed to create pro')
       }
       pro = newPro
     }
@@ -321,9 +320,8 @@ export async function POST(request: NextRequest) {
       .single()
 
     if (swingError || !swing) {
-      throw new Error(
-        `Failed to create pro_swing: ${swingError?.message ?? 'Unknown error'}`
-      )
+      console.error('[tag-clip] Swing insert error:', swingError?.message)
+      throw new Error('Failed to create pro swing')
     }
 
     console.log('[tag-clip] Successfully created swing:', swing.id)

@@ -34,11 +34,15 @@ export async function POST(request: NextRequest) {
   let userKeypoints: KeypointsJson | null = inlineKeypoints ?? null
 
   if (!userKeypoints && sessionId) {
-    const { data: session } = await supabase
+    const { data: session, error: sessionError } = await supabase
       .from('user_sessions')
       .select('keypoints_json')
       .eq('id', sessionId)
       .single()
+
+    if (sessionError) {
+      return NextResponse.json({ error: 'Session not found' }, { status: 404 })
+    }
     userKeypoints = session?.keypoints_json ?? null
   }
 

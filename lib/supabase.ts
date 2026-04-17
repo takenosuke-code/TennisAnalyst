@@ -1,7 +1,8 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
-// Lazy client -instantiated only at runtime (not during Next.js build)
+// Lazy client — instantiated only at runtime (not during Next.js build)
 let _client: SupabaseClient | null = null
+let _adminClient: SupabaseClient | null = null
 
 export function getSupabase(): SupabaseClient {
   if (!_client) {
@@ -17,11 +18,36 @@ export function getSupabase(): SupabaseClient {
   return _client
 }
 
+// Service-role client for server-side admin operations (bypasses RLS).
+// Only use in API routes that run exclusively on the server.
+export function getSupabaseAdmin(): SupabaseClient {
+  if (!_adminClient) {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const key = process.env.SUPABASE_SERVICE_KEY
+    if (!url || !key) {
+      throw new Error(
+        'Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_KEY env vars'
+      )
+    }
+    _adminClient = createClient(url, key)
+  }
+  return _adminClient
+}
+
 // Convenience export for server-side API routes and RSC.
 // Binds `this` so method chaining (e.g. supabase.from(...).select(...)) works correctly.
 export const supabase = new Proxy({} as SupabaseClient, {
   get(_target, prop) {
     const client = getSupabase()
+    const value = client[prop as keyof SupabaseClient]
+    return typeof value === 'function' ? (value as Function).bind(client) : value
+  },
+})
+
+// Service-role convenience export for admin API routes.
+export const supabaseAdmin = new Proxy({} as SupabaseClient, {
+  get(_target, prop) {
+    const client = getSupabaseAdmin()
     const value = client[prop as keyof SupabaseClient]
     return typeof value === 'function' ? (value as Function).bind(client) : value
   },
@@ -106,6 +132,25 @@ export type UserSession = {
   matched_pro_swing_id: string | null
   status: 'uploaded' | 'extracting' | 'analyzing' | 'complete' | 'error'
   error_message: string | null
+  is_multi_shot: boolean
+  segment_count: number
   created_at: string
   expires_at: string
+}
+
+export type VideoSegment = {
+  id: string
+  session_id: string
+  segment_index: number
+  shot_type: 'forehand' | 'backhand' | 'serve' | 'volley' | 'slice' | 'unknown' | 'idle'
+  start_frame: number
+  end_frame: number
+  start_ms: number
+  end_ms: number
+  confidence: number
+  label: string | null
+  keypoints_json: KeypointsJson | null
+  analysis_result: Record<string, unknown> | null
+  matched_pro_swing_id: string | null
+  created_at: string
 }

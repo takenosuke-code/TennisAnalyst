@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   SHOT_TYPE_CONFIGS,
+  VALID_SHOT_TYPES,
+  VALID_USER_SHOT_TYPES,
   getShotTypeConfig,
   getRecommendedVisibility,
   scoreAngleDeviation,
@@ -32,15 +34,32 @@ const VALID_ANGLE_KEYS: (keyof JointAngles)[] = [
 // SHOT_TYPE_CONFIGS structure
 // ---------------------------------------------------------------------------
 
+describe('VALID_SHOT_TYPES constants', () => {
+  it('VALID_SHOT_TYPES contains all 5 shot types', () => {
+    expect(VALID_SHOT_TYPES).toEqual(['forehand', 'backhand', 'serve', 'volley', 'slice'])
+  })
+
+  it('VALID_USER_SHOT_TYPES extends shot types with unknown', () => {
+    expect(VALID_USER_SHOT_TYPES).toEqual(['forehand', 'backhand', 'serve', 'volley', 'slice', 'unknown'])
+  })
+
+  it('every VALID_SHOT_TYPE has a matching config', () => {
+    for (const st of VALID_SHOT_TYPES) {
+      expect(SHOT_TYPE_CONFIGS[st]).toBeDefined()
+    }
+  })
+})
+
 describe('SHOT_TYPE_CONFIGS', () => {
-  it('has entries for forehand, backhand, serve, and volley', () => {
+  it('has entries for forehand, backhand, serve, volley, and slice', () => {
     expect(SHOT_TYPE_CONFIGS).toHaveProperty('forehand')
     expect(SHOT_TYPE_CONFIGS).toHaveProperty('backhand')
     expect(SHOT_TYPE_CONFIGS).toHaveProperty('serve')
     expect(SHOT_TYPE_CONFIGS).toHaveProperty('volley')
+    expect(SHOT_TYPE_CONFIGS).toHaveProperty('slice')
   })
 
-  it.each(['forehand', 'backhand', 'serve', 'volley'])(
+  it.each(['forehand', 'backhand', 'serve', 'volley', 'slice'])(
     '%s config has all required fields',
     (shotType) => {
       const config = SHOT_TYPE_CONFIGS[shotType]
@@ -69,7 +88,7 @@ describe('SHOT_TYPE_CONFIGS', () => {
     }
   )
 
-  it.each(['forehand', 'backhand', 'serve', 'volley'])(
+  it.each(['forehand', 'backhand', 'serve', 'volley', 'slice'])(
     '%s emphasizedJoints are all valid JointGroup values',
     (shotType) => {
       const config = SHOT_TYPE_CONFIGS[shotType]
@@ -79,7 +98,7 @@ describe('SHOT_TYPE_CONFIGS', () => {
     }
   )
 
-  it.each(['forehand', 'backhand', 'serve', 'volley'])(
+  it.each(['forehand', 'backhand', 'serve', 'volley', 'slice'])(
     '%s secondaryJoints are all valid JointGroup values',
     (shotType) => {
       const config = SHOT_TYPE_CONFIGS[shotType]
@@ -89,7 +108,7 @@ describe('SHOT_TYPE_CONFIGS', () => {
     }
   )
 
-  it.each(['forehand', 'backhand', 'serve', 'volley'])(
+  it.each(['forehand', 'backhand', 'serve', 'volley', 'slice'])(
     '%s emphasized and secondary joints do not overlap',
     (shotType) => {
       const config = SHOT_TYPE_CONFIGS[shotType]
@@ -100,7 +119,7 @@ describe('SHOT_TYPE_CONFIGS', () => {
     }
   )
 
-  it.each(['forehand', 'backhand', 'serve', 'volley'])(
+  it.each(['forehand', 'backhand', 'serve', 'volley', 'slice'])(
     '%s keyAngles are all valid JointAngles keys',
     (shotType) => {
       const config = SHOT_TYPE_CONFIGS[shotType]
@@ -110,7 +129,7 @@ describe('SHOT_TYPE_CONFIGS', () => {
     }
   )
 
-  it.each(['forehand', 'backhand', 'serve', 'volley'])(
+  it.each(['forehand', 'backhand', 'serve', 'volley', 'slice'])(
     '%s kineticChainOrder elements are valid JointAngles keys',
     (shotType) => {
       const config = SHOT_TYPE_CONFIGS[shotType]
@@ -120,7 +139,7 @@ describe('SHOT_TYPE_CONFIGS', () => {
     }
   )
 
-  it.each(['forehand', 'backhand', 'serve', 'volley'])(
+  it.each(['forehand', 'backhand', 'serve', 'volley', 'slice'])(
     '%s commonMistakes are non-empty strings',
     (shotType) => {
       const config = SHOT_TYPE_CONFIGS[shotType]
@@ -154,7 +173,7 @@ describe('SHOT_TYPE_CONFIGS', () => {
 // ---------------------------------------------------------------------------
 
 describe('keyAngleSpecs', () => {
-  it.each(['forehand', 'backhand', 'serve', 'volley'])(
+  it.each(['forehand', 'backhand', 'serve', 'volley', 'slice'])(
     '%s specs have valid angle keys and ideal ranges',
     (shotType) => {
       const config = SHOT_TYPE_CONFIGS[shotType]
@@ -180,7 +199,7 @@ describe('keyAngleSpecs', () => {
 // ---------------------------------------------------------------------------
 
 describe('mistakeChecks', () => {
-  it.each(['forehand', 'backhand', 'serve', 'volley'])(
+  it.each(['forehand', 'backhand', 'serve', 'volley', 'slice'])(
     '%s mistake checks have valid structure',
     (shotType) => {
       const config = SHOT_TYPE_CONFIGS[shotType]

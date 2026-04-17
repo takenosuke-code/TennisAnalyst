@@ -1,0 +1,128 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { NextRequest } from 'next/server'
+
+// Mock supabase
+const mockSelect = vi.fn()
+const mockSingle = vi.fn()
+const mockEq = vi.fn()
+const mockGt = vi.fn()
+const mockUpdate = vi.fn()
+const mockInsert = vi.fn()
+const mockUpsert = vi.fn()
+const mockFrom = vi.fn()
+
+function chainMock() {
+  mockSelect.mockReturnThis()
+  mockSingle.mockReturnThis()
+  mockEq.mockReturnThis()
+  mockGt.mockReturnThis()
+  mockUpdate.mockReturnThis()
+  mockInsert.mockReturnThis()
+  mockUpsert.mockReturnThis()
+  mockFrom.mockReturnValue({
+    select: mockSelect,
+    single: mockSingle,
+    eq: mockEq,
+    gt: mockGt,
+    update: mockUpdate,
+    insert: mockInsert,
+    upsert: mockUpsert,
+  })
+  // Chain returns for nested calls
+  mockUpdate.mockReturnValue({ eq: mockEq })
+  mockEq.mockReturnValue({ eq: mockEq, select: mockSelect, single: mockSingle, gt: mockGt })
+  mockSelect.mockReturnValue({ single: mockSingle, eq: mockEq })
+  mockGt.mockReturnValue({ single: mockSingle })
+  mockUpsert.mockReturnValue({ select: mockSelect })
+}
+
+vi.mock('@/lib/supabase', () => ({
+  supabase: new Proxy({}, {
+    get: (_t: object, prop: string) => {
+      if (prop === 'from') return mockFrom
+      return undefined
+    },
+  }),
+}))
+
+describe('POST /api/sessions', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    chainMock()
+  })
+
+  it('returns 400 when blobUrl is missing', async () => {
+    const { POST } = await import('@/app/api/sessions/route')
+    const req = new NextRequest('http://localhost/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ keypointsJson: {} }),
+    })
+    const res = await POST(req)
+    expect(res.status).toBe(400)
+  })
+
+  it('returns 400 when keypointsJson is missing', async () => {
+    const { POST } = await import('@/app/api/sessions/route')
+    const req = new NextRequest('http://localhost/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ blobUrl: 'https://blob.test/v.mp4' }),
+    })
+    const res = await POST(req)
+    expect(res.status).toBe(400)
+  })
+
+  it('uses upsert with onConflict blob_url when no sessionId', async () => {
+    mockSingle.mockResolvedValueOnce({
+      data: { id: 'new-session-id' },
+      error: null,
+    })
+
+    const { POST } = await import('@/app/api/sessions/route')
+    const req = new NextRequest('http://localhost/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({
+        blobUrl: 'https://blob.test/v.mp4',
+        keypointsJson: { fps_sampled: 30, frame_count: 1, frames: [] },
+        shotType: 'forehand',
+      }),
+    })
+    const res = await POST(req)
+    expect(res.status).toBe(200)
+    expect(mockUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ blob_url: 'https://blob.test/v.mp4' }),
+      { onConflict: 'blob_url' }
+    )
+  })
+})
+
+describe('GET /api/sessions/[id]', () => {
+  beforeEach(() => {
+    vi.resetModules()
+    chainMock()
+  })
+
+  it('filters by expires_at', async () => {
+    mockSingle.mockResolvedValueOnce({
+      data: { id: 'sess-1', status: 'complete' },
+      error: null,
+    })
+
+    const { GET } = await import('@/app/api/sessions/[id]/route')
+    const req = new NextRequest('http://localhost/api/sessions/sess-1')
+    await GET(req, { params: Promise.resolve({ id: 'sess-1' }) })
+
+    expect(mockGt).toHaveBeenCalledWith('expires_at', expect.any(String))
+  })
+
+  it('returns 404 for expired or missing sessions', async () => {
+    mockSingle.mockResolvedValueOnce({
+      data: null,
+      error: { message: 'not found' },
+    })
+
+    const { GET } = await import('@/app/api/sessions/[id]/route')
+    const req = new NextRequest('http://localhost/api/sessions/sess-1')
+    const res = await GET(req, { params: Promise.resolve({ id: 'sess-1' }) })
+    expect(res.status).toBe(404)
+  })
+})

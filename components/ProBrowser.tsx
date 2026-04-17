@@ -48,7 +48,7 @@ export default function ProBrowser() {
     setLoadingSwing(true)
     resetChat()
     try {
-      const res = await fetch(`/api/pro-swings/${swing.id}`)
+      const res = await fetch(`/api/pro-swings/${swing.id}?include=keypoints`)
       if (!res.ok) throw new Error('Failed to load swing data')
       const fullSwing: ProSwing = await res.json()
       setSelectedSwing(fullSwing)

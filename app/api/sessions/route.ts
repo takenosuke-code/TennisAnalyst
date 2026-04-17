@@ -42,17 +42,20 @@ export async function POST(request: NextRequest) {
 
   const { data, error } = await supabase
     .from('user_sessions')
-    .insert({
-      blob_url: blobUrl,
-      shot_type: shotType ?? 'unknown',
-      keypoints_json: keypointsJson,
-      status: 'complete',
-    })
+    .upsert(
+      {
+        blob_url: blobUrl,
+        shot_type: shotType ?? 'unknown',
+        keypoints_json: keypointsJson,
+        status: 'complete',
+      },
+      { onConflict: 'blob_url' }
+    )
     .select()
     .single()
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ error: 'Failed to save session' }, { status: 500 })
   }
 
   return NextResponse.json({ sessionId: data.id })

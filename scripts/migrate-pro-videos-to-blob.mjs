@@ -8,7 +8,7 @@
 //
 // Requires .env (in project root) to contain:
 //   NEXT_PUBLIC_SUPABASE_URL
-//   NEXT_PUBLIC_SUPABASE_ANON_KEY
+//   SUPABASE_SERVICE_KEY    ← service-role key, bypasses RLS on pro_swings
 //   BLOB_READ_WRITE_TOKEN   ← must be the NEW public store's token
 
 import { createClient } from '@supabase/supabase-js'
@@ -37,7 +37,7 @@ function loadEnvFile(path, label) {
 }
 
 // Capture shell-provided values before .env overwrites them (for reporting).
-for (const k of ['BLOB_READ_WRITE_TOKEN', 'NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY']) {
+for (const k of ['BLOB_READ_WRITE_TOKEN', 'NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_SERVICE_KEY']) {
   if (process.env[k]) envSource[k] = 'shell/export'
 }
 
@@ -46,10 +46,10 @@ loadEnvFile(join(process.cwd(), '.env'), '.env')
 const apply = process.argv.includes('--apply')
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+const supabaseKey = process.env.SUPABASE_SERVICE_KEY
 const blobToken = process.env.BLOB_READ_WRITE_TOKEN
 if (!supabaseUrl || !supabaseKey) {
-  console.error('Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY')
+  console.error('Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_KEY')
   process.exit(1)
 }
 if (!blobToken) {

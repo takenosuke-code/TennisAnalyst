@@ -1,15 +1,16 @@
 import { put } from '@vercel/blob'
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
+import { VALID_USER_SHOT_TYPES } from '@/lib/shotTypeConfig'
 
 export async function POST(request: NextRequest) {
-  const VALID_SHOT_TYPES = new Set(['forehand', 'backhand', 'serve', 'volley', 'unknown'])
+  const validTypes = new Set<string>(VALID_USER_SHOT_TYPES)
 
   const formData = await request.formData()
   const file = formData.get('video') as File | null
   const rawShotType = (formData.get('shot_type') as string | null) ?? 'unknown'
   // Sanitize to prevent DB constraint violations from leaking Postgres errors
-  const shotType = VALID_SHOT_TYPES.has(rawShotType) ? rawShotType : 'unknown'
+  const shotType = validTypes.has(rawShotType) ? rawShotType : 'unknown'
 
   if (!file) {
     return NextResponse.json({ error: 'No video file provided' }, { status: 400 })

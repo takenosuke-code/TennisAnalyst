@@ -11,6 +11,15 @@ import type { SwingPhase } from './syncAlignment'
  */
 
 // ---------------------------------------------------------------------------
+// Canonical shot type lists (single source of truth for validation)
+// ---------------------------------------------------------------------------
+
+export const VALID_SHOT_TYPES = ['forehand', 'backhand', 'serve', 'volley', 'slice'] as const
+export const VALID_USER_SHOT_TYPES = [...VALID_SHOT_TYPES, 'unknown'] as const
+export type ShotType = (typeof VALID_SHOT_TYPES)[number]
+export type UserShotType = (typeof VALID_USER_SHOT_TYPES)[number]
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -351,6 +360,64 @@ export const SHOT_TYPE_CONFIGS: Record<string, ShotTypeConfig> = {
         phase: 'backswing',
         detect: (a) => (a.trunk_rotation ?? 0) > 60,
         tip: 'Too much backswing for a volley - keep it compact. Punch, don\'t swing.',
+      },
+    ],
+  },
+
+  slice: {
+    label: 'Slice',
+    emphasizedJoints: ['wrists', 'elbows', 'shoulders'],
+    secondaryJoints: ['knees', 'hips'],
+    keyAngles: [
+      'right_elbow',
+      'right_shoulder',
+      'trunk_rotation',
+      'right_knee',
+    ],
+    keyAngleSpecs: [
+      {
+        label: 'Elbow at Contact',
+        angleKey: 'right_elbow',
+        phase: 'contact' as SwingPhase,
+        idealRange: [110, 150] as [number, number],
+        coachingCue: 'Keep the arm relaxed through contact - carve under the ball with a smooth path.',
+      },
+      {
+        label: 'Shoulder at Contact',
+        angleKey: 'right_shoulder',
+        phase: 'contact' as SwingPhase,
+        idealRange: [60, 100] as [number, number],
+        coachingCue: 'Stay sideways through the slice - your chest should face the sideline at contact.',
+      },
+      {
+        label: 'Knee Bend',
+        angleKey: 'right_knee',
+        phase: 'preparation' as SwingPhase,
+        idealRange: [135, 160] as [number, number],
+        coachingCue: 'Get low and stay balanced - the slice needs a stable base.',
+      },
+    ],
+    kineticChainOrder: ['hip_rotation', 'trunk_rotation', 'right_shoulder', 'right_elbow'],
+    commonMistakes: [
+      'Chopping down on the ball instead of carving through it',
+      'Open racket face too early - slice floats with no bite',
+      'No shoulder turn - arm-only slice lacks depth and control',
+      'Standing too tall - no knee bend robs the shot of stability',
+    ],
+    mistakeChecks: [
+      {
+        id: 'no_shoulder_turn',
+        label: 'No shoulder turn',
+        phase: 'backswing' as SwingPhase,
+        detect: (a: JointAngles) => (a.trunk_rotation ?? 180) > 160,
+        tip: 'Turn your shoulders sideways - a good slice starts with a full unit turn.',
+      },
+      {
+        id: 'locked_arm',
+        label: 'Locked arm at contact',
+        phase: 'contact' as SwingPhase,
+        detect: (a: JointAngles) => (a.right_elbow ?? 0) > 170,
+        tip: 'Your arm is too stiff - keep a soft bend to guide the racket under the ball.',
       },
     ],
   },
