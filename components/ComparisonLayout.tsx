@@ -135,32 +135,8 @@ export default function ComparisonLayout({
 
   return (
     <div className="space-y-4">
-      {/* Mode switcher + phase badge */}
+      {/* Phase indicator badge */}
       <div className="flex items-center gap-3">
-        <div className="flex gap-2">
-          <button
-            onClick={() => setMode('side-by-side')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-              mode === 'side-by-side'
-                ? 'bg-white text-black'
-                : 'bg-white/10 text-white/60 hover:bg-white/15'
-            }`}
-          >
-            Side by Side
-          </button>
-          <button
-            onClick={() => setMode('overlay')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-              mode === 'overlay'
-                ? 'bg-white text-black'
-                : 'bg-white/10 text-white/60 hover:bg-white/15'
-            }`}
-          >
-            Overlay
-          </button>
-        </div>
-
-        {/* Phase indicator badge */}
         {activePhase && (
           <span className="px-3 py-1 rounded-full text-xs font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
             {PHASE_LABELS[activePhase]}
@@ -175,7 +151,7 @@ export default function ComparisonLayout({
         )}
       </div>
 
-      {mode === 'side-by-side' && (
+      {(
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <VideoCanvas
             src={userBlobUrl}
@@ -215,22 +191,6 @@ export default function ComparisonLayout({
         </div>
       )}
 
-      {mode === 'overlay' && (
-        <OverlayView
-          userBlobUrl={userBlobUrl}
-          userFrames={userFrames}
-          proFrames={proFrames}
-          visible={visible}
-          showSkeleton={showSkeleton}
-          showTrail={showTrail}
-          syncedTime={syncedTime}
-          onTimeUpdate={handleTimeUpdate}
-          onPlayPause={handlePlayPause}
-          proName={proName}
-          timeMapping={timeMapping}
-          proPlaybackRate={proPlaybackRate}
-        />
-      )}
     </div>
   )
 }

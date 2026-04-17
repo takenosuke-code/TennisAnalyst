@@ -16,6 +16,7 @@ export default function Nav() {
           <NavLink href="/analyze">Analyze</NavLink>
           <NavLink href="/compare">Compare</NavLink>
           <NavLink href="/pros">Pro Library</NavLink>
+          <NavLink href="/admin/tag-clips">Tag Clips</NavLink>
         </div>
       </div>
     </nav>

@@ -13,8 +13,8 @@ import type { PoseFrame, Landmark } from '@/lib/supabase'
 import { getProVideoUrl } from '@/lib/proVideoUrl'
 
 const ComparisonLayout = dynamic(() => import('@/components/ComparisonLayout'), { ssr: false })
-const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), { ssr: false })
 const MetricsComparison = dynamic(() => import('@/components/MetricsComparison'), { ssr: false })
+const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), { ssr: false })
 
 export default function ComparePage() {
   const { framesData, blobUrl, localVideoUrl } = usePoseStore()
@@ -282,7 +282,7 @@ export default function ComparePage() {
             </div>
           )}
 
-          {/* Key metrics comparison */}
+          {/* Key metrics (kinetic chain, mistakes, coaching cues) */}
           {canCompare && hasUserVideo && (
             <MetricsComparison
               userFrames={framesData}
@@ -299,7 +299,7 @@ export default function ComparePage() {
             />
           )}
 
-          {/* LLM analysis */}
+          {/* AI Coach chat */}
           {hasUserVideo && (
             <LLMCoachingPanel
               proSwing={compareMode === 'pro' ? activeProSwing : null}

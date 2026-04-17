@@ -234,42 +234,6 @@ export default function MetricsComparison({
         )}
       </div>
 
-      {/* Angle comparison table */}
-      <div className="px-4 py-3 space-y-1">
-        {/* Column headers */}
-        <div className="grid grid-cols-[1fr_60px_60px_60px_60px] gap-2 text-xs text-white/40 pb-1">
-          <span>Metric</span>
-          <span className="text-center">Phase</span>
-          <span className="text-center">You</span>
-          <span className="text-center">Pro</span>
-          <span className="text-center">Ideal</span>
-        </div>
-
-        {metrics.map(({ spec, userAngle, proAngle, level }) => {
-          const style = DEVIATION_STYLES[level]
-          return (
-            <div
-              key={`${spec.angleKey}-${spec.phase}`}
-              className={`grid grid-cols-[1fr_60px_60px_60px_60px] gap-2 items-center rounded-lg px-2 py-1.5 text-sm border ${style.bg} ${style.border}`}
-            >
-              <span className={`font-medium ${style.text}`}>{spec.label}</span>
-              <span className="text-center text-white/50 text-xs">
-                {PHASE_LABELS[spec.phase]}
-              </span>
-              <span className={`text-center font-mono ${style.text}`}>
-                {fmtAngle(userAngle)}
-              </span>
-              <span className="text-center font-mono text-white/60">
-                {fmtAngle(proAngle)}
-              </span>
-              <span className="text-center text-white/40 text-xs">
-                {spec.idealRange[0]}-{spec.idealRange[1]}°
-              </span>
-            </div>
-          )
-        })}
-      </div>
-
       {/* Kinetic Chain */}
       <div className="px-4 py-3 border-t border-white/10">
         <div className="flex items-center gap-2 mb-2">

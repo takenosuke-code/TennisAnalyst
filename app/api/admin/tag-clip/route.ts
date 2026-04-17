@@ -1,30 +1,64 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabase } from '@/lib/supabase'
+import { put } from '@vercel/blob'
 import { execFileSync } from 'child_process'
-import {
-  mkdtempSync,
-  unlinkSync,
-  existsSync,
-  mkdirSync,
-  renameSync,
-} from 'fs'
+import { mkdtempSync, unlinkSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import os from 'os'
 
 const VALID_SHOT_TYPES = ['forehand', 'backhand', 'serve', 'volley'] as const
 const VALID_CAMERA_ANGLES = ['side', 'behind', 'front', 'court_level'] as const
+const ALLOWED_SPEED_FACTORS = [1 / 4, 1 / 3, 1 / 2, 1, 2, 3, 4] as const
 
 type ShotType = (typeof VALID_SHOT_TYPES)[number]
 type CameraAngle = (typeof VALID_CAMERA_ANGLES)[number]
 
 const YOUTUBE_URL_PATTERN = /^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//
 
+function isAllowedSpeedFactor(n: number): boolean {
+  return ALLOWED_SPEED_FACTORS.some((f) => Math.abs(n - f) < 1e-6)
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0
+  if (!a.length) return b.length
+  if (!b.length) return a.length
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i)
+  for (let i = 1; i <= a.length; i++) {
+    let last = prev[0]
+    prev[0] = i
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j]
+      prev[j] =
+        a[i - 1] === b[j - 1]
+          ? last
+          : 1 + Math.min(last, prev[j - 1], prev[j])
+      last = tmp
+    }
+  }
+  return prev[b.length]
+}
+
+// Small helper: names are considered a "fuzzy duplicate" if they differ by
+// at most `maxDist` characters (case-insensitive). Threshold scales down for
+// short strings so "Tim" and "Tom" don't collide.
+function fuzzyMatchDistance(a: string, b: string): number {
+  return levenshtein(a.toLowerCase().trim(), b.toLowerCase().trim())
+}
+
+function fuzzyThreshold(name: string): number {
+  const len = name.trim().length
+  if (len <= 4) return 0
+  if (len <= 8) return 1
+  return 2
+}
+
 function sanitizeFilename(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
 }
 
 function validateBody(body: Record<string, unknown>): string | null {
-  const { youtubeUrl, startTime, endTime, proName, shotType, cameraAngle } =
+  const { youtubeUrl, startTime, endTime, proName, shotType, cameraAngle, speedFactor } =
     body
 
   if (!youtubeUrl || typeof youtubeUrl !== 'string') {
@@ -64,6 +98,12 @@ function validateBody(body: Record<string, unknown>): string | null {
     return `cameraAngle must be one of: ${VALID_CAMERA_ANGLES.join(', ')}`
   }
 
+  if (speedFactor !== undefined) {
+    if (typeof speedFactor !== 'number' || !isAllowedSpeedFactor(speedFactor)) {
+      return 'speedFactor must be one of: 0.25, 0.333…, 0.5, 1, 2, 3, 4'
+    }
+  }
+
   return null
 }
 
@@ -91,6 +131,8 @@ export async function POST(request: NextRequest) {
     nationality,
     shotType,
     cameraAngle,
+    speedFactor: rawSpeedFactor,
+    confirmNewPro,
   } = body as {
     youtubeUrl: string
     startTime: number
@@ -99,90 +141,151 @@ export async function POST(request: NextRequest) {
     nationality?: string
     shotType: ShotType
     cameraAngle: CameraAngle
+    speedFactor?: number
+    confirmNewPro?: boolean
   }
 
-  const duration = endTime - startTime
+  const speedFactor = rawSpeedFactor ?? 1
+  const sourceDuration = endTime - startTime
+  const outputDuration = sourceDuration / speedFactor
+  const trimmedProName = proName.trim()
   const projectRoot = process.cwd()
   const ffmpegBin = join(projectRoot, 'pro-videos', 'bin', 'ffmpeg')
-  const proVideosDir = join(projectRoot, 'public', 'pro-videos')
 
-  // Ensure public/pro-videos/ directory exists
-  if (!existsSync(proVideosDir)) {
-    mkdirSync(proVideosDir, { recursive: true })
+  // Step 0: Resolve the pro row BEFORE downloading anything — saves the user
+  // from waiting 30–60s on yt-dlp just to hit a name-typo rejection.
+  const { data: allPros, error: prosFetchErr } = await supabase
+    .from('pros')
+    .select('id, name')
+  if (prosFetchErr) {
+    return NextResponse.json(
+      { error: `Failed to fetch pros: ${prosFetchErr.message}` },
+      { status: 500 }
+    )
+  }
+
+  const exactMatch = (allPros ?? []).find(
+    (p) => p.name.trim().toLowerCase() === trimmedProName.toLowerCase()
+  )
+
+  const resolvedPro: { id: string; name: string } | null = exactMatch ?? null
+
+  if (!resolvedPro && !confirmNewPro) {
+    const threshold = fuzzyThreshold(trimmedProName)
+    if (threshold > 0) {
+      const suggestions = (allPros ?? [])
+        .map((p) => ({ name: p.name, dist: fuzzyMatchDistance(trimmedProName, p.name) }))
+        .filter((s) => s.dist > 0 && s.dist <= threshold)
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, 5)
+        .map((s) => s.name)
+      if (suggestions.length > 0) {
+        return NextResponse.json(
+          {
+            error: `"${trimmedProName}" looks close to existing pro(s). Confirm this is a new pro or use an existing name.`,
+            suggestions,
+            code: 'fuzzy_match',
+          },
+          { status: 409 }
+        )
+      }
+    }
   }
 
   const tmpDir = mkdtempSync(join(os.tmpdir(), 'tag-clip-'))
   const tmpFullVideo = join(tmpDir, 'full.mp4')
-  const sanitizedName = sanitizeFilename(proName)
+  const sanitizedName = sanitizeFilename(resolvedPro?.name ?? trimmedProName)
   const filename = `${sanitizedName}_${shotType}_${cameraAngle}_${Date.now()}.mp4`
   const trimmedPath = join(tmpDir, 'trimmed.mp4')
-  const finalPath = join(proVideosDir, filename)
 
   try {
-    // Step 1: Download the video with yt-dlp (using execFileSync to avoid shell injection)
-    console.log('[tag-clip] Downloading video from:', youtubeUrl)
+    // Step 1: Download ONLY the needed segment with yt-dlp --download-sections
+    // Tell yt-dlp where our local ffmpeg is so it can do partial downloads.
+    const ffmpegDir = join(projectRoot, 'pro-videos', 'bin')
+    const sectionArg = `*${startTime}-${endTime}`
+    console.log('[tag-clip] Downloading segment:', sectionArg, 'from:', youtubeUrl)
     execFileSync(
       'yt-dlp',
       [
         '-f',
-        'mp4[height<=720]/best[ext=mp4]/best',
+        'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        '--merge-output-format',
+        'mp4',
         '--no-playlist',
+        '--download-sections',
+        sectionArg,
+        '--force-keyframes-at-cuts',
+        '--ffmpeg-location',
+        ffmpegDir,
         '-o',
         tmpFullVideo,
         youtubeUrl,
       ],
-      { stdio: 'pipe', timeout: 120_000 }
+      { stdio: 'pipe', timeout: 300_000 }
     )
 
-    // Step 2: Trim with ffmpeg (using execFileSync to avoid shell injection)
-    console.log('[tag-clip] Trimming clip:', { startTime, duration })
-    execFileSync(
-      ffmpegBin,
-      [
-        '-y',
-        '-ss',
-        String(startTime),
-        '-i',
-        tmpFullVideo,
-        '-t',
-        String(duration),
-        '-c:v',
-        'libx264',
-        '-preset',
-        'fast',
-        '-crf',
-        '23',
-        '-c:a',
-        'aac',
-        '-movflags',
-        '+faststart',
-        trimmedPath,
-      ],
-      { stdio: 'pipe', timeout: 60_000 }
-    )
-
-    // Step 3: Move trimmed clip to public/pro-videos/
-    renameSync(trimmedPath, finalPath)
-
-    // Step 4: Upsert the pro in Supabase
-    const { data: existingPros, error: lookupError } = await supabase
-      .from('pros')
-      .select('id, name')
-      .eq('name', proName)
-      .limit(1)
-
-    if (lookupError) {
-      throw new Error(`Failed to look up pro: ${lookupError.message}`)
+    // Step 2: Finalize clip.
+    //  - speedFactor === 1: stream copy (lossless) + faststart
+    //  - otherwise: re-encode with setpts filter, drop audio (sped/slowed audio is noise)
+    if (speedFactor === 1) {
+      console.log('[tag-clip] Stream-copying clip (no speed change)')
+      execFileSync(
+        ffmpegBin,
+        [
+          '-y',
+          '-i',
+          tmpFullVideo,
+          '-c',
+          'copy',
+          '-movflags',
+          '+faststart',
+          trimmedPath,
+        ],
+        { stdio: 'pipe', timeout: 60_000 }
+      )
+    } else {
+      console.log(`[tag-clip] Re-encoding clip at speedFactor=${speedFactor}`)
+      execFileSync(
+        ffmpegBin,
+        [
+          '-y',
+          '-i',
+          tmpFullVideo,
+          '-filter:v',
+          `setpts=${1 / speedFactor}*PTS`,
+          '-an',
+          '-c:v',
+          'libx264',
+          '-preset',
+          'slow',
+          '-crf',
+          '18',
+          '-movflags',
+          '+faststart',
+          trimmedPath,
+        ],
+        { stdio: 'pipe', timeout: 120_000 }
+      )
     }
 
-    let pro: { id: string; name: string }
+    // Step 3: Upload trimmed clip to Vercel Blob so it plays on any device.
+    console.log('[tag-clip] Uploading to Vercel Blob:', filename)
+    const clipBuffer = readFileSync(trimmedPath)
+    const blob = await put(`pro-videos/${filename}`, clipBuffer, {
+      access: 'public',
+      contentType: 'video/mp4',
+    })
+    const videoUrl = blob.url
 
-    if (existingPros && existingPros.length > 0) {
-      pro = existingPros[0]
+    // Step 4: Resolve or create the pro row.
+    // Existing pros were matched in Step 0; here we only have to create new ones.
+    let pro: { id: string; name: string }
+    if (resolvedPro) {
+      pro = resolvedPro
     } else {
       const { data: newPro, error: insertError } = await supabase
         .from('pros')
-        .insert({ name: proName, nationality: nationality ?? null })
+        .insert({ name: trimmedProName, nationality: nationality ?? null })
         .select('id, name')
         .single()
 
@@ -195,8 +298,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Step 5: Insert the pro_swing
-    const videoUrl = `/pro-videos/${filename}`
-    const durationMs = Math.round(duration * 1000)
+    const durationMs = Math.round(outputDuration * 1000)
 
     const { data: swing, error: swingError } = await supabase
       .from('pro_swings')
@@ -226,6 +328,37 @@ export async function POST(request: NextRequest) {
 
     console.log('[tag-clip] Successfully created swing:', swing.id)
 
+    // Step 6: Auto-extract keypoints from the local tmp clip (still on disk
+    // until the finally block runs). Reading from blob would re-download.
+    let frameCount = 0
+    try {
+      const scriptPath = join(projectRoot, 'railway-service', 'extract_clip_keypoints.py')
+      if (existsSync(scriptPath) && existsSync(trimmedPath)) {
+        console.log('[tag-clip] Extracting keypoints...')
+        const kpOutput = execFileSync(
+          'arch',
+          ['-arm64', 'python3', scriptPath, trimmedPath],
+          { timeout: 120_000, maxBuffer: 50 * 1024 * 1024 }
+        )
+        const keypoints = JSON.parse(kpOutput.toString())
+        if (keypoints.frame_count > 0) {
+          await supabase
+            .from('pro_swings')
+            .update({
+              keypoints_json: keypoints,
+              frame_count: keypoints.frame_count,
+              duration_ms: keypoints.duration_ms,
+              fps: keypoints.fps_sampled,
+            })
+            .eq('id', swing.id)
+          frameCount = keypoints.frame_count
+          console.log(`[tag-clip] Extracted ${frameCount} frames`)
+        }
+      }
+    } catch (kpErr) {
+      console.warn('[tag-clip] Keypoint extraction failed (clip still saved):', kpErr instanceof Error ? kpErr.message : kpErr)
+    }
+
     return NextResponse.json({
       success: true,
       pro: { id: pro.id, name: pro.name },
@@ -234,6 +367,7 @@ export async function POST(request: NextRequest) {
         shot_type: swing.shot_type,
         video_url: swing.video_url,
       },
+      frameCount,
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error'

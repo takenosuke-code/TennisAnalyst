@@ -38,6 +38,7 @@ interface SavedClip {
   shotType: ShotType
   cameraAngle: CameraAngle
   duration: number
+  speedFactor: number
   status: 'saved' | 'error'
 }
 
@@ -45,6 +46,21 @@ interface ProEntry {
   name: string
   nationality?: string
 }
+
+type SpeedOption = {
+  label: string
+  factor: number
+}
+
+const SPEED_OPTIONS: SpeedOption[] = [
+  { label: '1/4×', factor: 1 / 4 },
+  { label: '1/3×', factor: 1 / 3 },
+  { label: '1/2×', factor: 1 / 2 },
+  { label: 'Normal', factor: 1 },
+  { label: '2×', factor: 2 },
+  { label: '3×', factor: 3 },
+  { label: '4×', factor: 4 },
+]
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                           */
@@ -64,6 +80,12 @@ function formatTime(seconds: number | null): string {
   const mins = Math.floor(seconds / 60)
   const secs = seconds % 60
   return `${mins}:${secs < 10 ? '0' : ''}${secs.toFixed(1)}`
+}
+
+// Must match the server-side convention in /api/admin/tag-clip so downloaded
+// files can later be matched to DB rows by filename.
+function sanitizeFilename(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
 }
 
 /* ------------------------------------------------------------------ */
@@ -95,6 +117,18 @@ export default function TagClipsPage() {
   const [saving, setSaving] = useState(false)
   const [saveResult, setSaveResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const [savedClips, setSavedClips] = useState<SavedClip[]>([])
+
+  /* --- Preview state --- */
+  const [speedFactor, setSpeedFactor] = useState<number>(1)
+  const [previewing, setPreviewing] = useState(false)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  // The speedFactor that the current previewUrl was generated with.
+  // Save sends this value, so the user cannot save at a speed they haven't verified.
+  const [previewedSpeedFactor, setPreviewedSpeedFactor] = useState<number | null>(null)
+
+  /* --- Fuzzy-match guard (server rejected the save — user needs to confirm) --- */
+  const [fuzzySuggestions, setFuzzySuggestions] = useState<string[] | null>(null)
 
   /* ---------------------------------------------------------------- */
   /*  Load YouTube IFrame API                                         */
@@ -163,6 +197,12 @@ export default function TagClipsPage() {
   /* ---------------------------------------------------------------- */
   /*  Handlers                                                        */
   /* ---------------------------------------------------------------- */
+  const clearPreview = useCallback(() => {
+    setPreviewUrl(null)
+    setPreviewedSpeedFactor(null)
+    setPreviewError(null)
+  }, [])
+
   const handleLoad = useCallback(() => {
     setUrlError(null)
     const id = extractVideoId(youtubeUrl)
@@ -174,19 +214,22 @@ export default function TagClipsPage() {
     setStartTime(null)
     setEndTime(null)
     setSaveResult(null)
-  }, [youtubeUrl])
+    clearPreview()
+  }, [youtubeUrl, clearPreview])
 
   const handleMarkStart = useCallback(() => {
     if (!playerRef.current) return
     setStartTime(playerRef.current.getCurrentTime())
     setSaveResult(null)
-  }, [])
+    clearPreview()
+  }, [clearPreview])
 
   const handleMarkEnd = useCallback(() => {
     if (!playerRef.current) return
     setEndTime(playerRef.current.getCurrentTime())
     setSaveResult(null)
-  }, [])
+    clearPreview()
+  }, [clearPreview])
 
   const handleReset = useCallback(() => {
     setStartTime(null)
@@ -196,11 +239,68 @@ export default function TagClipsPage() {
     setShotType(null)
     setCameraAngle(null)
     setSaveResult(null)
-  }, [])
+    setSpeedFactor(1)
+    clearPreview()
+  }, [clearPreview])
+
+  const handlePreview = useCallback(async () => {
+    if (startTime === null || endTime === null || endTime <= startTime) return
+    setPreviewing(true)
+    setPreviewError(null)
+    setPreviewUrl(null)
+    try {
+      const res = await fetch('/api/admin/preview-clip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ youtubeUrl, startTime, endTime, speedFactor }),
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(text || `Server error ${res.status}`)
+      }
+      const data = (await res.json()) as { videoUrl: string }
+      setPreviewUrl(data.videoUrl)
+      setPreviewedSpeedFactor(speedFactor)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      setPreviewError(message)
+    } finally {
+      setPreviewing(false)
+    }
+  }, [youtubeUrl, startTime, endTime, speedFactor])
+
+  const handleSpeedChange = useCallback(
+    (f: number) => {
+      setSpeedFactor(f)
+      if (previewedSpeedFactor !== null && previewedSpeedFactor !== f) {
+        // Previewed clip no longer matches the selected speed — require a re-preview.
+        setPreviewUrl(null)
+      }
+    },
+    [previewedSpeedFactor],
+  )
 
   const proNameIsKnown = pros.some(
     (p) => p.name.toLowerCase() === proName.trim().toLowerCase(),
   )
+
+  const canDownload =
+    previewUrl !== null &&
+    previewedSpeedFactor === speedFactor &&
+    proName.trim() !== '' &&
+    shotType !== null &&
+    cameraAngle !== null
+
+  const handleDownload = useCallback(() => {
+    if (!canDownload || !previewUrl || !shotType || !cameraAngle) return
+    const filename = `${sanitizeFilename(proName)}_${shotType}_${cameraAngle}_${Date.now()}.mp4`
+    const a = document.createElement('a')
+    a.href = previewUrl
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  }, [canDownload, previewUrl, proName, shotType, cameraAngle])
 
   const canSave =
     videoId &&
@@ -212,10 +312,11 @@ export default function TagClipsPage() {
     cameraAngle !== null &&
     !saving
 
-  const handleSave = useCallback(async () => {
+  const handleSave = useCallback(async (opts?: { confirmNewPro?: boolean }) => {
     if (!canSave) return
     setSaving(true)
     setSaveResult(null)
+    setFuzzySuggestions(null)
 
     const body = {
       youtubeUrl,
@@ -225,6 +326,8 @@ export default function TagClipsPage() {
       nationality: proNameIsKnown ? undefined : nationality.trim() || undefined,
       shotType,
       cameraAngle,
+      speedFactor,
+      confirmNewPro: opts?.confirmNewPro ?? false,
     }
 
     try {
@@ -233,6 +336,17 @@ export default function TagClipsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
+      if (res.status === 409) {
+        const data = (await res.json().catch(() => null)) as
+          | { error?: string; suggestions?: string[]; code?: string }
+          | null
+        if (data?.code === 'fuzzy_match' && Array.isArray(data.suggestions)) {
+          setFuzzySuggestions(data.suggestions)
+          setSaveResult({ ok: false, msg: data.error ?? 'Possible typo — confirm name.' })
+          setSaving(false)
+          return
+        }
+      }
       if (!res.ok) {
         const text = await res.text()
         throw new Error(text || `Server error ${res.status}`)
@@ -244,7 +358,8 @@ export default function TagClipsPage() {
           proName: proName.trim(),
           shotType: shotType!,
           cameraAngle: cameraAngle!,
-          duration: endTime! - startTime!,
+          duration: (endTime! - startTime!) / speedFactor,
+          speedFactor,
           status: 'saved',
         },
       ])
@@ -258,7 +373,11 @@ export default function TagClipsPage() {
           proName: proName.trim(),
           shotType: shotType ?? 'forehand',
           cameraAngle: cameraAngle ?? 'side',
-          duration: endTime !== null && startTime !== null ? endTime - startTime : 0,
+          duration:
+            endTime !== null && startTime !== null
+              ? (endTime - startTime) / speedFactor
+              : 0,
+          speedFactor,
           status: 'error',
         },
       ])
@@ -275,6 +394,7 @@ export default function TagClipsPage() {
     nationality,
     shotType,
     cameraAngle,
+    speedFactor,
     handleReset,
   ])
 
@@ -380,6 +500,81 @@ export default function TagClipsPage() {
         </div>
       )}
 
+      {/* Preview + Speed */}
+      {videoId && startTime !== null && endTime !== null && endTime > startTime && (
+        <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6 space-y-5">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <h2 className="text-lg font-semibold text-white">Preview & Speed</h2>
+            <button
+              onClick={handlePreview}
+              disabled={previewing}
+              className="px-5 py-2 bg-white/10 hover:bg-white/15 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl border border-white/10 transition-colors flex items-center gap-2 text-sm"
+            >
+              {previewing && (
+                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              )}
+              {previewing ? 'Generating...' : previewUrl ? 'Re-generate Preview' : 'Preview Clip'}
+            </button>
+          </div>
+
+          {/* Speed selector */}
+          <div>
+            <label className="block text-sm font-medium text-white/70 mb-2">
+              Playback Speed{' '}
+              <span className="text-white/40">(applied when saved — audio dropped if not Normal)</span>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {SPEED_OPTIONS.map((opt) => (
+                <button
+                  key={opt.label}
+                  onClick={() => handleSpeedChange(opt.factor)}
+                  className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors border ${
+                    Math.abs(speedFactor - opt.factor) < 1e-6
+                      ? 'bg-emerald-500 border-emerald-500 text-white'
+                      : 'bg-white/5 border-white/10 text-white/60 hover:bg-white/10 hover:text-white'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {previewError && (
+            <p className="text-red-400 text-sm whitespace-pre-wrap break-words">
+              Preview failed: {previewError}
+            </p>
+          )}
+
+          {previewUrl ? (
+            <div className="rounded-xl border border-white/10 bg-black overflow-hidden">
+              <video
+                key={previewUrl}
+                src={previewUrl}
+                controls
+                className="w-full aspect-video"
+              />
+              <div className="px-4 py-2 text-xs text-white/50 border-t border-white/10">
+                Previewed at{' '}
+                <span className="text-white/80 font-mono">
+                  {SPEED_OPTIONS.find((o) => Math.abs(o.factor - (previewedSpeedFactor ?? 1)) < 1e-6)?.label ?? '1×'}
+                </span>
+                . If this looks right, fill out the metadata below and Save.
+              </div>
+            </div>
+          ) : (
+            <p className="text-white/40 text-sm">
+              {previewedSpeedFactor !== null && previewedSpeedFactor !== speedFactor
+                ? 'Speed changed — click “Re-generate Preview” to see the new result.'
+                : 'No preview yet. Click “Preview Clip” to download the selected segment and verify quality before saving.'}
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Metadata form */}
       {videoId && (
         <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6 mb-6 space-y-5">
@@ -394,7 +589,10 @@ export default function TagClipsPage() {
               type="text"
               list="pro-names"
               value={proName}
-              onChange={(e) => setProName(e.target.value)}
+              onChange={(e) => {
+                setProName(e.target.value)
+                setFuzzySuggestions(null)
+              }}
               placeholder="e.g. Roger Federer"
               className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50 transition-colors"
             />
@@ -403,6 +601,44 @@ export default function TagClipsPage() {
                 <option key={p.name} value={p.name} />
               ))}
             </datalist>
+
+            {fuzzySuggestions && fuzzySuggestions.length > 0 && (
+              <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 space-y-3">
+                <p className="text-sm text-amber-200">
+                  <strong>Did you mean:</strong> “{fuzzySuggestions[0]}”?
+                  {fuzzySuggestions.length > 1 && (
+                    <span className="text-amber-200/60">
+                      {' '}
+                      (also: {fuzzySuggestions.slice(1).map((s) => `“${s}”`).join(', ')})
+                    </span>
+                  )}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {fuzzySuggestions.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => {
+                        setProName(s)
+                        setFuzzySuggestions(null)
+                      }}
+                      className="px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-500 hover:bg-emerald-400 text-white transition-colors"
+                    >
+                      Use “{s}”
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => {
+                      setFuzzySuggestions(null)
+                      handleSave({ confirmNewPro: true })
+                    }}
+                    disabled={saving}
+                    className="px-3 py-1.5 text-xs font-medium rounded-lg bg-white/10 hover:bg-white/15 text-white/80 border border-white/10 transition-colors"
+                  >
+                    Create new pro anyway
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Nationality — only shown for new pros */}
@@ -475,7 +711,7 @@ export default function TagClipsPage() {
       {videoId && (
         <div className="flex items-center gap-4 mb-6">
           <button
-            onClick={handleSave}
+            onClick={() => handleSave()}
             disabled={!canSave}
             className="px-6 py-3 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors flex items-center gap-2"
           >
@@ -501,6 +737,23 @@ export default function TagClipsPage() {
               </svg>
             )}
             {saving ? 'Saving...' : 'Save Clip'}
+          </button>
+
+          <button
+            onClick={handleDownload}
+            disabled={!canDownload}
+            title={
+              !previewUrl
+                ? 'Generate a preview first'
+                : previewedSpeedFactor !== speedFactor
+                  ? 'Re-generate preview at the selected speed first'
+                  : !proName.trim() || !shotType || !cameraAngle
+                    ? 'Fill in pro, shot, and angle first'
+                    : 'Download the previewed clip to your computer'
+            }
+            className="px-6 py-3 bg-sky-500 hover:bg-sky-400 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors"
+          >
+            Download Clip
           </button>
 
           <button
@@ -541,6 +794,7 @@ export default function TagClipsPage() {
                   <th className="px-4 py-3 font-medium">Shot</th>
                   <th className="px-4 py-3 font-medium">Angle</th>
                   <th className="px-4 py-3 font-medium">Duration</th>
+                  <th className="px-4 py-3 font-medium">Speed</th>
                   <th className="px-4 py-3 font-medium">Status</th>
                 </tr>
               </thead>
@@ -554,6 +808,9 @@ export default function TagClipsPage() {
                     </td>
                     <td className="px-4 py-3 text-white/70 font-mono">
                       {clip.duration.toFixed(1)}s
+                    </td>
+                    <td className="px-4 py-3 text-white/70 font-mono">
+                      {SPEED_OPTIONS.find((o) => Math.abs(o.factor - clip.speedFactor) < 1e-6)?.label ?? `${clip.speedFactor}×`}
                     </td>
                     <td className="px-4 py-3">
                       <span

@@ -76,8 +76,8 @@ export async function POST(request: NextRequest) {
   try {
     const stdout = await new Promise<string>((resolve, reject) => {
       execFile(
-        'python3',
-        [scriptPath, videoPath],
+        'arch',
+        ['-arm64', 'python3', scriptPath, videoPath],
         { timeout: EXTRACT_TIMEOUT_MS, maxBuffer: 50 * 1024 * 1024 },
         (error, stdout, stderr) => {
           if (error) {

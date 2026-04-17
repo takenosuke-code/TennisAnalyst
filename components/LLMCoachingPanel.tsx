@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useAnalysisStore, usePoseStore } from '@/store'
 import type { ProSwing, PoseFrame } from '@/lib/supabase'
 
@@ -16,9 +16,69 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
     useAnalysisStore()
   const { framesData, sessionId } = usePoseStore()
 
+  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([])
+  const [chatInput, setChatInput] = useState('')
+  const [chatLoading, setChatLoading] = useState(false)
+  const chatEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (chatMessages.length > 0) {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [chatMessages, chatLoading])
+
   const canAnalyze =
     framesData.length > 0 &&
     (compareMode === 'custom' || proSwing !== null)
+
+  const sendChatMessage = async () => {
+    const text = chatInput.trim()
+    if (!text || chatLoading) return
+    setChatInput('')
+
+    const userMsg = { role: 'user' as const, content: text }
+    const allMessages = [...chatMessages, userMsg]
+    setChatMessages(allMessages)
+    setChatLoading(true)
+
+    try {
+      const res = await fetch('/api/pro-coach', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          proSwingId: proSwing?.id,
+          messages: allMessages.map((m) => ({ role: m.role, content: m.content })),
+          context: feedback ? `Previous analysis:\n${feedback}` : undefined,
+        }),
+      })
+
+      if (!res.ok || !res.body) throw new Error('Chat failed')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let assistantContent = ''
+
+      setChatMessages((prev) => [...prev, { role: 'assistant', content: '' }])
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        assistantContent += decoder.decode(value, { stream: true })
+        const content = assistantContent
+        setChatMessages((prev) => [
+          ...prev.slice(0, -1),
+          { role: 'assistant', content },
+        ])
+      }
+    } catch {
+      setChatMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: 'Sorry, something went wrong. Please try again.' },
+      ])
+    } finally {
+      setChatLoading(false)
+    }
+  }
 
   const runAnalysis = async () => {
     if (!canAnalyze || loading) return
@@ -129,7 +189,7 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
 
       {/* Content */}
       {open && (
-        <div className="bg-black/20 p-4 max-h-96 overflow-y-auto">
+        <div className="bg-black/20 p-4 max-h-[500px] overflow-y-auto">
           {!canAnalyze && !loading && !feedback && (
             <p className="text-white/40 text-sm text-center py-4">
               {framesData.length === 0
@@ -147,6 +207,49 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
               )}
             </div>
           )}
+
+          {/* Chat messages */}
+          {chatMessages.length > 0 && (
+            <div className="mt-4 border-t border-white/10 pt-4 space-y-3">
+              {chatMessages.map((msg, i) => (
+                <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] rounded-xl px-3 py-2 text-sm ${
+                    msg.role === 'user'
+                      ? 'bg-emerald-500/20 text-emerald-100'
+                      : 'bg-white/5 text-white/80'
+                  }`}>
+                    <MarkdownText text={msg.content} />
+                    {chatLoading && i === chatMessages.length - 1 && msg.role === 'assistant' && (
+                      <span className="inline-block w-1.5 h-4 bg-emerald-400 animate-pulse ml-0.5 rounded-sm" />
+                    )}
+                  </div>
+                </div>
+              ))}
+              <div ref={chatEndRef} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Chat input — visible after analysis is done */}
+      {open && feedback && !loading && (
+        <div className="border-t border-white/10 p-3 flex gap-2">
+          <input
+            type="text"
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendChatMessage()}
+            placeholder="Ask a follow-up question..."
+            className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50"
+            disabled={chatLoading}
+          />
+          <button
+            onClick={sendChatMessage}
+            disabled={!chatInput.trim() || chatLoading}
+            className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 disabled:bg-white/10 disabled:text-white/30 text-white text-sm font-medium rounded-lg transition-colors"
+          >
+            Send
+          </button>
         </div>
       )}
     </div>

@@ -43,8 +43,10 @@ next-env.d.ts
 # large video/model files — never commit these
 pro-videos/
 public/pro-videos/
+public/clip-previews/
 *.mp4
 *.task
+*.zip
 
 # python
 __pycache__/
