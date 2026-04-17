@@ -13,7 +13,15 @@ export async function POST(request: NextRequest) {
   let body
   try { body = await request.json() }
   catch { return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }) }
-  const { sessionId, proSwingId, keypointsJson: inlineKeypoints } = body
+  const {
+    sessionId,
+    proSwingId,
+    keypointsJson: inlineKeypoints,
+    compareKeypointsJson,
+    userFocus,
+  } = body
+  const focus =
+    typeof userFocus === 'string' && userFocus.trim() ? userFocus.trim() : null
 
   // Get pro swing data if proSwingId is provided
   let proSwing: { keypoints_json?: KeypointsJson; pros?: { name: string }; shot_type?: string } | null = null
@@ -65,6 +73,40 @@ export async function POST(request: NextRequest) {
   // Build compact angle summary for the user
   const userSummary = buildAngleSummary(userKeypoints.frames)
 
+  // Optional second-take keypoints for self-compare mode. Validated the same
+  // way as user keypoints to avoid crashes inside buildAngleSummary.
+  let compareSummary: string | null = null
+  if (compareKeypointsJson && typeof compareKeypointsJson === 'object') {
+    const cmp = compareKeypointsJson as KeypointsJson
+    if (Array.isArray(cmp.frames) && cmp.frames.length > 0) {
+      const cmpValid = cmp.frames.every(
+        (f) => f !== null && typeof f === 'object' && typeof f.joint_angles === 'object',
+      )
+      if (!cmpValid) {
+        return NextResponse.json(
+          { error: 'Invalid compareKeypointsJson format' },
+          { status: 400 },
+        )
+      }
+      compareSummary = buildAngleSummary(cmp.frames)
+    }
+  }
+
+  // Shared coaching rubric: read the user's actual data and calibrate the
+  // severity of advice to how polished the technique already is. Without this,
+  // the model tends to give the same "bend your knees more" notes to a pro and
+  // a first-timer.
+  const SKILL_CALIBRATION = `READ THE SKILL LEVEL FIRST:
+Before giving any advice, look at the joint angles and phase timing. Judge how refined this swing already is.
+- Polished / near-pro mechanics: give SUBTLE refinements, not rebuilds. Telling an advanced player to "bend your knees more" when their legs are already loaded is useless. Find the 5% that would make them even better.
+- Solid intermediate: point to the 2 or 3 biggest gaps and give practical drills.
+- Still developing: focus on foundations, and pick the ONE thing that unlocks everything else.
+Match the advice to what the swing actually needs. Never default to generic cues.`
+
+  const focusBlock = focus
+    ? `\nTHE PLAYER SPECIFICALLY WANTS FEEDBACK ON: "${focus}"\nWeave a direct answer to this into your response. You can still cover the essentials, but this is their priority.\n`
+    : ''
+
   let prompt: string
 
   if (proSwing) {
@@ -88,12 +130,15 @@ export async function POST(request: NextRequest) {
 
     prompt = `You are a tennis coach helping a player model their ${shotType} after ${proName}'s. You just watched their swing side by side with ${proName}'s video. Your whole job is to help them move more like ${proName}.
 
+${SKILL_CALIBRATION}
+${focusBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Describe everything in feel and body language.
 - NEVER rate or score the player. No X/100, no percentages, no grades. Just give advice.
 - NEVER use em dashes. Use commas or periods.
 - Talk like a real person. Short sentences. "You" and "your" constantly.
 - Reference ${proName} by name frequently. Compare what the player does to what ${proName} does. "Watch how ${proName} sits into his legs here" or "See how ${proName}'s hips fire before the arm even starts moving."
+- If the player's swing is already close to ${proName}'s, SAY THAT and give small tweaks. Don't invent problems.
 
 Use the data below to understand what's happening, but ONLY talk in coaching language. The player never sees these numbers.
 
@@ -121,17 +166,60 @@ Same approach. What ${proName} does, why it works, one thing to try.
 Three things to focus on next time you hit, all aimed at making your swing look and feel more like ${proName}'s. One sentence each.
 
 Keep it under 350 words. Sound like a coach who's watched a lot of ${proName} and knows exactly what makes that swing tick.`
+  } else if (compareSummary) {
+    // Self-compare mode: same player, two takes. Coach for CONSISTENCY —
+    // spot what's drifting between the two swings rather than rebuilding either.
+    const soloRef = getBiomechanicsReference('all')
+
+    prompt = `You are a tennis coach watching the same player hit two different swings back to back. Your job is consistency — help them spot what's staying the same and what's drifting between takes.
+${focusBlock}
+STRICT RULES:
+- NEVER mention degrees, angles, or numbers of any kind. Describe everything in feel and body language.
+- NEVER rate or score the player. No X/100, no percentages, no grades.
+- NEVER use em dashes. Use commas or periods.
+- Do NOT suggest rebuilds. Both swings come from the same player, so pick the cleaner take as the anchor and talk about matching to it.
+- Be SPECIFIC about differences: "your hips turned further in take 1 but your arm lagged behind in take 2", not "your swing was inconsistent".
+
+Use the data below to understand what's happening, but ONLY talk in coaching language.
+
+REFERENCE: ${soloRef}
+TAKE 1 DATA: ${userSummary}
+TAKE 2 DATA: ${compareSummary}
+
+Respond in this format:
+
+## What's Consistent
+Two or three sentences on what they're doing the same in both takes. Reinforce what's working.
+
+## What's Drifting
+
+**1. [specific element]**
+What changed between the two takes, which take was cleaner, and one feel-based cue to anchor the next swing.
+
+**2. [specific element]**
+Same structure.
+
+**3. [specific element]**
+Same structure.
+
+## Lock It In
+Two short sentences on what to groove next session so these swings match.
+
+Keep it under 350 words. Sound like a coach helping them tighten up.`
   } else {
-    // Solo / custom comparison mode - general coaching without a pro reference
+    // Solo mode: single clip, general coaching without any reference.
     const soloRef = getBiomechanicsReference('all')
 
     prompt = `You are a tennis coach talking to a player right after watching their swing on video. Be encouraging and practical.
 
+${SKILL_CALIBRATION}
+${focusBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Not even once. Describe everything in feel and body language.
 - NEVER rate or score the player (no X/100, no percentages, no grades). Just give advice.
 - NEVER use em dashes. Use commas or periods.
 - Talk like a real person. Short sentences. "You" and "your" constantly.
+- If the swing is already clean, SAY THAT and give fine-tuning cues. Don't fabricate problems.
 
 Use the data below to understand what's happening, but ONLY talk in coaching language. The player never sees these numbers.
 

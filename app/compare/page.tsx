@@ -304,6 +304,7 @@ export default function ComparePage() {
             <LLMCoachingPanel
               proSwing={compareMode === 'pro' ? activeProSwing : null}
               compareMode={compareMode}
+              compareFrames={compareMode === 'custom' ? secondaryFramesData : undefined}
             />
           )}
         </div>

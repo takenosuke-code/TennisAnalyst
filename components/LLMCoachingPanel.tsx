@@ -8,9 +8,12 @@ interface LLMCoachingPanelProps {
   proSwing: ProSwing | null
   compareMode?: 'pro' | 'custom'
   frames?: PoseFrame[]
+  // Second-take frames. When present in 'custom' mode, analyze runs in
+  // self-compare mode (consistency check between the two takes).
+  compareFrames?: PoseFrame[]
 }
 
-export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames }: LLMCoachingPanelProps) {
+export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames, compareFrames }: LLMCoachingPanelProps) {
   const [open, setOpen] = useState(false)
   const { feedback, loading, setFeedback, appendFeedback, setLoading, reset } =
     useAnalysisStore()
@@ -19,6 +22,7 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([])
   const [chatInput, setChatInput] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
+  const [userFocus, setUserFocus] = useState('')
   const chatEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -93,6 +97,19 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
       frames: effectiveFrames,
     }
 
+    // Pass the second take only in custom-compare mode. In pro mode, the pro
+    // reference wins even if compareFrames happens to be set.
+    const compareKeypointsJson =
+      compareMode === 'custom' && !proSwing && compareFrames && compareFrames.length > 0
+        ? {
+            fps_sampled: 30,
+            frame_count: compareFrames.length,
+            frames: compareFrames,
+          }
+        : undefined
+
+    const trimmedFocus = userFocus.trim()
+
     try {
       const res = await fetch('/api/analyze', {
         method: 'POST',
@@ -101,6 +118,8 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
           sessionId,
           ...(proSwing ? { proSwingId: proSwing.id } : {}),
           keypointsJson,
+          ...(compareKeypointsJson ? { compareKeypointsJson } : {}),
+          ...(trimmedFocus ? { userFocus: trimmedFocus } : {}),
         }),
       })
 
@@ -184,6 +203,30 @@ export default function LLMCoachingPanel({ proSwing, compareMode = 'pro', frames
       {!canAnalyze && !loading && !feedback && framesData.length > 0 && compareMode !== 'custom' && !proSwing && (
         <div className="px-4 py-2 bg-white/[0.02]">
           <p className="text-white/40 text-xs">Select a pro player above to compare against</p>
+        </div>
+      )}
+
+      {/* Focus input — optional user prompt before Analyze. Hidden once analysis
+          has run or is running; user can always re-open with Re-analyze. */}
+      {canAnalyze && !loading && !feedback && (
+        <div className="px-4 py-3 bg-white/[0.02] border-t border-white/5">
+          <label className="block text-xs text-white/50 mb-1.5">
+            Anything specific you want feedback on?{' '}
+            <span className="text-white/30">(optional)</span>
+          </label>
+          <textarea
+            value={userFocus}
+            onChange={(e) => setUserFocus(e.target.value)}
+            placeholder={
+              proSwing
+                ? `e.g. "working on topspin" or "why does my follow-through look different from ${proSwing.pros?.name ?? 'the pro'}?"`
+                : compareMode === 'custom' && compareFrames?.length
+                  ? `e.g. "why is my second shot flatter?" or "focus on hip rotation"`
+                  : `e.g. "working on topspin" or "am I rotating my hips enough?"`
+            }
+            rows={2}
+            className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/25 focus:outline-none focus:border-emerald-500/40 resize-none"
+          />
         </div>
       )}
 
