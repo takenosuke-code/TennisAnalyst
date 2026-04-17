@@ -1,59 +1,37 @@
-import { put } from '@vercel/blob'
+import { handleUpload, type HandleUploadBody } from '@vercel/blob/client'
 import { NextRequest, NextResponse } from 'next/server'
-import { supabase } from '@/lib/supabase'
-import { VALID_USER_SHOT_TYPES } from '@/lib/shotTypeConfig'
 
-export async function POST(request: NextRequest) {
-  const validTypes = new Set<string>(VALID_USER_SHOT_TYPES)
-
-  const formData = await request.formData()
-  const file = formData.get('video') as File | null
-  const rawShotType = (formData.get('shot_type') as string | null) ?? 'unknown'
-  // Sanitize to prevent DB constraint violations from leaking Postgres errors
-  const shotType = validTypes.has(rawShotType) ? rawShotType : 'unknown'
-
-  if (!file) {
-    return NextResponse.json({ error: 'No video file provided' }, { status: 400 })
+// Vercel serverless functions cap request bodies at 4.5MB on Hobby / ~100MB on
+// Pro, which is smaller than a real swing clip. So the browser uploads the
+// file directly to Vercel Blob; this route only hands out a short-lived signed
+// token. The user_sessions row is created later by /api/sessions once the
+// client has extracted keypoints.
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  let body: HandleUploadBody
+  try {
+    body = (await request.json()) as HandleUploadBody
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  // Validate file type
-  if (!file.type.startsWith('video/')) {
-    return NextResponse.json({ error: 'File must be a video' }, { status: 400 })
-  }
-
-  // Max 200MB
-  if (file.size > 200 * 1024 * 1024) {
-    return NextResponse.json({ error: 'File too large (max 200MB)' }, { status: 400 })
-  }
-
-  // Sanitize filename: strip path components and disallowed characters
-  const safeName = file.name
-    .split(/[\\/]/).pop()!
-    .replace(/[^a-zA-Z0-9._-]/g, '_')
-    .slice(0, 100) || 'upload'
-
-  const blobPath = `videos/${Date.now()}-${safeName}`
-  const blob = await put(blobPath, file, { access: 'public' }).catch(() =>
-    put(blobPath, file, { access: 'private' })
-  )
-
-  const { data: session, error } = await supabase
-    .from('user_sessions')
-    .insert({
-      blob_url: blob.url,
-      shot_type: shotType,
-      status: 'uploaded',
+  try {
+    const jsonResponse = await handleUpload({
+      body,
+      request,
+      onBeforeGenerateToken: async () => ({
+        allowedContentTypes: ['video/mp4', 'video/quicktime', 'video/webm', 'video/x-matroska'],
+        maximumSizeInBytes: 200 * 1024 * 1024,
+        addRandomSuffix: true,
+      }),
+      onUploadCompleted: async () => {
+        // No DB write here. Blob's completion webhook can't be awaited by the
+        // browser anyway, so session creation is deferred to /api/sessions
+        // which the client calls after running MediaPipe on the clip.
+      },
     })
-    .select()
-    .single()
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json(jsonResponse)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Upload token failed'
+    return NextResponse.json({ error: msg }, { status: 400 })
   }
-
-  return NextResponse.json({
-    sessionId: session.id,
-    blobUrl: blob.url,
-    status: 'uploaded',
-  })
 }

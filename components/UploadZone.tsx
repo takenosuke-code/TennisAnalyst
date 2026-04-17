@@ -1,11 +1,22 @@
 'use client'
 
 import { useRef, useState, useCallback, useEffect } from 'react'
+import { upload } from '@vercel/blob/client'
 import { usePoseStore } from '@/store'
 import { getPoseLandmarker, recordTimestamp } from '@/lib/mediapipe'
 import { computeJointAngles } from '@/lib/jointAngles'
 import { isFrameConfident, smoothFrames } from '@/lib/poseSmoothing'
 import type { PoseFrame, Landmark } from '@/lib/supabase'
+
+function safeBlobFilename(name: string): string {
+  return (
+    name
+      .split(/[\\/]/)
+      .pop()!
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .slice(0, 100) || 'upload'
+  )
+}
 
 const SHOT_TYPES = ['forehand', 'backhand', 'serve', 'volley'] as const
 
@@ -41,22 +52,21 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
       setProgress(0)
       setStatusMsg('Uploading video...')
 
-      // 1. Upload to Vercel Blob via API
-      const formData = new FormData()
-      formData.append('video', file)
-      formData.append('shot_type', shotType)
-
+      // 1. Upload directly to Vercel Blob via a signed client token. Going
+      //    through the API route would hit Vercel's serverless body limit
+      //    (4.5MB Hobby / ~100MB Pro) and fail for any real swing clip. The
+      //    user_sessions row is created later by /api/sessions once keypoints
+      //    are extracted.
       let blobUrl: string
       try {
-        const uploadRes = await fetch('/api/upload', {
-          method: 'POST',
-          body: formData,
+        const blobPath = `videos/${Date.now()}-${safeBlobFilename(file.name)}`
+        const blob = await upload(blobPath, file, {
+          access: 'public',
+          handleUploadUrl: '/api/upload',
+          contentType: file.type,
         })
-        if (!uploadRes.ok) throw new Error('Upload failed')
-        const uploadData = await uploadRes.json()
-        blobUrl = uploadData.blobUrl
+        blobUrl = blob.url
         setBlobUrl(blobUrl)
-        if (uploadData.sessionId) usePoseStore.getState().setSessionId(uploadData.sessionId)
       } catch {
         setStatusMsg('Upload failed. Please try again.')
         setProcessing(false)
