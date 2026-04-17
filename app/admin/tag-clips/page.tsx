@@ -1,6 +1,13 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import {
+  adminAuthHeaders,
+  clearAdminToken,
+  getAdminToken,
+  setAdminToken,
+  verifyAdminToken,
+} from '@/lib/adminAuthClient'
 
 /* ------------------------------------------------------------------ */
 /*  YouTube IFrame API types                                          */
@@ -92,6 +99,89 @@ function sanitizeFilename(name: string): string {
 /*  Component                                                         */
 /* ------------------------------------------------------------------ */
 export default function TagClipsPage() {
+  const [authState, setAuthState] = useState<'checking' | 'locked' | 'unlocked'>(
+    'checking',
+  )
+  const [pwInput, setPwInput] = useState('')
+  const [pwError, setPwError] = useState<string | null>(null)
+  const [pwSubmitting, setPwSubmitting] = useState(false)
+
+  // Try the cached token on mount. If it works, unlock; otherwise show prompt.
+  useEffect(() => {
+    const cached = getAdminToken()
+    if (!cached) {
+      setAuthState('locked')
+      return
+    }
+    verifyAdminToken(cached).then((ok) => {
+      if (ok) {
+        setAuthState('unlocked')
+      } else {
+        clearAdminToken()
+        setAuthState('locked')
+      }
+    })
+  }, [])
+
+  const handlePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!pwInput || pwSubmitting) return
+    setPwSubmitting(true)
+    setPwError(null)
+    const ok = await verifyAdminToken(pwInput)
+    setPwSubmitting(false)
+    if (ok) {
+      setAdminToken(pwInput)
+      setPwInput('')
+      setAuthState('unlocked')
+    } else {
+      setPwError('Wrong password (or admin is disabled on this deploy).')
+    }
+  }
+
+  if (authState === 'checking') {
+    return (
+      <div className="max-w-md mx-auto px-4 py-16 text-center text-white/50 text-sm">
+        Checking access…
+      </div>
+    )
+  }
+
+  if (authState === 'locked') {
+    return (
+      <div className="max-w-md mx-auto px-4 py-16">
+        <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6">
+          <h1 className="text-xl font-bold text-white mb-2">Clip Studio</h1>
+          <p className="text-white/50 text-sm mb-6">
+            Admin access required. Enter the password to continue.
+          </p>
+          <form onSubmit={handlePasswordSubmit} className="space-y-3">
+            <input
+              type="password"
+              value={pwInput}
+              onChange={(e) => setPwInput(e.target.value)}
+              autoFocus
+              placeholder="Admin password"
+              className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50"
+            />
+            {pwError && <p className="text-red-400 text-sm">{pwError}</p>}
+            <button
+              type="submit"
+              disabled={!pwInput || pwSubmitting}
+              className="w-full px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-colors"
+            >
+              {pwSubmitting ? 'Checking…' : 'Unlock'}
+            </button>
+          </form>
+        </div>
+      </div>
+    )
+  }
+
+  return <TagClipsStudio onLockOut={() => setAuthState('locked')} />
+}
+
+function TagClipsStudio({ onLockOut }: { onLockOut: () => void }) {
   /* --- YouTube state --- */
   const [youtubeUrl, setYoutubeUrl] = useState('')
   const [videoId, setVideoId] = useState<string | null>(null)
@@ -251,9 +341,14 @@ export default function TagClipsPage() {
     try {
       const res = await fetch('/api/admin/preview-clip', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...adminAuthHeaders() },
         body: JSON.stringify({ youtubeUrl, startTime, endTime, speedFactor }),
       })
+      if (res.status === 401) {
+        clearAdminToken()
+        onLockOut()
+        return
+      }
       if (!res.ok) {
         const text = await res.text()
         throw new Error(text || `Server error ${res.status}`)
@@ -333,9 +428,15 @@ export default function TagClipsPage() {
     try {
       const res = await fetch('/api/admin/tag-clip', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...adminAuthHeaders() },
         body: JSON.stringify(body),
       })
+      if (res.status === 401) {
+        clearAdminToken()
+        onLockOut()
+        setSaving(false)
+        return
+      }
       if (res.status === 409) {
         const data = (await res.json().catch(() => null)) as
           | { error?: string; suggestions?: string[]; code?: string }

@@ -1,11 +1,8 @@
-import { notFound } from 'next/navigation'
-
-// Admin routes depend on local binaries (yt-dlp, a bundled ffmpeg, and an
-// arm64 python3) that don't exist on Vercel, so we hide them in the deployed
-// build. Set NEXT_PUBLIC_ADMIN_ENABLED=true in .env for local development.
+// Admin API routes are password-guarded per request via requireAdminAuth().
+// The layout no longer blocks rendering — the page itself handles the
+// password prompt and locks the UI until a valid token is stored. Anyone
+// loading the page without the password sees only the prompt, not any
+// admin controls.
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
-  if (process.env.NEXT_PUBLIC_ADMIN_ENABLED !== 'true') {
-    notFound()
-  }
   return <>{children}</>
 }

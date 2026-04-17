@@ -16,9 +16,7 @@ export default function Nav() {
           <NavLink href="/analyze">Analyze</NavLink>
           <NavLink href="/compare">Compare</NavLink>
           <NavLink href="/pros">Pro Library</NavLink>
-          {process.env.NEXT_PUBLIC_ADMIN_ENABLED === 'true' && (
-            <NavLink href="/admin/tag-clips">Tag Clips</NavLink>
-          )}
+          <NavLink href="/admin/tag-clips">Clip Studio</NavLink>
         </div>
       </div>
     </nav>

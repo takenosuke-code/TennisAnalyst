@@ -4,14 +4,14 @@ import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { supabaseAdmin as supabase } from '@/lib/supabase'
+import { requireAdminAuth } from '@/lib/adminAuth'
 
 const EXTRACT_TIMEOUT_MS = 120_000
 const MAX_VIDEO_BYTES = 100 * 1024 * 1024
 
 export async function POST(request: NextRequest) {
-  if (process.env.NEXT_PUBLIC_ADMIN_ENABLED !== 'true') {
-    return new NextResponse(null, { status: 404 })
-  }
+  const guard = requireAdminAuth(request)
+  if (guard) return guard
 
   let body
   try {

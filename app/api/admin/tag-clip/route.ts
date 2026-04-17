@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin as supabase } from '@/lib/supabase'
+import { requireAdminAuth } from '@/lib/adminAuth'
 import { put } from '@vercel/blob'
 import { execFileSync } from 'child_process'
 import { mkdtempSync, unlinkSync, existsSync, readFileSync } from 'fs'
@@ -107,9 +108,8 @@ function validateBody(body: Record<string, unknown>): string | null {
 }
 
 export async function POST(request: NextRequest) {
-  if (process.env.NEXT_PUBLIC_ADMIN_ENABLED !== 'true') {
-    return new NextResponse(null, { status: 404 })
-  }
+  const guard = requireAdminAuth(request)
+  if (guard) return guard
 
   let body: Record<string, unknown>
   try {
