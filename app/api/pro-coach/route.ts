@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
+import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '@/lib/supabase'
 import { buildAngleSummary } from '@/lib/jointAngles'
 import { getBiomechanicsReference } from '@/lib/biomechanics-reference'
-import { streamGemini } from '@/lib/gemini'
 import type { KeypointsJson } from '@/lib/supabase'
+
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+})
 
 export async function POST(request: NextRequest) {
   let body
@@ -85,21 +89,28 @@ ${proName.toUpperCase()}'S DATA: ${proSummary}`
     ? truncatedMessages.slice(1)
     : truncatedMessages
 
+  const messageStream = anthropic.messages.stream({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 400,
+    system: systemPrompt,
+    messages: validMessages.map((m: { role: string; content: string }) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    })),
+  })
+
   const encoder = new TextEncoder()
   const ERROR_PREFIX = '\n\n[ERROR] '
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const iter = streamGemini({
-          systemPrompt,
-          messages: validMessages.map((m: { role: string; content: string }) => ({
-            role: m.role as 'user' | 'assistant',
-            content: m.content,
-          })),
-          maxTokens: 400,
-        })
-        for await (const delta of iter) {
-          controller.enqueue(encoder.encode(delta))
+        for await (const chunk of messageStream) {
+          if (
+            chunk.type === 'content_block_delta' &&
+            chunk.delta.type === 'text_delta'
+          ) {
+            controller.enqueue(encoder.encode(chunk.delta.text))
+          }
         }
         controller.close()
       } catch (err) {
