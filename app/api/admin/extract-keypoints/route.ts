@@ -9,6 +9,10 @@ const EXTRACT_TIMEOUT_MS = 120_000
 const MAX_VIDEO_BYTES = 100 * 1024 * 1024
 
 export async function POST(request: NextRequest) {
+  if (process.env.NEXT_PUBLIC_ADMIN_ENABLED !== 'true') {
+    return new NextResponse(null, { status: 404 })
+  }
+
   let body
   try {
     body = await request.json()

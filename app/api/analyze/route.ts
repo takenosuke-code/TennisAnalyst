@@ -1,13 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
 import { supabase } from '@/lib/supabase'
 import { buildAngleSummary, sampleKeyFrames } from '@/lib/jointAngles'
 import { getBiomechanicsReference } from '@/lib/biomechanics-reference'
+import { streamGemini } from '@/lib/gemini'
 import type { KeypointsJson } from '@/lib/supabase'
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-})
 
 export async function POST(request: NextRequest) {
   let body
@@ -160,13 +156,7 @@ Three specific things to focus on in their next hitting session. Make each one a
 Keep it under 350 words. Sound like a coach who believes in this player.`
   }
 
-  // Initialize the stream object (connection happens lazily on iteration).
-  // Synchronous errors (e.g., invalid config) are caught here;
-  // network/auth errors surface mid-stream and are encoded as a sentinel.
-  const messageStream = anthropic.messages.stream({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
-    system: `You are a veteran tennis coach who has been on court for 30 years. You talk like a real person having a conversation with a player between points.
+  const systemPrompt = `You are a veteran tennis coach who has been on court for 30 years. You talk like a real person having a conversation with a player between points.
 
 VOICE RULES (follow these strictly):
 - Write like you TALK. Short sentences. Casual tone. "Your hips are way ahead of your arm here" not "The hip rotation precedes the arm extension."
@@ -177,28 +167,23 @@ VOICE RULES (follow these strictly):
 - Keep it practical. Every piece of advice should be something they can try on the very next ball.
 - Sound encouraging, not critical. You're helping, not grading.
 - No bullet points with just numbers. No tables. No clinical language.
-- Write "you" and "your" constantly. Talk TO the player.`,
-    messages: [{ role: 'user', content: prompt }],
-  })
+- Write "you" and "your" constantly. Talk TO the player.`
 
-  // Stream the response
   const encoder = new TextEncoder()
   const ERROR_PREFIX = '\n\n[ERROR] '
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        for await (const chunk of messageStream) {
-          if (
-            chunk.type === 'content_block_delta' &&
-            chunk.delta.type === 'text_delta'
-          ) {
-            controller.enqueue(encoder.encode(chunk.delta.text))
-          }
+        const iter = streamGemini({
+          systemPrompt,
+          messages: [{ role: 'user', content: prompt }],
+          maxTokens: 1024,
+        })
+        for await (const delta of iter) {
+          controller.enqueue(encoder.encode(delta))
         }
-
         controller.close()
       } catch (err) {
-        // HTTP 200 already sent - encode error as a sentinel the client can detect
         const msg = err instanceof Error ? err.message : 'Analysis stream failed'
         controller.enqueue(encoder.encode(`${ERROR_PREFIX}${msg}`))
         controller.close()

@@ -42,6 +42,10 @@ function cleanOldPreviews(dir: string) {
 }
 
 export async function POST(request: NextRequest) {
+  if (process.env.NEXT_PUBLIC_ADMIN_ENABLED !== 'true') {
+    return new NextResponse(null, { status: 404 })
+  }
+
   let body: Record<string, unknown>
   try {
     body = await request.json()
