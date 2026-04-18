@@ -13,13 +13,11 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     'app/api/admin/tag-clip/route': [
       './node_modules/@ffmpeg-installer/**/*',
-      './node_modules/youtube-dl-exec/bin/**/*',
-      './node_modules/youtube-dl-exec/python/**/*',
+      './bin/yt-dlp',
     ],
     'app/api/admin/preview-clip/route': [
       './node_modules/@ffmpeg-installer/**/*',
-      './node_modules/youtube-dl-exec/bin/**/*',
-      './node_modules/youtube-dl-exec/python/**/*',
+      './bin/yt-dlp',
     ],
   },
 }

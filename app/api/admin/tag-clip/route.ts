@@ -7,7 +7,13 @@ import { mkdtempSync, unlinkSync, existsSync, readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import os from 'os'
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
-import youtubeDl from 'youtube-dl-exec'
+import { create as createYoutubeDl } from 'youtube-dl-exec'
+
+// Use our own self-contained yt-dlp binary (downloaded by scripts/fetch-yt-dlp.mjs
+// at install time) instead of youtube-dl-exec's default, which ships the
+// Python-zipapp variant that needs system python3 — missing on Vercel.
+const YT_DLP_PATH = join(process.cwd(), 'bin', 'yt-dlp')
+const youtubeDl = createYoutubeDl(YT_DLP_PATH)
 import { VALID_SHOT_TYPES, type ShotType } from '@/lib/shotTypeConfig'
 
 const VALID_CAMERA_ANGLES = ['side', 'behind', 'front', 'court_level'] as const

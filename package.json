@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "postinstall": "node ./scripts/copy-ffmpeg-core.mjs"
+    "postinstall": "node ./scripts/copy-ffmpeg-core.mjs && node ./scripts/fetch-yt-dlp.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",

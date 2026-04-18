@@ -47,6 +47,9 @@ public/clip-previews/
 # copied from node_modules/@ffmpeg/core by scripts/copy-ffmpeg-core.mjs at
 # install time; too large to commit but needed by the deployed bundle
 public/ffmpeg/
+# yt-dlp self-contained binary fetched by scripts/fetch-yt-dlp.mjs at install
+# time; also carried into the Vercel function bundle via next.config.ts
+bin/
 *.mp4
 *.task
 *.zip
