@@ -8,12 +8,26 @@ import { join, dirname } from 'path'
 import os from 'os'
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
 import { create as createYoutubeDl } from 'youtube-dl-exec'
+import { writeFileSync } from 'fs'
 
 // Use our own self-contained yt-dlp binary (downloaded by scripts/fetch-yt-dlp.mjs
 // at install time) instead of youtube-dl-exec's default, which ships the
 // Python-zipapp variant that needs system python3 — missing on Vercel.
 const YT_DLP_PATH = join(process.cwd(), 'bin', 'yt-dlp')
 const youtubeDl = createYoutubeDl(YT_DLP_PATH)
+
+// See /api/admin/preview-clip/route.ts for context. YT_COOKIES env is a
+// Netscape cookies.txt dump from a signed-in browser.
+let _cookiesPath: string | null = null
+function getCookiesPath(): string | null {
+  const val = process.env.YT_COOKIES
+  if (!val) return null
+  if (_cookiesPath) return _cookiesPath
+  const p = join('/tmp', 'yt-cookies.txt')
+  writeFileSync(p, val, { mode: 0o600 })
+  _cookiesPath = p
+  return p
+}
 import { VALID_SHOT_TYPES, type ShotType } from '@/lib/shotTypeConfig'
 
 const VALID_CAMERA_ANGLES = ['side', 'behind', 'front', 'court_level'] as const
@@ -231,19 +245,23 @@ export async function POST(request: NextRequest) {
     // stream isn't already H.264.
     const sectionArg = `*${startTime}-${endTime}`
     console.log('[tag-clip] Downloading segment:', sectionArg, 'from:', youtubeUrl)
+    const cookiesPath = getCookiesPath()
+    // See preview-clip for why the options object is cast to any.
     await youtubeDl(youtubeUrl, {
       format: 'bestvideo+bestaudio/best',
-      // Colon-delimited sort keys (ext:mp4:m4a, codec:avc) are valid yt-dlp
-      // syntax but the Node wrapper's types only whitelist bare keys.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      formatSort: ['res', 'ext:mp4:m4a', 'codec:avc', 'fps'] as any,
+      formatSort: ['res', 'ext:mp4:m4a', 'codec:avc', 'fps'],
       mergeOutputFormat: 'mp4',
       noPlaylist: true,
       downloadSections: sectionArg,
       forceKeyframesAtCuts: true,
       ffmpegLocation: ffmpegDir,
       output: tmpFullVideo,
-    })
+      cacheDir: '/tmp/yt-dlp-cache',
+      noWarnings: true,
+      extractorArgs: 'youtube:player_client=tv,mweb,default',
+      ...(cookiesPath ? { cookies: cookiesPath } : {}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)
 
     // Step 2: Finalize clip.
     //  - speedFactor === 1: stream copy (lossless) + faststart

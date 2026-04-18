@@ -15,12 +15,28 @@ import os from 'os'
 import { randomUUID } from 'crypto'
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
 import { create as createYoutubeDl } from 'youtube-dl-exec'
+import { writeFileSync } from 'fs'
 
 // Use our own self-contained yt-dlp binary (downloaded by scripts/fetch-yt-dlp.mjs
 // at install time) instead of youtube-dl-exec's default, which ships the
 // Python-zipapp variant that needs system python3 — missing on Vercel.
 const YT_DLP_PATH = join(process.cwd(), 'bin', 'yt-dlp')
 const youtubeDl = createYoutubeDl(YT_DLP_PATH)
+
+// If YT_COOKIES is set (Netscape cookies.txt format), we write it to /tmp
+// on first use and pass --cookies to yt-dlp so YouTube stops flagging
+// the Vercel IPs as bot traffic. Requires re-exporting cookies from a
+// logged-in browser periodically — they expire.
+let _cookiesPath: string | null = null
+function getCookiesPath(): string | null {
+  const val = process.env.YT_COOKIES
+  if (!val) return null
+  if (_cookiesPath) return _cookiesPath
+  const p = join('/tmp', 'yt-cookies.txt')
+  writeFileSync(p, val, { mode: 0o600 })
+  _cookiesPath = p
+  return p
+}
 
 export const runtime = 'nodejs'
 
@@ -123,19 +139,31 @@ export async function POST(request: NextRequest) {
     // Use youtube-dl-exec's bundled yt-dlp binary so we don't depend on
     // a system-installed yt-dlp (absent on Vercel). Flag names map from
     // kebab-case CLI to camelCase options.
+    const cookiesPath = getCookiesPath()
+    // youtube-dl-exec's typed Flags are a tiny whitelist of the 400+ real
+    // yt-dlp options; colon-delimited sort keys and extractor args aren't
+    // in the whitelist even though yt-dlp handles them fine. Cast to any
+    // so the wrapper just forwards them as CLI flags.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await youtubeDl(youtubeUrl, {
       format: 'bestvideo+bestaudio/best',
-      // Colon-delimited sort keys (ext:mp4:m4a, codec:avc) are valid yt-dlp
-      // syntax but the Node wrapper's types only whitelist bare keys.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      formatSort: ['res', 'ext:mp4:m4a', 'codec:avc', 'fps'] as any,
+      formatSort: ['res', 'ext:mp4:m4a', 'codec:avc', 'fps'],
       mergeOutputFormat: 'mp4',
       noPlaylist: true,
       downloadSections: sectionArg,
       forceKeyframesAtCuts: true,
       ffmpegLocation: ffmpegDir,
       output: tmpFullVideo,
-    })
+      // Vercel's sandbox sets $HOME read-only, so yt-dlp's default cache
+      // path blows up. Point it at /tmp which is writable.
+      cacheDir: '/tmp/yt-dlp-cache',
+      noWarnings: true,
+      // Try alternate player clients to dodge YouTube's datacenter-IP bot
+      // check. 'tv' and 'mweb' occasionally still serve anon requests.
+      extractorArgs: 'youtube:player_client=tv,mweb,default',
+      ...(cookiesPath ? { cookies: cookiesPath } : {}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)
 
     if (speedFactor === 1) {
       execFileSync(
