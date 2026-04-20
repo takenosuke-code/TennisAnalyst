@@ -164,8 +164,7 @@ export type UserSession = {
 
 export type Baseline = {
   id: string
-  device_id: string
-  user_id: string | null
+  user_id: string
   label: string
   shot_type: 'forehand' | 'backhand' | 'serve' | 'volley' | 'slice'
   blob_url: string
