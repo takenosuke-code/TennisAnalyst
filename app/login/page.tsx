@@ -2,115 +2,189 @@
 
 import { useState, Suspense } from 'react'
 import Link from 'next/link'
-import { useSearchParams } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
 
-function LoginForm() {
+type Mode = 'signin' | 'signup'
+
+function AuthForm() {
   const params = useSearchParams()
-  const next = params.get('next') ?? '/baseline'
+  const nextRaw = params.get('next') ?? '/baseline'
+  // Guard against open-redirect: only allow same-origin paths.
+  const next = nextRaw.startsWith('/') && !nextRaw.startsWith('//') ? nextRaw : '/baseline'
+  const router = useRouter()
+
+  const [mode, setMode] = useState<Mode>('signin')
   const [email, setEmail] = useState('')
-  const [status, setStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  const switchMode = (m: Mode) => {
+    if (m === mode) return
+    setMode(m)
+    setError(null)
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!email.trim() || status === 'sending') return
-    setStatus('sending')
+    if (busy) return
+    setBusy(true)
     setError(null)
 
     const supabase = createClient()
-    const origin = window.location.origin
-    const callbackUrl = `${origin}/auth/callback?next=${encodeURIComponent(next)}`
 
-    const { error: otpError } = await supabase.auth.signInWithOtp({
+    // Sign-up: create a pre-confirmed user via the admin endpoint, then fall
+    // through to signInWithPassword to set cookies.
+    if (mode === 'signup') {
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), password }),
+      })
+      if (!res.ok) {
+        let msg = `Signup failed (${res.status})`
+        try {
+          const j = await res.json()
+          if (j?.error) msg = j.error
+        } catch {
+          /* fall through to default */
+        }
+        setError(msg)
+        setBusy(false)
+        return
+      }
+    }
+
+    const { error: signInErr } = await supabase.auth.signInWithPassword({
       email: email.trim(),
-      options: {
-        emailRedirectTo: callbackUrl,
-      },
+      password,
     })
-
-    if (otpError) {
-      setStatus('error')
-      setError(otpError.message)
+    if (signInErr) {
+      setError(
+        mode === 'signin'
+          ? 'Wrong email or password.'
+          : `Account created, but sign-in failed: ${signInErr.message}`
+      )
+      setBusy(false)
       return
     }
-    setStatus('sent')
+
+    // Refresh server components so Nav + gated pages see the new session,
+    // then navigate to the requested next page.
+    router.refresh()
+    router.replace(next)
   }
+
+  const isSignIn = mode === 'signin'
 
   return (
     <div className="max-w-md mx-auto px-4 py-16">
       <div className="mb-8 text-center">
-        <h1 className="text-3xl font-black text-white mb-2">Sign in</h1>
+        <h1 className="text-3xl font-black text-white mb-2">
+          {isSignIn ? 'Welcome back' : 'Create an account'}
+        </h1>
         <p className="text-white/50 text-sm">
-          We&apos;ll email you a link. One click and you&apos;re in.
+          {isSignIn
+            ? 'Sign in to pick up where you left off.'
+            : 'Save baselines and compare every future swing against them.'}
         </p>
       </div>
 
-      {status === 'sent' ? (
-        <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-6 text-center">
-          <div className="text-4xl mb-3">📬</div>
-          <p className="text-white font-semibold mb-2">Check your inbox</p>
-          <p className="text-white/60 text-sm">
-            We sent a sign-in link to <span className="text-emerald-300">{email}</span>. Click it
-            to finish signing in.
-          </p>
-          <button
-            onClick={() => {
-              setStatus('idle')
-              setEmail('')
-            }}
-            className="mt-4 text-xs text-white/50 hover:text-white underline underline-offset-2"
-          >
-            Use a different email
-          </button>
+      {/* Tab switcher */}
+      <div className="flex gap-2 p-1 bg-white/5 rounded-xl w-full mb-6">
+        <button
+          type="button"
+          onClick={() => switchMode('signin')}
+          className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+            isSignIn ? 'bg-white text-black' : 'text-white/50 hover:text-white'
+          }`}
+        >
+          Sign in
+        </button>
+        <button
+          type="button"
+          onClick={() => switchMode('signup')}
+          className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+            !isSignIn ? 'bg-white text-black' : 'text-white/50 hover:text-white'
+          }`}
+        >
+          Create account
+        </button>
+      </div>
+
+      <form onSubmit={submit} className="space-y-4">
+        <div>
+          <label className="block text-sm text-white/60 mb-2" htmlFor="email">
+            Email
+          </label>
+          <input
+            id="email"
+            type="email"
+            required
+            autoComplete="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@example.com"
+            className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50"
+            disabled={busy}
+          />
         </div>
-      ) : (
-        <form onSubmit={submit} className="space-y-4">
-          <div>
-            <label className="block text-sm text-white/60 mb-2" htmlFor="email">
-              Email
-            </label>
-            <input
-              id="email"
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50"
-              disabled={status === 'sending'}
-            />
-          </div>
 
-          {error && (
-            <p className="text-red-400 text-sm">{error}</p>
-          )}
+        <div>
+          <label className="block text-sm text-white/60 mb-2" htmlFor="password">
+            Password
+          </label>
+          <input
+            id="password"
+            type="password"
+            required
+            minLength={6}
+            autoComplete={isSignIn ? 'current-password' : 'new-password'}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder={isSignIn ? 'Your password' : 'At least 6 characters'}
+            className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50"
+            disabled={busy}
+          />
+        </div>
 
-          <button
-            type="submit"
-            disabled={status === 'sending' || !email.trim()}
-            className="w-full px-4 py-3 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {status === 'sending' ? 'Sending link...' : 'Email me a link'}
-          </button>
+        {error && <p className="text-red-400 text-sm">{error}</p>}
 
-          <p className="text-center text-white/40 text-xs pt-2">
-            You can still{' '}
-            <Link href="/analyze" className="text-white/60 hover:text-white underline">
-              analyze a swing without an account
-            </Link>
-            . Your data just won&apos;t persist.
-          </p>
-        </form>
-      )}
+        <button
+          type="submit"
+          disabled={busy || !email.trim() || !password}
+          className="w-full px-4 py-3 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {busy
+            ? isSignIn
+              ? 'Signing in...'
+              : 'Creating account...'
+            : isSignIn
+              ? 'Sign in'
+              : 'Create account'}
+        </button>
+
+        <p className="text-center text-white/40 text-xs pt-2">
+          You can still{' '}
+          <Link href="/analyze" className="text-white/60 hover:text-white underline">
+            analyze a swing without an account
+          </Link>
+          . Your data just won&apos;t persist.
+        </p>
+      </form>
     </div>
   )
 }
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={<div className="max-w-md mx-auto px-4 py-16 text-white/50">Loading...</div>}>
-      <LoginForm />
+    <Suspense
+      fallback={
+        <div className="max-w-md mx-auto px-4 py-16 text-white/50">Loading...</div>
+      }
+    >
+      <AuthForm />
     </Suspense>
   )
 }

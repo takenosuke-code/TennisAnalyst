@@ -36,8 +36,12 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  // Run on every path EXCEPT static assets and next internals.
+  // Run on every path EXCEPT static assets, next internals, and API routes.
+  // API routes that need Supabase auth call createClient() directly and don't
+  // rely on middleware refreshing the session; excluding them saves a round
+  // trip and keeps /api/upload (which only needs the Blob token, not auth)
+  // from touching Supabase at all.
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|mp4|webm|woff2?)$).*)',
+    '/((?!api/|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|mp4|webm|woff2?)$).*)',
   ],
 }
