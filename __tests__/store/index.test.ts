@@ -7,7 +7,7 @@ import {
   useJointStore,
   useAnalysisStore,
 } from '@/store/index'
-import type { PoseFrame, Pro, ProSwing } from '@/lib/supabase'
+import type { PoseFrame } from '@/lib/supabase'
 import { makeFrame, makeStandingPose } from '../helpers'
 
 // ---------------------------------------------------------------------------
@@ -94,8 +94,6 @@ describe('useComparisonStore', () => {
   beforeEach(() => {
     useComparisonStore.setState({
       mode: 'side-by-side',
-      activePro: null,
-      activeProSwing: null,
       secondaryBlobUrl: null,
       secondaryFramesData: [],
     })
@@ -104,8 +102,6 @@ describe('useComparisonStore', () => {
   it('has correct initial state', () => {
     const state = useComparisonStore.getState()
     expect(state.mode).toBe('side-by-side')
-    expect(state.activePro).toBeNull()
-    expect(state.activeProSwing).toBeNull()
     expect(state.secondaryBlobUrl).toBeNull()
     expect(state.secondaryFramesData).toEqual([])
   })
@@ -119,54 +115,6 @@ describe('useComparisonStore', () => {
     useComparisonStore.getState().setMode('overlay')
     useComparisonStore.getState().setMode('side-by-side')
     expect(useComparisonStore.getState().mode).toBe('side-by-side')
-  })
-
-  it('setActivePro stores a pro object', () => {
-    const pro: Pro = {
-      id: 'pro-1',
-      name: 'Roger Federer',
-      nationality: 'Swiss',
-      ranking: 3,
-      bio: 'Tennis legend',
-      profile_image_url: null,
-      created_at: '2024-01-01T00:00:00Z',
-    }
-    useComparisonStore.getState().setActivePro(pro)
-    expect(useComparisonStore.getState().activePro).toEqual(pro)
-  })
-
-  it('setActivePro can be set to null', () => {
-    const pro: Pro = {
-      id: 'pro-1',
-      name: 'Federer',
-      nationality: null,
-      ranking: null,
-      bio: null,
-      profile_image_url: null,
-      created_at: '2024-01-01T00:00:00Z',
-    }
-    useComparisonStore.getState().setActivePro(pro)
-    useComparisonStore.getState().setActivePro(null)
-    expect(useComparisonStore.getState().activePro).toBeNull()
-  })
-
-  it('setActiveProSwing stores a swing object', () => {
-    const swing: ProSwing = {
-      id: 'swing-1',
-      pro_id: 'pro-1',
-      shot_type: 'forehand',
-      video_url: 'https://example.com/video.mp4',
-      thumbnail_url: null,
-      keypoints_json: { fps_sampled: 30, frame_count: 10, frames: [] },
-      fps: 30,
-      frame_count: 10,
-      duration_ms: 333,
-      phase_labels: { contact: 5 },
-      metadata: {},
-      created_at: '2024-01-01T00:00:00Z',
-    }
-    useComparisonStore.getState().setActiveProSwing(swing)
-    expect(useComparisonStore.getState().activeProSwing).toEqual(swing)
   })
 
   it('setSecondaryBlobUrl updates the URL', () => {

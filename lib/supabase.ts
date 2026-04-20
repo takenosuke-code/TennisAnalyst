@@ -120,40 +120,12 @@ export type PhaseLabels = {
   finish?: number
 }
 
-export type Pro = {
-  id: string
-  name: string
-  nationality: string | null
-  ranking: number | null
-  bio: string | null
-  profile_image_url: string | null
-  created_at: string
-}
-
-export type ProSwing = {
-  id: string
-  pro_id: string
-  shot_type: 'forehand' | 'backhand' | 'serve' | 'volley' | 'slice'
-  video_url: string
-  thumbnail_url: string | null
-  keypoints_json: KeypointsJson
-  fps: number
-  frame_count: number | null
-  duration_ms: number | null
-  phase_labels: PhaseLabels
-  metadata: Record<string, unknown>
-  created_at: string
-  pros?: Pro
-}
-
 export type UserSession = {
   id: string
   blob_url: string
   shot_type: string | null
   keypoints_json: KeypointsJson | null
   analysis_result: Record<string, unknown> | null
-  similarity_scores: Record<string, unknown> | null
-  matched_pro_swing_id: string | null
   status: 'uploaded' | 'extracting' | 'analyzing' | 'complete' | 'error'
   error_message: string | null
   is_multi_shot: boolean
@@ -188,6 +160,5 @@ export type VideoSegment = {
   label: string | null
   keypoints_json: KeypointsJson | null
   analysis_result: Record<string, unknown> | null
-  matched_pro_swing_id: string | null
   created_at: string
 }

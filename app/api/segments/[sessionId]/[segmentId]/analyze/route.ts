@@ -15,13 +15,10 @@ export async function POST(
 ) {
   const { sessionId, segmentId } = await params
 
-  let body
-  try { body = await request.json() }
-  catch { return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }) }
+  // Body is optional now that pro comparisons are gone. Parse-and-discard so
+  // old clients that post JSON don't get a 400.
+  try { await request.json() } catch { /* ignore */ }
 
-  const { proSwingId } = body
-
-  // Fetch the segment's keypoints
   const { data: segment, error: segError } = await supabase
     .from('video_segments')
     .select('id, shot_type, keypoints_json, segment_index')
@@ -38,61 +35,11 @@ export async function POST(
     return NextResponse.json({ error: 'Segment has no keypoints data' }, { status: 400 })
   }
 
-  // Fetch pro swing if requested
-  let proSwing: { keypoints_json?: KeypointsJson; pros?: { name: string }; shot_type?: string } | null = null
-  if (proSwingId) {
-    const { data, error: proError } = await supabase
-      .from('pro_swings')
-      .select('*, pros(name)')
-      .eq('id', proSwingId)
-      .single()
-
-    if (proError || !data) {
-      return NextResponse.json({ error: 'Pro swing not found' }, { status: 404 })
-    }
-    proSwing = data
-  }
-
   const userSummary = buildAngleSummary(segKeypoints.frames)
   const shotType = segment.shot_type ?? 'forehand'
+  const soloRef = getBiomechanicsReference('all')
 
-  let prompt: string
-  if (proSwing) {
-    const proKeypoints = proSwing.keypoints_json as KeypointsJson | null
-    const proName = proSwing.pros?.name ?? 'Pro player'
-    if (!proKeypoints?.frames?.length) {
-      return NextResponse.json({ error: 'Pro swing has no keypoints data' }, { status: 400 })
-    }
-    const proSummary = buildAngleSummary(proKeypoints.frames)
-    const strokeRef = getBiomechanicsReference(
-      ['forehand', 'backhand', 'serve'].includes(shotType) ? shotType as 'forehand' | 'backhand' | 'serve' : 'all'
-    )
-
-    prompt = `You are a tennis coach. This is segment #${segment.segment_index} from a practice video, classified as a ${shotType}. Compare it to ${proName}'s ${proSwing.shot_type ?? shotType}.
-
-STRICT RULES:
-- NEVER mention degrees, angles, or numbers. Describe in feel and body language.
-- NEVER rate or score. Just give advice.
-- NEVER use em dashes. Use commas or periods.
-- Reference ${proName} by name. Compare what the player does vs ${proName}.
-
-REFERENCE: ${strokeRef}
-USER SWING (segment #${segment.segment_index}): ${userSummary}
-${proName.toUpperCase()}: ${proSummary}
-
-## What You're Doing Well
-Two or three sentences.
-
-## How to Get Closer to ${proName}'s ${proSwing.shot_type ?? shotType}
-Three numbered coaching cues with drills.
-
-## Your Practice Plan
-Three one-sentence focus points.
-
-Keep it under 350 words.`
-  } else {
-    const soloRef = getBiomechanicsReference('all')
-    prompt = `You are a tennis coach. This is segment #${segment.segment_index} from a practice video, classified as a ${shotType}.
+  const prompt = `You are a tennis coach. This is segment #${segment.segment_index} from a practice video, classified as a ${shotType}.
 
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers. Describe in feel and body language.
@@ -112,7 +59,6 @@ Three numbered coaching cues with drills.
 Three one-sentence focus points.
 
 Keep it under 350 words.`
-  }
 
   const messageStream = anthropic.messages.stream({
     model: 'claude-sonnet-4-6',

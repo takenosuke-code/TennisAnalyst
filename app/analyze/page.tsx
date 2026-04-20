@@ -4,9 +4,8 @@ import { useState, useMemo } from 'react'
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import JointTogglePanel from '@/components/JointTogglePanel'
-import ProSelector from '@/components/ProSelector'
 import SwingSelector from '@/components/SwingSelector'
-import { usePoseStore, useJointStore, useComparisonStore } from '@/store'
+import { usePoseStore, useJointStore } from '@/store'
 import { detectSwings } from '@/lib/jointAngles'
 import { useUser } from '@/hooks/useUser'
 import type { SwingSegment } from '@/lib/jointAngles'
@@ -22,7 +21,6 @@ const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), 
 export default function AnalyzePage() {
   const { framesData, blobUrl, localVideoUrl, sessionId, shotType } = usePoseStore()
   const { visible, showSkeleton, showTrail } = useJointStore()
-  const { activeProSwing } = useComparisonStore()
   const [done, setDone] = useState(false)
   const [allFrames, setAllFrames] = useState<PoseFrame[]>([])
   const [selectedSwing, setSelectedSwing] = useState<number | null>(null)
@@ -151,7 +149,7 @@ export default function AnalyzePage() {
 
           {/* LLM coaching */}
           {done && (
-            <LLMCoachingPanel proSwing={activeProSwing} frames={analysisFrames} />
+            <LLMCoachingPanel frames={analysisFrames} />
           )}
 
           {/* Baseline CTA — the main pivot action */}
@@ -201,33 +199,11 @@ export default function AnalyzePage() {
             </div>
           )}
 
-          {/* Pro compare (legacy path, still works) */}
-          {done && (
-            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4 flex items-center justify-between">
-              <div>
-                <p className="text-white font-medium text-sm">Or compare against a pro</p>
-                <p className="text-white/50 text-xs">
-                  Side-by-side overlay with the pro of your choice.
-                </p>
-              </div>
-              <Link
-                href="/compare"
-                className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
-              >
-                Compare →
-              </Link>
-            </div>
-          )}
         </div>
 
         {/* Right: controls */}
         <div className="space-y-4">
           <JointTogglePanel />
-
-          <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-            <h3 className="text-sm font-semibold text-white mb-3">Compare Against</h3>
-            <ProSelector />
-          </div>
 
           {framesData.length > 0 && (
             <div className="rounded-xl bg-white/5 border border-white/10 p-4">

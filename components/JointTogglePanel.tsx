@@ -1,6 +1,7 @@
 'use client'
 
-import { useJointStore, useComparisonStore } from '@/store'
+import { useJointStore } from '@/store'
+import { usePoseStore } from '@/store'
 import type { JointGroup } from '@/lib/jointAngles'
 import { getRecommendedVisibility, getShotTypeConfig } from '@/lib/shotTypeConfig'
 
@@ -26,15 +27,16 @@ export default function JointTogglePanel() {
     setAllVisible,
     setVisibility,
   } = useJointStore()
-  const { activeProSwing } = useComparisonStore()
-
+  // Drive shot-specific focus recommendations off the user's current clip
+  // instead of a pro reference (pros are gone). Falls back to null if the
+  // uploaded clip has no classified shot type yet.
+  const { shotType: userShotType } = usePoseStore()
+  const shotConfig = userShotType ? getShotTypeConfig(userShotType) : null
   const allOn = Object.values(visible).every(Boolean)
-  const shotType = activeProSwing?.shot_type ?? null
-  const shotConfig = shotType ? getShotTypeConfig(shotType) : null
 
   const handleShotFocus = () => {
-    if (!shotType) return
-    setVisibility(getRecommendedVisibility(shotType))
+    if (!userShotType) return
+    setVisibility(getRecommendedVisibility(userShotType))
   }
 
   return (

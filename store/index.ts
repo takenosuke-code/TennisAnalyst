@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { PoseFrame, ProSwing, Pro } from '@/lib/supabase'
+import type { PoseFrame } from '@/lib/supabase'
 import type { JointGroup } from '@/lib/jointAngles'
 
 // Video playback state
@@ -126,31 +126,23 @@ export const useJointStore = create<JointStore>((set) => ({
   setVisibility: (map) => set({ visible: { ...map } }),
 }))
 
-// Comparison mode and pro selection
+// Comparison mode for user-vs-user (baseline) comparison views.
 type ComparisonMode = 'side-by-side' | 'overlay'
 
 interface ComparisonStore {
   mode: ComparisonMode
-  activePro: Pro | null
-  activeProSwing: ProSwing | null
-  secondaryBlobUrl: string | null // for user-vs-user comparison
+  secondaryBlobUrl: string | null
   secondaryFramesData: PoseFrame[]
   setMode: (mode: ComparisonMode) => void
-  setActivePro: (pro: Pro | null) => void
-  setActiveProSwing: (swing: ProSwing | null) => void
   setSecondaryBlobUrl: (url: string | null) => void
   setSecondaryFramesData: (frames: PoseFrame[]) => void
 }
 
 export const useComparisonStore = create<ComparisonStore>((set, get) => ({
   mode: 'side-by-side',
-  activePro: null,
-  activeProSwing: null,
   secondaryBlobUrl: null,
   secondaryFramesData: [],
   setMode: (mode) => set({ mode }),
-  setActivePro: (activePro) => set({ activePro }),
-  setActiveProSwing: (activeProSwing) => set({ activeProSwing }),
   setSecondaryBlobUrl: (url) => {
     const prev = get().secondaryBlobUrl
     if (prev) URL.revokeObjectURL(prev)
@@ -206,4 +198,3 @@ export const useSyncStore = create<SyncStore>((set) => ({
   setIsPlaying: (isPlaying) => set({ isPlaying }),
 }))
 
-export { useProLibraryStore, type ChatMessage } from './proLibrary'

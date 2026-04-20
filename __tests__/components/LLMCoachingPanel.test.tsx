@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import LLMCoachingPanel from '@/components/LLMCoachingPanel'
-import type { ProSwing } from '@/lib/supabase'
 
 // Default store values
 let mockAnalysisState = {
@@ -25,24 +24,6 @@ vi.mock('@/store', () => ({
   ),
   usePoseStore: vi.fn(() => mockPoseState),
 }))
-
-import { useAnalysisStore } from '@/store'
-
-const mockProSwing: ProSwing = {
-  id: 'swing-1',
-  pro_id: 'pro-1',
-  shot_type: 'forehand',
-  video_url: 'https://example.com/video.mp4',
-  thumbnail_url: null,
-  keypoints_json: { fps_sampled: 30, frame_count: 0, frames: [] },
-  fps: 30,
-  frame_count: null,
-  duration_ms: null,
-  phase_labels: {},
-  metadata: {},
-  created_at: '2025-01-01',
-  pros: { id: 'pro-1', name: 'Roger Federer', nationality: 'SUI', ranking: 3, bio: null, profile_image_url: null, created_at: '2025-01-01' },
-}
 
 describe('LLMCoachingPanel', () => {
   const originalFetch = globalThis.fetch
@@ -68,93 +49,62 @@ describe('LLMCoachingPanel', () => {
     globalThis.fetch = originalFetch
   })
 
-  it('shows "Upload a video first" when framesData is empty and panel is open', () => {
+  it('disables Analyze Swing when no frames are loaded', () => {
     mockPoseState.framesData = []
 
-    render(<LLMCoachingPanel proSwing={mockProSwing} />)
+    render(<LLMCoachingPanel />)
 
-    // The content section is hidden by default (open=false). We need canAnalyze to be false
-    // and the panel needs to be open. Since framesData is empty, canAnalyze is false.
-    // The panel starts collapsed - we need to verify the button is disabled.
     const analyzeBtn = screen.getByText('Analyze Swing')
     expect(analyzeBtn).toBeInTheDocument()
     expect(analyzeBtn.closest('button')).toBeDisabled()
   })
 
-  it('shows "Select a pro player" message when no proSwing in pro mode', () => {
-    // Set framesData so canAnalyze condition depends on proSwing
-    mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
-    // canAnalyze = framesData.length > 0 && (compareMode === 'custom' || proSwing !== null)
-    // With compareMode='pro' (default) and proSwing=null => canAnalyze=false
-
-    render(<LLMCoachingPanel proSwing={null} />)
-
-    const analyzeBtn = screen.getByText('Analyze Swing')
-    expect(analyzeBtn.closest('button')).toBeDisabled()
-  })
-
-  it('shows "Analyze Swing" button when ready', () => {
+  it('enables Analyze Swing once frames are present (solo mode)', () => {
     mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
 
-    render(<LLMCoachingPanel proSwing={mockProSwing} />)
+    render(<LLMCoachingPanel />)
 
     const btn = screen.getByText('Analyze Swing')
-    expect(btn).toBeInTheDocument()
-    // canAnalyze = true because framesData.length > 0 and proSwing is not null
     expect(btn.closest('button')).not.toBeDisabled()
-  })
-
-  it('Analyze button is disabled when canAnalyze is false', () => {
-    // framesData empty => canAnalyze = false
-    mockPoseState.framesData = []
-
-    render(<LLMCoachingPanel proSwing={null} />)
-
-    const btn = screen.getByText('Analyze Swing')
-    expect(btn.closest('button')).toBeDisabled()
   })
 
   it('shows loading state (spinner) during analysis', () => {
     mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
     mockAnalysisState.loading = true
 
-    render(<LLMCoachingPanel proSwing={mockProSwing} />)
+    render(<LLMCoachingPanel />)
 
     expect(screen.getByText('Analyzing...')).toBeInTheDocument()
   })
 
-  it('shows pro info in header when proSwing is provided', () => {
-    render(<LLMCoachingPanel proSwing={mockProSwing} />)
-
-    expect(screen.getByText(/Roger Federer/)).toBeInTheDocument()
-    expect(screen.getByText(/forehand/)).toBeInTheDocument()
-  })
-
   it('shows "Form Analysis" label when compareMode is custom', () => {
-    render(<LLMCoachingPanel proSwing={null} compareMode="custom" />)
+    render(<LLMCoachingPanel compareMode="custom" />)
 
     expect(screen.getByText('Form Analysis')).toBeInTheDocument()
+  })
+
+  it('shows baseline label when compareMode is baseline', () => {
+    render(<LLMCoachingPanel compareMode="baseline" baselineLabel="May 3 rally" />)
+
+    expect(screen.getByText(/May 3 rally/)).toBeInTheDocument()
   })
 
   it('renders feedback text correctly', () => {
     mockAnalysisState.feedback = '## Great Form\nYour **backswing** is solid.'
 
-    render(<LLMCoachingPanel proSwing={mockProSwing} />)
+    render(<LLMCoachingPanel />)
 
-    // The Collapse/Expand button should appear when feedback exists
     expect(screen.getByText('Expand')).toBeInTheDocument()
   })
 
   it('expand/collapse toggle works', () => {
     mockAnalysisState.feedback = 'Some coaching feedback here.'
 
-    render(<LLMCoachingPanel proSwing={mockProSwing} />)
+    render(<LLMCoachingPanel />)
 
-    // Initially collapsed but Expand button visible because feedback exists
     const expandBtn = screen.getByText('Expand')
     fireEvent.click(expandBtn)
 
-    // Now should show Collapse and the feedback content
     expect(screen.getByText('Collapse')).toBeInTheDocument()
     expect(screen.getByText('Some coaching feedback here.')).toBeInTheDocument()
   })
@@ -163,7 +113,7 @@ describe('LLMCoachingPanel', () => {
     mockAnalysisState.feedback = 'Analysis complete.'
     mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
 
-    render(<LLMCoachingPanel proSwing={mockProSwing} />)
+    render(<LLMCoachingPanel />)
 
     expect(screen.getByText('Re-analyze')).toBeInTheDocument()
   })
@@ -171,9 +121,8 @@ describe('LLMCoachingPanel', () => {
   it('shows markdown headers as h3 elements when panel is expanded', () => {
     mockAnalysisState.feedback = '## Swing Analysis\nLooks good.'
 
-    render(<LLMCoachingPanel proSwing={mockProSwing} />)
+    render(<LLMCoachingPanel />)
 
-    // Expand to see content
     fireEvent.click(screen.getByText('Expand'))
 
     expect(screen.getByText('Swing Analysis')).toBeInTheDocument()
@@ -183,7 +132,7 @@ describe('LLMCoachingPanel', () => {
   it('renders bold text in markdown', () => {
     mockAnalysisState.feedback = 'Your **technique** is improving.'
 
-    render(<LLMCoachingPanel proSwing={mockProSwing} />)
+    render(<LLMCoachingPanel />)
 
     fireEvent.click(screen.getByText('Expand'))
 

@@ -18,9 +18,6 @@ export default function Nav() {
         <div className="flex items-center gap-1">
           <NavLink href="/analyze">Analyze</NavLink>
           <NavLink href="/baseline">Baselines</NavLink>
-          <NavLink href="/compare">Compare</NavLink>
-          <NavLink href="/pros">Pro Library</NavLink>
-          <NavLink href="/admin/tag-clips">Clip Studio</NavLink>
 
           <div className="ml-2 pl-2 border-l border-white/10">
             {loading ? (

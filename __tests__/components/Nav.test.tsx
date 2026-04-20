@@ -30,14 +30,9 @@ describe('Nav', () => {
     expect(screen.getByText('Analyze')).toBeInTheDocument()
   })
 
-  it('renders Compare navigation link', () => {
+  it('renders Baselines navigation link', () => {
     render(<Nav />)
-    expect(screen.getByText('Compare')).toBeInTheDocument()
-  })
-
-  it('renders Pro Library navigation link', () => {
-    render(<Nav />)
-    expect(screen.getByText('Pro Library')).toBeInTheDocument()
+    expect(screen.getByText('Baselines')).toBeInTheDocument()
   })
 
   it('logo links to home page', () => {
@@ -52,15 +47,9 @@ describe('Nav', () => {
     expect(link).toHaveAttribute('href', '/analyze')
   })
 
-  it('Compare link has correct href', () => {
+  it('Baselines link has correct href', () => {
     render(<Nav />)
-    const link = screen.getByText('Compare').closest('a')!
-    expect(link).toHaveAttribute('href', '/compare')
-  })
-
-  it('Pro Library link has correct href', () => {
-    render(<Nav />)
-    const link = screen.getByText('Pro Library').closest('a')!
-    expect(link).toHaveAttribute('href', '/pros')
+    const link = screen.getByText('Baselines').closest('a')!
+    expect(link).toHaveAttribute('href', '/baseline')
   })
 })

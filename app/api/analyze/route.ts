@@ -15,7 +15,6 @@ export async function POST(request: NextRequest) {
   catch { return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }) }
   const {
     sessionId,
-    proSwingId,
     keypointsJson: inlineKeypoints,
     compareKeypointsJson,
     userFocus,
@@ -29,21 +28,6 @@ export async function POST(request: NextRequest) {
     typeof baselineLabel === 'string' && baselineLabel.trim()
       ? baselineLabel.trim().slice(0, 80)
       : 'your best day'
-
-  // Get pro swing data if proSwingId is provided
-  let proSwing: { keypoints_json?: KeypointsJson; pros?: { name: string }; shot_type?: string } | null = null
-  if (proSwingId) {
-    const { data, error: proError } = await supabase
-      .from('pro_swings')
-      .select('*, pros(name)')
-      .eq('id', proSwingId)
-      .single()
-
-    if (proError || !data) {
-      return NextResponse.json({ error: 'Pro swing not found' }, { status: 404 })
-    }
-    proSwing = data
-  }
 
   // Get user keypoints - from inline payload or session
   let userKeypoints: KeypointsJson | null = inlineKeypoints ?? null
@@ -116,64 +100,7 @@ Match the advice to what the swing actually needs. Never default to generic cues
 
   let prompt: string
 
-  if (proSwing) {
-    // Pro comparison mode
-    const proKeypoints: KeypointsJson | null = proSwing.keypoints_json ?? null
-    const proName = proSwing.pros?.name ?? 'Pro player'
-    const shotType = proSwing.shot_type ?? 'tennis'
-
-    if (!proKeypoints?.frames?.length) {
-      return NextResponse.json(
-        { error: 'Pro swing has no keypoints data. It may not have been processed yet.' },
-        { status: 400 }
-      )
-    }
-
-    const proSummary = buildAngleSummary(proKeypoints.frames)
-
-    const strokeRef = getBiomechanicsReference(
-      ['forehand', 'backhand', 'serve'].includes(shotType) ? shotType as 'forehand' | 'backhand' | 'serve' : 'all'
-    )
-
-    prompt = `You are a tennis coach helping a player model their ${shotType} after ${proName}'s. You just watched their swing side by side with ${proName}'s video. Your whole job is to help them move more like ${proName}.
-
-${SKILL_CALIBRATION}
-${focusBlock}
-STRICT RULES:
-- NEVER mention degrees, angles, or numbers of any kind. Describe everything in feel and body language.
-- NEVER rate or score the player. No X/100, no percentages, no grades. Just give advice.
-- NEVER use em dashes. Use commas or periods.
-- Talk like a real person. Short sentences. "You" and "your" constantly.
-- Reference ${proName} by name frequently. Compare what the player does to what ${proName} does. "Watch how ${proName} sits into his legs here" or "See how ${proName}'s hips fire before the arm even starts moving."
-- If the player's swing is already close to ${proName}'s, SAY THAT and give small tweaks. Don't invent problems.
-
-Use the data below to understand what's happening, but ONLY talk in coaching language. The player never sees these numbers.
-
-REFERENCE: ${strokeRef}
-USER SWING DATA: ${userSummary}
-${proName.toUpperCase()} SWING DATA: ${proSummary}
-
-Respond in this format:
-
-## What You're Doing Well
-Two or three sentences. Be specific. If something in their swing already looks like ${proName}'s, say so.
-
-## How to Get Closer to ${proName}'s ${shotType}
-
-**1. [Short coaching cue]**
-Describe what ${proName} does differently and why it matters. Then give one drill or feel-based tip to close the gap. Use phrases like "load into your legs the way ${proName} does", "let the racket lag behind your hand", "turn your hips before your shoulders".
-
-**2. [Short coaching cue]**
-Same approach. What ${proName} does, why it works, one thing to try on the next ball.
-
-**3. [Short coaching cue]**
-Same approach. What ${proName} does, why it works, one thing to try.
-
-## Your Practice Plan
-Three things to focus on next time you hit, all aimed at making your swing look and feel more like ${proName}'s. One sentence each.
-
-Keep it under 350 words. Sound like a coach who's watched a lot of ${proName} and knows exactly what makes that swing tick.`
-  } else if (compareSummary) {
+  if (compareSummary) {
     // Self-compare mode: same player, two takes. Coach for CONSISTENCY —
     // spot what's drifting between the two swings rather than rebuilding either.
     //

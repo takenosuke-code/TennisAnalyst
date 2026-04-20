@@ -9,7 +9,7 @@ export async function GET(
 
   const { data, error } = await supabase
     .from('video_segments')
-    .select('id, session_id, segment_index, shot_type, start_frame, end_frame, start_ms, end_ms, confidence, label, matched_pro_swing_id, created_at')
+    .select('id, session_id, segment_index, shot_type, start_frame, end_frame, start_ms, end_ms, confidence, label, created_at')
     .eq('session_id', sessionId)
     .order('segment_index', { ascending: true })
 

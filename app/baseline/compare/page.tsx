@@ -226,7 +226,6 @@ export default function BaselineComparePage() {
 
           {canCompare && selectedBaseline && (
             <LLMCoachingPanel
-              proSwing={null}
               compareMode="baseline"
               frames={baselineFrames}
               compareFrames={todayFrames}

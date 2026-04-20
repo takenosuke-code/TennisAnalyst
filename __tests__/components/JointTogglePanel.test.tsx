@@ -34,9 +34,7 @@ const defaultStoreState = {
 
 vi.mock('@/store', () => ({
   useJointStore: vi.fn(() => defaultStoreState),
-  useComparisonStore: vi.fn(() => ({
-    activeProSwing: null,
-  })),
+  usePoseStore: vi.fn(() => ({ shotType: null })),
 }))
 
 // Re-import so we can change the mock return per-test
