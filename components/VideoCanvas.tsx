@@ -1,10 +1,106 @@
 'use client'
 
 import { useRef, useEffect, useCallback, useState } from 'react'
-import type { PoseFrame } from '@/lib/supabase'
+import type { PoseFrame, Landmark, JointAngles, RacketHead } from '@/lib/supabase'
 import type { JointGroup } from '@/lib/jointAngles'
 import { renderPose, normalizeLandmarks } from './PoseRenderer'
 import { SwingPathTracer } from './SwingPathTracer'
+
+// Linear interpolation between two pose frames. Keypoints are sampled at
+// ~30fps on Railway but the video often plays at 60fps+ native, so
+// nearest-neighbor lookup surfaces as a visible 1-frame lag through fast
+// motion. Blending x/y/z/visibility/angles/racket between the two bracketing
+// samples closes that gap without re-extracting server-side.
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t
+}
+
+function lerpLandmark(a: Landmark, b: Landmark, t: number): Landmark {
+  return {
+    id: a.id,
+    name: a.name,
+    x: lerp(a.x, b.x, t),
+    y: lerp(a.y, b.y, t),
+    z: lerp(a.z, b.z, t),
+    visibility: lerp(a.visibility, b.visibility, t),
+  }
+}
+
+function lerpJointAngles(a: JointAngles, b: JointAngles, t: number): JointAngles {
+  const out: JointAngles = {}
+  const keys = new Set<keyof JointAngles>([
+    ...(Object.keys(a) as (keyof JointAngles)[]),
+    ...(Object.keys(b) as (keyof JointAngles)[]),
+  ])
+  for (const k of keys) {
+    const av = a[k]
+    const bv = b[k]
+    if (av !== undefined && bv !== undefined) {
+      out[k] = lerp(av, bv, t)
+    } else if (av !== undefined) {
+      out[k] = av
+    } else if (bv !== undefined) {
+      out[k] = bv
+    }
+  }
+  return out
+}
+
+// Preserves a detection on either side to keep the racket trail continuous
+// across a dropped frame. Returning null mid-stream would cause the trail
+// to flicker.
+function lerpRacketHead(
+  a: RacketHead | undefined,
+  b: RacketHead | undefined,
+  t: number,
+): RacketHead | undefined {
+  if (a === undefined && b === undefined) return undefined
+  if (a === null && b === null) return null
+  if (a === undefined || a === null) return b ?? null
+  if (b === undefined || b === null) return a
+  return {
+    x: lerp(a.x, b.x, t),
+    y: lerp(a.y, b.y, t),
+    confidence: lerp(a.confidence, b.confidence, t),
+  }
+}
+
+// Keeps `next.frame_index` so the swing tracer's "advance only when crossing
+// into a new sampled frame" dedupe at VideoCanvas.tsx ~line 139 still works.
+export function interpolateFrame(a: PoseFrame, b: PoseFrame, alpha: number): PoseFrame {
+  const t = alpha <= 0 ? 0 : alpha >= 1 ? 1 : alpha
+  const n = Math.min(a.landmarks.length, b.landmarks.length)
+  const landmarks = new Array<Landmark>(n)
+  for (let i = 0; i < n; i++) {
+    landmarks[i] = lerpLandmark(a.landmarks[i], b.landmarks[i], t)
+  }
+  return {
+    frame_index: b.frame_index,
+    timestamp_ms: Math.round(lerp(a.timestamp_ms, b.timestamp_ms, t)),
+    landmarks,
+    joint_angles: lerpJointAngles(a.joint_angles, b.joint_angles, t),
+    racket_head: lerpRacketHead(a.racket_head, b.racket_head, t),
+  }
+}
+
+export function getFrameAtTime(frames: PoseFrame[], timeSec: number): PoseFrame | null {
+  if (!frames.length) return null
+  const timeMs = timeSec * 1000
+  if (timeMs <= frames[0].timestamp_ms) return frames[0]
+  const last = frames[frames.length - 1]
+  if (timeMs >= last.timestamp_ms) return last
+  for (let i = 1; i < frames.length; i++) {
+    const cur = frames[i]
+    if (cur.timestamp_ms >= timeMs) {
+      const prev = frames[i - 1]
+      const span = cur.timestamp_ms - prev.timestamp_ms
+      if (span <= 0) return cur
+      const alpha = (timeMs - prev.timestamp_ms) / span
+      return interpolateFrame(prev, cur, alpha)
+    }
+  }
+  return last
+}
 
 interface VideoCanvasProps {
   src: string
@@ -70,23 +166,12 @@ export default function VideoCanvas({
   const [duration, setDuration] = useState(0)
   const [videoError, setVideoError] = useState(false)
 
-  // Find the closest frame to a given video timestamp
-  const getFrameAtTime = useCallback(
-    (time: number): PoseFrame | null => {
-      if (!framesData.length) return null
-      const timeMs = time * 1000
-      let closest = framesData[0]
-      let minDiff = Math.abs(framesData[0].timestamp_ms - timeMs)
-      for (const frame of framesData) {
-        const diff = Math.abs(frame.timestamp_ms - timeMs)
-        if (diff < minDiff) {
-          minDiff = diff
-          closest = frame
-        }
-      }
-      return closest
-    },
-    [framesData]
+  // Interpolates between the two bracketing sampled frames (see
+  // getFrameAtTime at module scope). Eliminates the ~1 decoded-frame lag that
+  // nearest-neighbor lookup produced at 60fps playback against 30fps keypoints.
+  const pickFrameAtTime = useCallback(
+    (time: number): PoseFrame | null => getFrameAtTime(framesData, time),
+    [framesData],
   )
 
   // Main render loop. `mediaTime` is the video-clock time in seconds reported
@@ -128,7 +213,7 @@ export default function VideoCanvas({
       ctx.clearRect(0, 0, logicalW, logicalH)
 
       const t = mediaTime ?? video.currentTime
-      const frame = getFrameAtTime(t)
+      const frame = pickFrameAtTime(t)
       if (!frame) return
 
       const displayFrame = overlayColor ? normalizeLandmarks(frame) : frame
@@ -161,7 +246,7 @@ export default function VideoCanvas({
       showRacket,
       overlayColor,
       overlaySkeletonColor,
-      getFrameAtTime,
+      pickFrameAtTime,
       videoError,
     ]
   )
@@ -326,11 +411,49 @@ export default function VideoCanvas({
     }
   }
 
+  // videoEl.duration is untrustworthy — broken moov boxes and MediaRecorder
+  // uploads report 0, NaN, or Infinity even when the file plays end-to-end.
+  // Keypoints_json carries a reliable span since Railway walks every frame
+  // during extraction. Displayed duration = max of the two trustworthy
+  // signals, falling back to whichever is defined.
+  const recomputeDuration = useCallback(() => {
+    const video = videoRef.current
+    const poseDurSec = framesData.length
+      ? framesData[framesData.length - 1].timestamp_ms / 1000
+      : 0
+    const videoDur = video?.duration
+    const videoDurOk =
+      typeof videoDur === 'number' && Number.isFinite(videoDur) && videoDur > 0
+    const trusted = videoDurOk ? Math.max(videoDur, poseDurSec) : poseDurSec
+    setDuration(trusted)
+    // Avoid notifying the parent with 0 on mount before either source
+    // resolves — the original handleLoadedMetadata only fired once metadata
+    // was present, and downstream consumers rely on positive values.
+    if (trusted > 0) onDurationChange?.(trusted)
+  }, [framesData, onDurationChange])
+
   const handleLoadedMetadata = () => {
-    const d = videoRef.current?.duration ?? 0
-    setDuration(d)
-    onDurationChange?.(d)
+    const video = videoRef.current
+    // Chromium MediaRecorder bug: duration stays Infinity until the
+    // playhead is seeked past the end, which forces the moov recompute.
+    // durationchange fires with the real number, which re-runs recompute.
+    if (video && !Number.isFinite(video.duration)) {
+      video.currentTime = 1e101
+      video.currentTime = 0
+    }
+    recomputeDuration()
   }
+
+  const handleVideoDurationChange = () => {
+    recomputeDuration()
+  }
+
+  // Pose data may arrive after loadedmetadata (props stream in). Recompute
+  // duration when framesData lands so the scrubber max widens to the real
+  // clip length even if videoEl.duration was wrong.
+  useEffect(() => {
+    recomputeDuration()
+  }, [recomputeDuration])
 
   const togglePlay = () => {
     const video = videoRef.current
@@ -377,6 +500,7 @@ export default function VideoCanvas({
           loop
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
+          onDurationChange={handleVideoDurationChange}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onError={() => setVideoError(true)}
