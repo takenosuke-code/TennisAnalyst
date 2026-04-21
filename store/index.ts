@@ -106,9 +106,10 @@ export const useJointStore = create<JointStore>((set) => ({
   visible: { ...defaultVisible },
   showSkeleton: true,
   showTrail: true,
-  // On by default: racket tracking is the headline user-facing feature. The
-  // tracer silently no-ops on legacy clips where `racket_head` is absent.
-  showRacket: true,
+  // Off by default. User requested racket-head overlay be removed; the
+  // store field and toggle are retained only because tests reference
+  // them. No UI surfaces a way to turn it back on.
+  showRacket: false,
   toggleJoint: (group) =>
     set((state) => ({
       visible: { ...state.visible, [group]: !state.visible[group] },

@@ -61,7 +61,7 @@ export default function VideoCanvas({
   visible,
   showSkeleton,
   showTrail,
-  showRacket = true,
+  showRacket = false,
   overlayColor,
   overlaySkeletonColor,
   syncedTime,
