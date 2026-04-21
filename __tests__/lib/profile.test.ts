@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import {
+  ADVANCED_BASELINE_TEMPLATE,
   buildInferredTierCoachingBlock,
   buildTierCoachingBlock,
+  COACHING_TOOL_NAME,
+  COACHING_TOOL_SCHEMAS,
   getCoachingContext,
   getProfile,
   hasCompletedOnboardingFlow,
@@ -9,6 +12,8 @@ import {
   isTierDowngrade,
   parseProfile,
   parseTierAssessmentTrailer,
+  TIER_MAX_TOKENS,
+  TIER_RULES,
   tierRank,
   wasSkipped,
   type UserProfile,
@@ -35,26 +40,30 @@ describe('buildTierCoachingBlock', () => {
     expect(block.length).toBeGreaterThan(100)
   })
 
-  it('surfaces the beginner "foundation" rule', () => {
+  it('surfaces the beginner external-focus rule with a word cap', () => {
     const block = buildTierCoachingBlock(baseProfile({ skill_tier: 'beginner' }))
-    expect(block).toMatch(/one foundation cue/i)
-    expect(block).toMatch(/lead with what's working/i)
+    expect(block).toMatch(/2 or 3 external-focus coaching cues/i)
+    expect(block).toMatch(/under 120 words/i)
+    expect(block).toMatch(/lead with ONE sentence about a strength/i)
   })
 
-  it('tells intermediate to mix foundations and refinements', () => {
+  it('tells intermediate to mix a foundation tune-up with a refinement under 180 words', () => {
     const block = buildTierCoachingBlock(baseProfile({ skill_tier: 'intermediate' }))
-    expect(block).toMatch(/foundations and refinements/i)
+    expect(block).toMatch(/under 180 words/i)
+    expect(block).toMatch(/2 or 3 coaching cues/i)
   })
 
-  it('tells competitive to focus on execution not foundations', () => {
+  it('tells competitive to emit exactly 3 execution cues under 220 words', () => {
     const block = buildTierCoachingBlock(baseProfile({ skill_tier: 'competitive' }))
-    expect(block).toMatch(/execution and refinement/i)
+    expect(block).toMatch(/exactly 3 execution cues/i)
+    expect(block).toMatch(/under 220 words/i)
   })
 
-  it('tells advanced there is nothing to fix by default', () => {
+  it('tells advanced to default to the baseline template and keep the frame positive', () => {
     const block = buildTierCoachingBlock(baseProfile({ skill_tier: 'advanced' }))
-    expect(block).toMatch(/nothing to fix/i)
-    expect(block).toMatch(/baseline/i)
+    expect(block).toContain(ADVANCED_BASELINE_TEMPLATE)
+    expect(block).toMatch(/under 60 words/i)
+    expect(block).toMatch(/Keep the frame positive/i)
   })
 
   it.each(tiers)('includes the defanged reconcile rule on the %s block', (tier) => {
@@ -119,6 +128,75 @@ describe('buildTierCoachingBlock', () => {
     // that only makes sense for an onboarded user.
     expect(block).not.toMatch(/RECONCILE RULE/)
     expect(block).not.toMatch(/GOAL WEIGHTING/)
+  })
+})
+
+describe('TIER_RULES phrasing invariants', () => {
+  const tiers: SkillTier[] = ['beginner', 'intermediate', 'competitive', 'advanced']
+
+  it.each(tiers)('does not use negation phrasing in the %s tier rule', (tier) => {
+    // Scope assertions to the raw TIER_RULES string — buildTierCoachingBlock
+    // includes RECONCILE_RULE, which is allowed to keep its negations.
+    const rule = TIER_RULES[tier]
+    expect(rule).not.toMatch(/\bnever\b/i)
+    expect(rule).not.toMatch(/\bdon't\b/i)
+    expect(rule).not.toMatch(/\bdo not\b/i)
+    expect(rule).not.toMatch(/\bnothing to\b/i)
+  })
+
+  it('beginner rule uses external-focus cue examples', () => {
+    const rule = TIER_RULES.beginner
+    expect(rule).toMatch(/push the ball|push through|racket up by your ear|finish with/i)
+    expect(rule).not.toMatch(/rotate your shoulder/i)
+    expect(rule).not.toMatch(/bend your knee/i)
+  })
+
+  it('advanced rule contains the literal baseline template', () => {
+    expect(TIER_RULES.advanced).toContain(ADVANCED_BASELINE_TEMPLATE)
+  })
+})
+
+describe('TIER_MAX_TOKENS', () => {
+  it('is monotonic (advanced < beginner < intermediate < competitive) and has expected values', () => {
+    expect(TIER_MAX_TOKENS.advanced).toBe(250)
+    expect(TIER_MAX_TOKENS.beginner).toBe(500)
+    expect(TIER_MAX_TOKENS.intermediate).toBe(700)
+    expect(TIER_MAX_TOKENS.competitive).toBe(900)
+    expect(TIER_MAX_TOKENS.advanced).toBeLessThan(TIER_MAX_TOKENS.beginner)
+    expect(TIER_MAX_TOKENS.beginner).toBeLessThan(TIER_MAX_TOKENS.intermediate)
+    expect(TIER_MAX_TOKENS.intermediate).toBeLessThan(TIER_MAX_TOKENS.competitive)
+  })
+})
+
+describe('COACHING_TOOL_SCHEMAS', () => {
+  function cuesSchemaFor(tier: SkillTier): { minItems: number; maxItems: number } {
+    const schema = COACHING_TOOL_SCHEMAS[tier].input_schema as {
+      properties: { cues: { minItems: number; maxItems: number } }
+    }
+    return schema.properties.cues
+  }
+
+  it('enforces per-tier cue counts', () => {
+    expect(cuesSchemaFor('beginner')).toMatchObject({ minItems: 2, maxItems: 3 })
+    expect(cuesSchemaFor('intermediate')).toMatchObject({ minItems: 2, maxItems: 3 })
+    expect(cuesSchemaFor('competitive')).toMatchObject({ minItems: 3, maxItems: 3 })
+    expect(cuesSchemaFor('advanced')).toMatchObject({ minItems: 0, maxItems: 1 })
+  })
+
+  it('all schemas use the same tool name', () => {
+    const tiers: SkillTier[] = ['beginner', 'intermediate', 'competitive', 'advanced']
+    for (const tier of tiers) {
+      expect(COACHING_TOOL_SCHEMAS[tier].name).toBe('emit_coaching')
+      expect(COACHING_TOOL_SCHEMAS[tier].name).toBe(COACHING_TOOL_NAME)
+    }
+  })
+
+  it('all schemas reject additionalProperties', () => {
+    const tiers: SkillTier[] = ['beginner', 'intermediate', 'competitive', 'advanced']
+    for (const tier of tiers) {
+      const schema = COACHING_TOOL_SCHEMAS[tier].input_schema as Record<string, unknown>
+      expect(schema.additionalProperties).toBe(false)
+    }
   })
 })
 

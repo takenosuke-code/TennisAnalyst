@@ -199,11 +199,313 @@ function describeGoal(profile: UserProfile): string {
 // inconsistent with the stated tier, assume camera geometry or a bad take.
 const RECONCILE_RULE = `RECONCILE RULE: The self-reported tier is a CONTRACT. Coach to it. Do NOT downgrade the player mid-response because the pose data looks rougher than the stated tier. Single-camera pose estimates are noisy — a weird elbow angle or scattered hip rotation is almost always camera geometry, occlusion, or a single off-take, NOT evidence that the player misreported their level. Trust the self-report. If the numbers surprise you, assume the camera is at fault, pick the cleanest frames to anchor on, and coach them at the tier they told you they're at. Never imply they overestimated themselves. Never phrase feedback like "let's lock in the basics first" unless their tier is beginner. Meet them exactly where they said they are.`
 
-const TIER_RULES: Record<SkillTier, string> = {
-  beginner: `TIER: Beginner (new to tennis). One foundation cue per analysis. Lead with what's working. Never list three problems — they'll quit. Use physical feel cues only.`,
-  intermediate: `TIER: Intermediate (rallies consistently). 2–3 tips, mix of foundations and refinements. Encouraging tone. Assume they rally consistently but still need cues on timing and rotation.`,
-  competitive: `TIER: Competitive (match/tournament player). Standard 3-tip structure. Assume they know the fundamentals. Focus on execution and refinement, not foundations.`,
-  advanced: `TIER: Advanced (top club / college / pro). Default to 'this is clean, keep grooving it' — one micro-refinement max, or nothing to fix. Never invent problems. If the swing is solid, say so and stop. Point them toward saving this as a baseline for drift detection.`,
+// Rewritten 2026-04 after Park et al. (2024) DPO verbosity bias + MIT/CVPR 2025
+// negation-handling work. Rules:
+//   1. No negations. Every directive is a positive "do X" statement.
+//   2. Explicit word cap inside the rule string so the model anchors on it.
+//   3. Beginner leads with a strength so the first thing they read is positive.
+//   4. Advanced has a literal default baseline template (see ADVANCED_BASELINE_TEMPLATE)
+//      — positive-framed, short, and the model copies it verbatim when there
+//      is nothing substantive to refine.
+//   5. Beginner cues are EXTERNAL-focus (Wulf 2013): "push through the contact",
+//      "let the racket swing out low to high", NOT internal joint references.
+export const TIER_RULES: Record<SkillTier, string> = {
+  beginner: `TIER: Beginner. Lead with ONE sentence about a strength you see in their swing. Then give 2 or 3 external-focus coaching cues (what to feel, where to direct the racket, where to send the ball) — things like "push the ball toward the far fence" or "finish with your racket up by your ear". Keep cues physical and feel-based. Stay under 120 words total. End on an encouraging one-liner about what to focus on next time.`,
+  intermediate: `TIER: Intermediate. Give 2 or 3 coaching cues that mix a foundation tune-up with a refinement. Lead with what's working, then hand them the cues as numbered feel-based tips. Stay under 180 words total. Close with a one-line practice focus.`,
+  competitive: `TIER: Competitive match player. Give exactly 3 execution cues focused on polish and matchplay. Lead with what's working, then give the 3 cues as numbered tips, each one actionable on the next ball. Stay under 220 words total. Close with a one-line takeaway.`,
+  advanced: `TIER: Advanced. Their mechanics are refined. Default to reinforcing the swing: emit the single sentence "This is clean — save it as your baseline." If, and only if, you see a concrete micro-refinement worth one cue, add ONE short positive tip after that sentence. Stay under 60 words total. Keep the frame positive throughout.`,
+}
+
+// Literal string the advanced tier defaults to. When the tool_use output
+// emits this exact sentence (and nothing else substantive), we flag the
+// telemetry row with used_baseline_template=true. Exported so both the
+// metrics extractor and integration tests reference one source of truth.
+export const ADVANCED_BASELINE_TEMPLATE = 'This is clean — save it as your baseline.'
+
+// Per-tier token ceiling passed to Anthropic's max_tokens. Roughly 4x the
+// word cap to give the model headroom without letting verbosity-bias run.
+// Ordering reflects the research invariant: advanced produces the least,
+// competitive the most. Monotonic.
+export const TIER_MAX_TOKENS: Record<SkillTier, number> = {
+  advanced: 250,
+  beginner: 500,
+  intermediate: 700,
+  competitive: 900,
+}
+
+// Fallback used when no profile is available (generic / skipped path).
+// Between intermediate and competitive so the skipped-path inference has
+// room to pick any tier.
+export const DEFAULT_MAX_TOKENS = 800
+
+// Tool-use contract. Each tier forces the model through a JSON schema that
+// mechanically bounds the number of cues it can emit. COACHING_TOOL_NAME is
+// the only tool we expose; the caller forces
+// tool_choice = { type: "tool", name: COACHING_TOOL_NAME } so the model must
+// call it and cannot freeform past max_tokens.
+export const COACHING_TOOL_NAME = 'emit_coaching' as const
+
+export type CoachingToolInput = {
+  strengths: Array<{ text: string }>
+  cues: Array<{ title: string; body: string }>
+  closing: string
+}
+
+// Per-tier count + length limits. Used both to build the schema and to
+// validate parsed tool input server-side (defense in depth).
+const TIER_CUE_BOUNDS: Record<SkillTier, { minCues: number; maxCues: number; maxCueBodyChars: number }> = {
+  beginner:     { minCues: 2, maxCues: 3, maxCueBodyChars: 280 },
+  intermediate: { minCues: 2, maxCues: 3, maxCueBodyChars: 350 },
+  competitive:  { minCues: 3, maxCues: 3, maxCueBodyChars: 350 },
+  advanced:     { minCues: 0, maxCues: 1, maxCueBodyChars: 210 },
+}
+
+export const COACHING_TOOL_SCHEMAS: Record<SkillTier, {
+  name: typeof COACHING_TOOL_NAME
+  description: string
+  input_schema: Record<string, unknown>
+}> = Object.fromEntries(
+  (Object.keys(TIER_CUE_BOUNDS) as SkillTier[]).map((tier) => {
+    const { minCues, maxCues, maxCueBodyChars } = TIER_CUE_BOUNDS[tier]
+    return [
+      tier,
+      {
+        name: COACHING_TOOL_NAME,
+        description: `Emit tennis coaching for a ${tier} player. Follow the schema exactly — the player only sees what you put in these fields.`,
+        input_schema: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['strengths', 'cues', 'closing'],
+          properties: {
+            strengths: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 2,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['text'],
+                properties: {
+                  text: { type: 'string', minLength: 4, maxLength: 200 },
+                },
+              },
+            },
+            cues: {
+              type: 'array',
+              minItems: minCues,
+              maxItems: maxCues,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['title', 'body'],
+                properties: {
+                  title: { type: 'string', minLength: 2, maxLength: 60 },
+                  body:  { type: 'string', minLength: 2, maxLength: maxCueBodyChars },
+                },
+              },
+            },
+            closing: { type: 'string', minLength: 2, maxLength: 200 },
+          },
+        },
+      },
+    ]
+  }),
+) as unknown as Record<SkillTier, { name: typeof COACHING_TOOL_NAME; description: string; input_schema: Record<string, unknown> }>
+
+// Parses a raw tool_use input blob into a validated CoachingToolInput.
+// Returns null on any shape mismatch — callers fall back to the plain-text
+// streaming path. Enforces TIER_CUE_BOUNDS at the TS layer too (Anthropic's
+// schema validation is best-effort; we defense-in-depth guard tier=null by
+// falling back to intermediate bounds).
+export function buildCoachingToolInput(
+  rawInput: unknown,
+  tier: SkillTier | null,
+): CoachingToolInput | null {
+  if (!rawInput || typeof rawInput !== 'object') return null
+  const obj = rawInput as Record<string, unknown>
+
+  const rawStrengths = obj.strengths
+  if (!Array.isArray(rawStrengths)) return null
+  if (rawStrengths.length < 1 || rawStrengths.length > 2) return null
+  const strengths: Array<{ text: string }> = []
+  for (const s of rawStrengths) {
+    if (!s || typeof s !== 'object') return null
+    const text = (s as Record<string, unknown>).text
+    if (typeof text !== 'string') return null
+    const trimmed = text.trim()
+    if (!trimmed) return null
+    strengths.push({ text: trimmed })
+  }
+
+  const bounds = TIER_CUE_BOUNDS[tier ?? 'intermediate']
+  const rawCues = obj.cues
+  if (!Array.isArray(rawCues)) return null
+  if (rawCues.length < bounds.minCues || rawCues.length > bounds.maxCues) return null
+  const cues: Array<{ title: string; body: string }> = []
+  for (const c of rawCues) {
+    if (!c || typeof c !== 'object') return null
+    const title = (c as Record<string, unknown>).title
+    const body = (c as Record<string, unknown>).body
+    if (typeof title !== 'string' || typeof body !== 'string') return null
+    const trimmedTitle = title.trim()
+    const trimmedBody = body.trim()
+    if (!trimmedTitle || !trimmedBody) return null
+    cues.push({ title: trimmedTitle, body: trimmedBody })
+  }
+
+  const rawClosing = obj.closing
+  if (typeof rawClosing !== 'string') return null
+  const closing = rawClosing.trim()
+  if (!closing || closing.length > 200) return null
+
+  return { strengths, cues, closing }
+}
+
+// Normalize a string for template-match comparison: lowercase, collapse
+// whitespace + punctuation (periods, commas, em-dashes, en-dashes, hyphens)
+// to a single space, trim. Used to detect ADVANCED_BASELINE_TEMPLATE even
+// when the model echoes back minor punctuation variants.
+function normalizeForTemplateCompare(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[.,\u2014\u2013\-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function matchesBaselineTemplate(s: string): boolean {
+  if (!s) return false
+  return normalizeForTemplateCompare(s) === normalizeForTemplateCompare(ADVANCED_BASELINE_TEMPLATE)
+}
+
+// Deterministic renderer: CoachingToolInput -> markdown for LLMCoachingPanel's
+// MarkdownText (understands `## heading` + `**bold**` only).
+//
+// Default shape:
+//   ## What You're Doing Well
+//   <strengths[0].text>
+//   <strengths[1].text>   (if present)
+//
+//   ## Your Coaching Cues    (omitted when cues.length === 0)
+//
+//   **1. <cues[0].title>**
+//   <cues[0].body>
+//
+//   **2. <cues[1].title>**
+//   ...
+//
+//   ## Practice Focus
+//   <closing>
+//
+// Advanced-baseline special case: when tier === 'advanced' AND cues.length === 0
+// AND closing matches ADVANCED_BASELINE_TEMPLATE (via normalized compare),
+// render ONLY the literal template string with no headings.
+export function renderCoachingToolInputToMarkdown(
+  input: CoachingToolInput,
+  tier: SkillTier | null,
+): string {
+  if (
+    tier === 'advanced' &&
+    input.cues.length === 0 &&
+    matchesBaselineTemplate(input.closing)
+  ) {
+    return ADVANCED_BASELINE_TEMPLATE
+  }
+
+  const parts: string[] = []
+  parts.push(`## What You're Doing Well`)
+  for (const s of input.strengths) {
+    parts.push(s.text)
+  }
+
+  if (input.cues.length > 0) {
+    parts.push('')
+    parts.push('## Your Coaching Cues')
+    input.cues.forEach((cue, idx) => {
+      parts.push('')
+      parts.push(`**${idx + 1}. ${cue.title}**`)
+      parts.push(cue.body)
+    })
+  }
+
+  parts.push('')
+  parts.push('## Practice Focus')
+  parts.push(input.closing)
+
+  return parts.join('\n')
+}
+
+// Counts occurrences of `**N. <title>**` or leading `N.` at line start.
+// Dedupe by the captured integer, return the count of distinct 1-indexed
+// integers that appear in a plausible ascending sequence (1; or 1,2;
+// or 1,2,3). Malformed/skipped sequences collapse to the count of the
+// first in-sequence run. Exported for unit testing.
+export function countTipsInMarkdown(md: string): number {
+  if (!md) return 0
+  const re = /^\s*(?:\*\*)?\s*(\d+)\.\s/gm
+  const seen = new Set<number>()
+  const ordered: number[] = []
+  for (const m of md.matchAll(re)) {
+    const n = parseInt(m[1], 10)
+    if (!Number.isFinite(n)) continue
+    if (seen.has(n)) continue
+    seen.add(n)
+    ordered.push(n)
+  }
+  if (ordered.length === 0) return 0
+  // Count the longest prefix starting at 1 where each next is +1.
+  if (ordered[0] !== 1) return 0
+  let count = 1
+  for (let i = 1; i < ordered.length; i++) {
+    if (ordered[i] === ordered[i - 1] + 1) count++
+    else break
+  }
+  return count
+}
+
+// Central metrics extractor used by both analyze routes. Handles both the
+// structured (tool_use) path and the markdown fallback.
+export function extractResponseMetrics(args: {
+  tier: SkillTier | null
+  toolInput: CoachingToolInput | null
+  markdownText: string
+  outputTokens: number | null
+}): {
+  response_token_count: number | null
+  response_tip_count: number | null
+  response_char_count: number | null
+  used_baseline_template: boolean
+} {
+  const { tier, toolInput, markdownText, outputTokens } = args
+
+  const response_token_count = outputTokens
+  const response_char_count = typeof markdownText === 'string' ? markdownText.length : 0
+
+  let response_tip_count: number | null
+  if (toolInput) {
+    response_tip_count = toolInput.cues.length
+  } else if (markdownText) {
+    response_tip_count = countTipsInMarkdown(markdownText)
+  } else {
+    response_tip_count = null
+  }
+
+  let used_baseline_template = false
+  if (tier === 'advanced') {
+    if (toolInput) {
+      used_baseline_template =
+        toolInput.cues.length === 0 && matchesBaselineTemplate(toolInput.closing)
+    } else if (markdownText) {
+      used_baseline_template = matchesBaselineTemplate(markdownText.trim())
+    }
+  }
+
+  return {
+    response_token_count,
+    response_tip_count,
+    response_char_count,
+    used_baseline_template,
+  }
 }
 
 // Trailing instruction appended to every prompt branch so we can collect

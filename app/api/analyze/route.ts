@@ -13,11 +13,20 @@ import { buildAngleSummary } from '@/lib/jointAngles'
 import { getBiomechanicsReference } from '@/lib/biomechanics-reference'
 import { classifyAndTagCaptureQuality } from '@/lib/captureQuality'
 import {
+  buildCoachingToolInput,
   buildInferredTierCoachingBlock,
   buildTierCoachingBlock,
+  COACHING_TOOL_NAME,
+  COACHING_TOOL_SCHEMAS,
+  DEFAULT_MAX_TOKENS,
+  extractResponseMetrics,
   getCoachingContext,
   isTierDowngrade,
   parseTierAssessmentTrailer,
+  renderCoachingToolInputToMarkdown,
+  TIER_MAX_TOKENS,
+  type CoachingToolInput,
+  type SkillTier,
 } from '@/lib/profile'
 import { sanitizePromptInput } from '@/lib/sanitize'
 import type { KeypointsJson } from '@/lib/supabase'
@@ -253,11 +262,15 @@ Three specific things to focus on in their next hitting session. Make each one a
 Keep it under 350 words. Sound like a coach who believes in this player.`
   }
 
-  const systemPrompt = `You are a veteran tennis coach who has been on court for 30 years. You talk like a real person having a conversation with a player between points.
+  // Fallback (streaming) system prompt. Kept verbatim from the pre-tool-use
+  // behavior so the fallback path produces the same output shape it did
+  // before. Any mention of tool_use here would confuse the model on the
+  // streaming branch.
+  const fallbackSystemPrompt = `You are a veteran tennis coach who has been on court for 30 years. You talk like a real person having a conversation with a player between points.
 
 VOICE RULES (follow these strictly):
 - Write like you TALK. Short sentences. Casual tone. "Your hips are way ahead of your arm here" not "The hip rotation precedes the arm extension."
-- NEVER use em dashes. Use periods or commas instead.
+- Do not use em dashes in your cue bodies. The only exception is the literal baseline template for the advanced tier, which you may output verbatim.
 - NEVER list raw degree numbers on their own. Wrong: "elbow: 170°, ideal: 110°". Right: "your arm is almost locked straight when you want a nice relaxed bend."
 - You CAN mention a number to back up a point, but always in a natural sentence: "you're only getting about 20 degrees of hip turn when the pros are closer to 45."
 - Use coaching cues a player can FEEL: "load your weight into your back leg", "let the racket drop behind you like a pendulum", "snap your hips like you're throwing a punch."
@@ -266,11 +279,34 @@ VOICE RULES (follow these strictly):
 - No bullet points with just numbers. No tables. No clinical language.
 - Write "you" and "your" constantly. Talk TO the player.`
 
+  // Primary (tool_use) system prompt. Relaxes the em-dash rule just for the
+  // literal advanced-baseline template, and instructs the model to emit its
+  // response through the emit_coaching tool rather than freeform prose.
+  const primarySystemPrompt = `You are a veteran tennis coach who has been on court for 30 years. You talk like a real person having a conversation with a player between points.
+
+VOICE RULES (follow these strictly):
+- Write like you TALK. Short sentences. Casual tone. "Your hips are way ahead of your arm here" not "The hip rotation precedes the arm extension."
+- Do not use em dashes in your cue bodies. The only exception is the literal baseline template for the advanced tier, which you may output verbatim.
+- NEVER list raw degree numbers on their own. Wrong: "elbow: 170°, ideal: 110°". Right: "your arm is almost locked straight when you want a nice relaxed bend."
+- You CAN mention a number to back up a point, but always in a natural sentence: "you're only getting about 20 degrees of hip turn when the pros are closer to 45."
+- Use coaching cues a player can FEEL: "load your weight into your back leg", "let the racket drop behind you like a pendulum", "snap your hips like you're throwing a punch."
+- Keep it practical. Every piece of advice should be something they can try on the very next ball.
+- Sound encouraging, not critical. You're helping, not grading.
+- No bullet points with just numbers. No tables. No clinical language.
+- Write "you" and "your" constantly. Talk TO the player.
+
+You will emit your response by calling the emit_coaching tool. Do not write prose outside the tool call.`
+
   // llm_coached_tier is the tier we're actually telling the LLM to coach to.
   // For self-reported users, that's the profile tier. For skipped users, the
   // LLM picks one from the swing data — null at insert, backfilled from the
   // parsed assessment trailer after the stream completes.
   const coachedTier = profile?.skill_tier ?? null
+  const tierKey: SkillTier | null = profile?.skill_tier ?? null
+  const maxTokens = tierKey ? TIER_MAX_TOKENS[tierKey] : DEFAULT_MAX_TOKENS
+  // Schema selection falls back to intermediate when the user has no profile;
+  // metadata (tierKey) stays null so metrics and downgrade logic don't lie.
+  const toolSchema = COACHING_TOOL_SCHEMAS[tierKey ?? 'intermediate']
 
   // Derive shot_type and blob_url for the telemetry row. Falls back to fetching
   // from user_sessions when a sessionId was provided but the body didn't
@@ -335,55 +371,148 @@ VOICE RULES (follow these strictly):
   // dropping the UPDATE and leaving capture_quality_flag null in prod.
   after(() => classifyAndTagCaptureQuality(eventId, resolvedBlobUrl))
 
-  const messageStream = anthropic.messages.stream({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: prompt }],
-  })
-
   const encoder = new TextEncoder()
   const ERROR_PREFIX = '\n\n[ERROR] '
+
+  // Try the structured (tool_use) path first. Returns null on any failure so
+  // the caller can fall back to the streaming path. Kill-switch short-circuits
+  // before we ever touch the SDK.
+  async function tryStructured(): Promise<
+    | { markdown: string; toolInput: CoachingToolInput; outputTokens: number | null }
+    | null
+  > {
+    if (process.env.STRUCTURED_OUTPUT_DISABLE === '1') return null
+    // Skipped users (no profile) need the streaming path so the model can emit
+    // a [TIER_ASSESSMENT: ...] trailer for tier inference. The tool_use schema
+    // has no trailer slot, so structured-path output would discard that signal.
+    if (!profile && skipped) return null
+    try {
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: maxTokens,
+        system: primarySystemPrompt,
+        messages: [{ role: 'user', content: prompt }],
+        // TODO: drop this cast once COACHING_TOOL_SCHEMAS types `input_schema`
+        // as `Anthropic.Tool.InputSchema` instead of `Record<string, unknown>`.
+        tools: [toolSchema as unknown as Anthropic.Tool],
+        tool_choice: { type: 'tool', name: COACHING_TOOL_NAME },
+      })
+
+      if (!Array.isArray(response.content) || response.content.length === 0) {
+        return null
+      }
+      const toolBlock = response.content.find(
+        (b): b is Extract<typeof b, { type: 'tool_use' }> =>
+          b.type === 'tool_use' && b.name === COACHING_TOOL_NAME,
+      )
+      if (!toolBlock) return null
+
+      const parsed = buildCoachingToolInput(toolBlock.input, tierKey)
+      if (!parsed) return null
+
+      const rendered = renderCoachingToolInputToMarkdown(parsed, tierKey)
+      if (!rendered) return null
+
+      const outputTokens = response.usage?.output_tokens ?? null
+      return { markdown: rendered, toolInput: parsed, outputTokens }
+    } catch (err) {
+      console.error('analyze structured path failed:', err)
+      return null
+    }
+  }
+
+  // Fallback streaming path. Preserves the pre-tool-use behavior: buffer the
+  // full response, strip the TIER_ASSESSMENT trailer, return the assessed tier
+  // so the backfill UPDATE can record it. Per-tier max_tokens is now honored
+  // here too (previously hardcoded to 1024).
+  async function runFallback(): Promise<{
+    markdown: string
+    assessedTier: ReturnType<typeof parseTierAssessmentTrailer>['assessedTier']
+    error: string | null
+  }> {
+    const messageStream = anthropic.messages.stream({
+      model: 'claude-sonnet-4-6',
+      max_tokens: maxTokens,
+      system: fallbackSystemPrompt,
+      messages: [{ role: 'user', content: prompt }],
+    })
+
+    let buffered = ''
+    let error: string | null = null
+    try {
+      for await (const chunk of messageStream) {
+        if (
+          chunk.type === 'content_block_delta' &&
+          chunk.delta.type === 'text_delta'
+        ) {
+          buffered += chunk.delta.text
+        }
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Analysis stream failed'
+    }
+    const { assessedTier, stripped } = parseTierAssessmentTrailer(buffered)
+    return { markdown: stripped, assessedTier, error }
+  }
 
   // We buffer the full response before emitting, then parse + strip the
   // [TIER_ASSESSMENT: ...] trailer. Latency cost is the streaming UX (response
   // arrives in one shot instead of token-by-token), but the telemetry signal —
   // seeing what the model thought the tier was, even when the defanged
   // reconcile rule prevents it from acting — is worth far more than perceived
-  // typing speed. Total generation is capped at 1024 tokens so the wait is
-  // bounded in the low single-digit seconds.
+  // typing speed. Total generation is capped per-tier so the wait is bounded.
   const stream = new ReadableStream({
     async start(controller) {
-      let buffered = ''
-      let streamFailed = false
+      const structured = await tryStructured()
+
+      let markdown: string
+      let toolInput: CoachingToolInput | null
+      let outputTokens: number | null
+      let assessedTier:
+        | 'beginner'
+        | 'intermediate'
+        | 'competitive'
+        | 'advanced'
+        | 'unknown'
+        | null
       let streamError: string | null = null
-      try {
-        for await (const chunk of messageStream) {
-          if (
-            chunk.type === 'content_block_delta' &&
-            chunk.delta.type === 'text_delta'
-          ) {
-            buffered += chunk.delta.text
-          }
-        }
-      } catch (err) {
-        streamFailed = true
-        streamError = err instanceof Error ? err.message : 'Analysis stream failed'
+
+      if (structured) {
+        markdown = structured.markdown
+        toolInput = structured.toolInput
+        outputTokens = structured.outputTokens
+        // tool_use forecloses model dissent on tier — by definition the model
+        // coached to the tier we passed in. Null when we had no profile.
+        assessedTier = tierKey
+      } else {
+        const fb = await runFallback()
+        markdown = fb.markdown
+        toolInput = null
+        outputTokens = null
+        assessedTier = fb.assessedTier
+        streamError = fb.error
       }
 
-      const { assessedTier, stripped } = parseTierAssessmentTrailer(buffered)
-      controller.enqueue(encoder.encode(stripped))
-      if (streamFailed && streamError) {
+      controller.enqueue(encoder.encode(markdown))
+      if (streamError) {
         controller.enqueue(encoder.encode(`${ERROR_PREFIX}${streamError}`))
       }
       controller.close()
 
-      // Backfill the parsed assessment + downgrade flag. Wrapped in after()
-      // so Vercel keeps the invocation live past controller.close() — without
-      // this the DB UPDATE gets dropped when the function freezes.
+      // Backfill the parsed assessment + downgrade flag, plus the new output
+      // metrics. Wrapped in after() so Vercel keeps the invocation live past
+      // controller.close() — without this the DB UPDATE gets dropped when the
+      // function freezes.
       if (eventId) {
-        const backfillCoached = coachedTier ?? (assessedTier && assessedTier !== 'unknown' ? assessedTier : null)
+        const backfillCoached =
+          coachedTier ?? (assessedTier && assessedTier !== 'unknown' ? assessedTier : null)
         const downgrade = isTierDowngrade(backfillCoached, assessedTier)
+        const metrics = extractResponseMetrics({
+          tier: tierKey,
+          toolInput,
+          markdownText: markdown,
+          outputTokens,
+        })
         after(async () => {
           const { error } = await supabaseAdmin
             .from('analysis_events')
@@ -391,6 +520,10 @@ VOICE RULES (follow these strictly):
               llm_assessed_tier: assessedTier,
               llm_coached_tier: backfillCoached,
               llm_tier_downgrade: downgrade,
+              response_token_count: metrics.response_token_count,
+              response_tip_count: metrics.response_tip_count,
+              response_char_count: metrics.response_char_count,
+              used_baseline_template: metrics.used_baseline_template,
             })
             .eq('id', eventId)
           if (error) console.error('analysis_events update failed:', error)

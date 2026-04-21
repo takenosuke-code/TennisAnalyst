@@ -17,11 +17,20 @@ import { buildAngleSummary } from '@/lib/jointAngles'
 import { getBiomechanicsReference } from '@/lib/biomechanics-reference'
 import { classifyAndTagCaptureQuality } from '@/lib/captureQuality'
 import {
+  buildCoachingToolInput,
   buildInferredTierCoachingBlock,
   buildTierCoachingBlock,
+  COACHING_TOOL_NAME,
+  COACHING_TOOL_SCHEMAS,
+  DEFAULT_MAX_TOKENS,
+  extractResponseMetrics,
   getCoachingContext,
   isTierDowngrade,
   parseTierAssessmentTrailer,
+  renderCoachingToolInputToMarkdown,
+  TIER_MAX_TOKENS,
+  type CoachingToolInput,
+  type SkillTier,
 } from '@/lib/profile'
 import type { KeypointsJson } from '@/lib/supabase'
 
@@ -95,7 +104,20 @@ Three one-sentence focus points.
 
 Keep it under 350 words.`
 
+  // Fallback (streaming) system prompt. Allows the advanced-baseline template
+  // to keep its em dash verbatim, matching the primary prompt's exception.
+  const fallbackSystemPrompt = `You are a veteran tennis coach. Talk like a real person. Short sentences. Casual tone. Use "you" and "your" constantly. Do not use em dashes in your cue bodies. The only exception is the literal baseline template for the advanced tier, which you may output verbatim. No raw numbers.`
+
+  // Primary (tool_use) system prompt. Allows the advanced-baseline template
+  // to keep its em dash, and instructs the model to respond via the tool.
+  const primarySystemPrompt = `You are a veteran tennis coach. Talk like a real person. Short sentences. Casual tone. Use "you" and "your" constantly. Do not use em dashes in your cue bodies. The only exception is the literal baseline template for the advanced tier, which you may output verbatim. No raw numbers.
+
+You will emit your response by calling the emit_coaching tool. Do not write prose outside the tool call.`
+
   const coachedTier = profile?.skill_tier ?? null
+  const tierKey: SkillTier | null = profile?.skill_tier ?? null
+  const maxTokens = tierKey ? TIER_MAX_TOKENS[tierKey] : DEFAULT_MAX_TOKENS
+  const toolSchema = COACHING_TOOL_SCHEMAS[tierKey ?? 'intermediate']
 
   // Write the telemetry row BEFORE streaming starts so we can hand the frontend
   // the event id via X-Analysis-Event-Id for the thumbs-feedback wire-up.
@@ -137,37 +159,115 @@ Keep it under 350 words.`
   // URLs land, the call already exists. Wrapped in after() for Vercel.
   after(() => classifyAndTagCaptureQuality(eventId, null))
 
-  const messageStream = anthropic.messages.stream({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
-    system: `You are a veteran tennis coach. Talk like a real person. Short sentences. Casual tone. Use "you" and "your" constantly. No em dashes. No raw numbers.`,
-    messages: [{ role: 'user', content: prompt }],
-  })
-
   const encoder = new TextEncoder()
   const ERROR_PREFIX = '\n\n[ERROR] '
 
-  // See analyze/route.ts for the tradeoff rationale — we buffer the stream so
-  // we can strip the [TIER_ASSESSMENT: ...] trailer before the client sees it.
+  async function tryStructured(): Promise<
+    | { markdown: string; toolInput: CoachingToolInput; outputTokens: number | null }
+    | null
+  > {
+    if (process.env.STRUCTURED_OUTPUT_DISABLE === '1') return null
+    // Skipped users (no profile) need the streaming path so the model can emit
+    // a [TIER_ASSESSMENT: ...] trailer for tier inference. The tool_use schema
+    // has no trailer slot, so structured-path output would discard that signal.
+    if (!profile && skipped) return null
+    try {
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: maxTokens,
+        system: primarySystemPrompt,
+        messages: [{ role: 'user', content: prompt }],
+        // TODO: drop this cast once COACHING_TOOL_SCHEMAS types `input_schema`
+        // as `Anthropic.Tool.InputSchema` instead of `Record<string, unknown>`.
+        tools: [toolSchema as unknown as Anthropic.Tool],
+        tool_choice: { type: 'tool', name: COACHING_TOOL_NAME },
+      })
+
+      if (!Array.isArray(response.content) || response.content.length === 0) {
+        return null
+      }
+      const toolBlock = response.content.find(
+        (b): b is Extract<typeof b, { type: 'tool_use' }> =>
+          b.type === 'tool_use' && b.name === COACHING_TOOL_NAME,
+      )
+      if (!toolBlock) return null
+
+      const parsed = buildCoachingToolInput(toolBlock.input, tierKey)
+      if (!parsed) return null
+
+      const rendered = renderCoachingToolInputToMarkdown(parsed, tierKey)
+      if (!rendered) return null
+
+      const outputTokens = response.usage?.output_tokens ?? null
+      return { markdown: rendered, toolInput: parsed, outputTokens }
+    } catch (err) {
+      console.error('segment analyze structured path failed:', err)
+      return null
+    }
+  }
+
+  async function runFallback(): Promise<{
+    markdown: string
+    assessedTier: ReturnType<typeof parseTierAssessmentTrailer>['assessedTier']
+    error: string | null
+  }> {
+    const messageStream = anthropic.messages.stream({
+      model: 'claude-sonnet-4-6',
+      max_tokens: maxTokens,
+      system: fallbackSystemPrompt,
+      messages: [{ role: 'user', content: prompt }],
+    })
+
+    let buffered = ''
+    let error: string | null = null
+    try {
+      for await (const chunk of messageStream) {
+        if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
+          buffered += chunk.delta.text
+        }
+      }
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Analysis stream failed'
+    }
+    const { assessedTier, stripped } = parseTierAssessmentTrailer(buffered)
+    return { markdown: stripped, assessedTier, error }
+  }
+
+  // See analyze/route.ts for the tradeoff rationale — we buffer the output so
+  // we can strip the [TIER_ASSESSMENT: ...] trailer on the fallback path (the
+  // tool_use path has no trailer by construction).
   const stream = new ReadableStream({
     async start(controller) {
-      let buffered = ''
-      let streamFailed = false
+      const structured = await tryStructured()
+
+      let markdown: string
+      let toolInput: CoachingToolInput | null
+      let outputTokens: number | null
+      let assessedTier:
+        | 'beginner'
+        | 'intermediate'
+        | 'competitive'
+        | 'advanced'
+        | 'unknown'
+        | null
       let streamError: string | null = null
-      try {
-        for await (const chunk of messageStream) {
-          if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-            buffered += chunk.delta.text
-          }
-        }
-      } catch (err) {
-        streamFailed = true
-        streamError = err instanceof Error ? err.message : 'Analysis stream failed'
+
+      if (structured) {
+        markdown = structured.markdown
+        toolInput = structured.toolInput
+        outputTokens = structured.outputTokens
+        assessedTier = tierKey
+      } else {
+        const fb = await runFallback()
+        markdown = fb.markdown
+        toolInput = null
+        outputTokens = null
+        assessedTier = fb.assessedTier
+        streamError = fb.error
       }
 
-      const { assessedTier, stripped } = parseTierAssessmentTrailer(buffered)
-      controller.enqueue(encoder.encode(stripped))
-      if (streamFailed && streamError) {
+      controller.enqueue(encoder.encode(markdown))
+      if (streamError) {
         controller.enqueue(encoder.encode(`${ERROR_PREFIX}${streamError}`))
       }
       controller.close()
@@ -175,8 +275,15 @@ Keep it under 350 words.`
       // Wrapped in after() so Vercel keeps the invocation live past
       // controller.close() — see analyze/route.ts for the full rationale.
       if (eventId) {
-        const backfillCoached = coachedTier ?? (assessedTier && assessedTier !== 'unknown' ? assessedTier : null)
+        const backfillCoached =
+          coachedTier ?? (assessedTier && assessedTier !== 'unknown' ? assessedTier : null)
         const downgrade = isTierDowngrade(backfillCoached, assessedTier)
+        const metrics = extractResponseMetrics({
+          tier: tierKey,
+          toolInput,
+          markdownText: markdown,
+          outputTokens,
+        })
         after(async () => {
           const { error } = await supabaseAdmin
             .from('analysis_events')
@@ -184,6 +291,10 @@ Keep it under 350 words.`
               llm_assessed_tier: assessedTier,
               llm_coached_tier: backfillCoached,
               llm_tier_downgrade: downgrade,
+              response_token_count: metrics.response_token_count,
+              response_tip_count: metrics.response_tip_count,
+              response_char_count: metrics.response_char_count,
+              used_baseline_template: metrics.used_baseline_template,
             })
             .eq('id', eventId)
           if (error) console.error('analysis_events update failed:', error)

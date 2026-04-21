@@ -181,6 +181,15 @@ export type AnalysisEvent = {
 
   user_correction: 'correct' | 'too_easy' | 'too_hard' | null
   user_correction_note: string | null
+
+  // new 2026-04: output shape telemetry for tier-rule rewrite validation
+  response_token_count: number | null
+  // new 2026-04: output shape telemetry for tier-rule rewrite validation
+  response_tip_count: number | null
+  // new 2026-04: output shape telemetry for tier-rule rewrite validation
+  response_char_count: number | null
+  // new 2026-04: output shape telemetry for tier-rule rewrite validation
+  used_baseline_template: boolean
 }
 
 export type UserCorrection = NonNullable<AnalysisEvent['user_correction']>
