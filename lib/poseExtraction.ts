@@ -17,16 +17,21 @@ const CROP_CANVAS_SIZE = 512
 // room for the arm/racket to extend outside the initial detection without
 // clipping when we crop for pass 2.
 const CROP_MARGIN = 1.5
-// Only skip the second pass when the subject already fills most of the
-// frame (close-up shot). Earlier threshold was 0.85 but a player at
-// ~50-70% of the frame was still benefiting from the upscale, so lower
-// it. Close-ups still skip correctly.
-const CROP_SKIP_THRESHOLD = 0.7
 // Only landmarks above this visibility count toward the pass-1 bbox.
 // On a far/noisy subject, MediaPipe sprays a few spurious "confident"
 // landmarks across the court — a higher gate keeps the bbox centered
 // on the actual player rather than the most confident outlier.
 const CROP_BBOX_VIS_GATE = 0.5
+// Pass-2 is kept disabled for now. User report on cea292d-d6ebff7
+// showed the skeleton rendering as a correctly-shaped body displaced
+// horizontally from the player — a coordinate-transform bug introduced
+// by drawing a non-square (16:9-proportioned) "square-in-normalized-
+// coords" region into a 1:1 canvas. Math looks linearly correct, but
+// MediaPipe's detection on the aspect-stretched image plus the
+// transform-back produced a shifted result in practice. Turn this off
+// while we ship a known-good single-pass path; revisit only after we
+// have a reproducible minimal case.
+const CROP_ENABLED = false
 
 type RawLandmark = { x: number; y: number; z?: number; visibility?: number }
 
@@ -217,8 +222,8 @@ export async function extractPoseFromVideo(
         // fill a 512x512 canvas, so the detector sees the player at much
         // higher effective resolution. Landmarks come back in crop-space
         // and must be transformed back to full-frame normalized coords.
-        const crop = computeCropRect(pass1.landmarks[0])
-        if (crop && crop.size < CROP_SKIP_THRESHOLD) {
+        const crop = CROP_ENABLED ? computeCropRect(pass1.landmarks[0]) : null
+        if (crop && crop.size < 0.85) {
           const srcX = crop.x * canvas.width
           const srcY = crop.y * canvas.height
           const srcW = crop.size * canvas.width
