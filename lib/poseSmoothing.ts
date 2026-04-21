@@ -357,3 +357,173 @@ export function smoothFrames(
   const reverseSmoothed = oneEuroSmooth(reversed, params, lookaheadWindow)
   return reverseFramesForFiltfilt(reverseSmoothed)
 }
+
+// ---------------------------------------------------------------------------
+// Bone-length plausibility
+// ---------------------------------------------------------------------------
+
+// MediaPipe landmark indices we care about for arm-bone checks. Duplicated
+// here to avoid a circular dep with lib/jointAngles.ts (which imports this
+// module via poseExtraction).
+const LM_LEFT_SHOULDER = 11
+const LM_RIGHT_SHOULDER = 12
+const LM_LEFT_ELBOW = 13
+const LM_RIGHT_ELBOW = 14
+const LM_LEFT_WRIST = 15
+const LM_RIGHT_WRIST = 16
+
+// Only use landmarks above this visibility when measuring bone length, and
+// only measure when BOTH endpoints clear the bar. Anything dimmer is a
+// guess and would pollute the median.
+const BONE_MEDIAN_VIS_GATE = 0.7
+// Shortest/longest acceptable ratio of per-frame bone length to the clip's
+// median for that bone. Tuned generous: normal within-clip length variation
+// from perspective foreshortening is small (the camera doesn't move), so
+// anything outside this range is almost certainly a blurred/misplaced joint.
+const BONE_LOW_TOL = 0.65
+const BONE_HIGH_TOL = 1.5
+// Need at least this many frames with a clean measurement to trust the
+// median. Below that, the filter no-ops (nothing zeroed) rather than
+// zeroing everything against a noisy sample.
+const MIN_SAMPLES_FOR_MEDIAN = 5
+
+function distance2D(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): number {
+  const dx = a.x - b.x
+  const dy = a.y - b.y
+  return Math.sqrt(dx * dx + dy * dy)
+}
+
+function median(arr: number[]): number {
+  if (arr.length === 0) return 0
+  const sorted = [...arr].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid]
+}
+
+/**
+ * Zero the visibility of elbow/wrist landmarks whose shoulder→elbow or
+ * elbow→wrist distance is implausible compared to the clip's median for
+ * that bone on that side.
+ *
+ * Rationale: MediaPipe's elbow/wrist detections go to hell on fast-moving
+ * blurred arms, while shoulders stay solid. A tennis player's upper-arm
+ * and forearm lengths don't meaningfully change within a clip (camera is
+ * fixed, limb doesn't grow), so a frame where the upper arm is suddenly
+ * 2x or 0.4x the usual length is almost certainly a misplaced landmark.
+ * We zero its visibility so the render-side 0.6 cutoff drops it — the
+ * overlay shows partial skeletons through contact rather than wrong ones,
+ * which is the "don't predict, show accuracy" posture the user wants.
+ *
+ * Caveats: on very short clips (<MIN_SAMPLES_FOR_MEDIAN solid frames per
+ * bone) the median is untrustworthy and the filter no-ops. That's
+ * deliberate — better to keep the raw detection than to filter against
+ * noise.
+ */
+export function filterImplausibleArmJoints(frames: PoseFrame[]): PoseFrame[] {
+  if (frames.length === 0) return frames
+
+  // Collect per-bone length samples from frames where both endpoints are
+  // confidently detected. Separate arrays per side since a player's left
+  // and right upper arms can differ slightly on a side-view clip due to
+  // foreshortening of the far arm.
+  const leftUpper: number[] = []
+  const rightUpper: number[] = []
+  const leftFore: number[] = []
+  const rightFore: number[] = []
+
+  const lmOf = (f: PoseFrame, id: number) =>
+    f.landmarks.find((lm) => lm.id === id)
+
+  for (const f of frames) {
+    const ls = lmOf(f, LM_LEFT_SHOULDER)
+    const le = lmOf(f, LM_LEFT_ELBOW)
+    const lw = lmOf(f, LM_LEFT_WRIST)
+    const rs = lmOf(f, LM_RIGHT_SHOULDER)
+    const re = lmOf(f, LM_RIGHT_ELBOW)
+    const rw = lmOf(f, LM_RIGHT_WRIST)
+
+    if (
+      ls && le &&
+      ls.visibility >= BONE_MEDIAN_VIS_GATE &&
+      le.visibility >= BONE_MEDIAN_VIS_GATE
+    ) {
+      leftUpper.push(distance2D(ls, le))
+    }
+    if (
+      le && lw &&
+      le.visibility >= BONE_MEDIAN_VIS_GATE &&
+      lw.visibility >= BONE_MEDIAN_VIS_GATE
+    ) {
+      leftFore.push(distance2D(le, lw))
+    }
+    if (
+      rs && re &&
+      rs.visibility >= BONE_MEDIAN_VIS_GATE &&
+      re.visibility >= BONE_MEDIAN_VIS_GATE
+    ) {
+      rightUpper.push(distance2D(rs, re))
+    }
+    if (
+      re && rw &&
+      re.visibility >= BONE_MEDIAN_VIS_GATE &&
+      rw.visibility >= BONE_MEDIAN_VIS_GATE
+    ) {
+      rightFore.push(distance2D(re, rw))
+    }
+  }
+
+  const leftUpperMed = leftUpper.length >= MIN_SAMPLES_FOR_MEDIAN ? median(leftUpper) : null
+  const leftForeMed = leftFore.length >= MIN_SAMPLES_FOR_MEDIAN ? median(leftFore) : null
+  const rightUpperMed = rightUpper.length >= MIN_SAMPLES_FOR_MEDIAN ? median(rightUpper) : null
+  const rightForeMed = rightFore.length >= MIN_SAMPLES_FOR_MEDIAN ? median(rightFore) : null
+
+  // If we don't have enough clean samples for any bone, skip the pass
+  // entirely rather than filter against noise.
+  if (
+    leftUpperMed === null &&
+    leftForeMed === null &&
+    rightUpperMed === null &&
+    rightForeMed === null
+  ) {
+    return frames
+  }
+
+  const outOfRange = (d: number, med: number) =>
+    d < med * BONE_LOW_TOL || d > med * BONE_HIGH_TOL
+
+  return frames.map((f) => {
+    // Shallow-copy landmarks before mutating so input isn't touched.
+    const landmarks = f.landmarks.map((lm) => ({ ...lm }))
+    const byId = new Map<number, (typeof landmarks)[number]>()
+    for (const lm of landmarks) byId.set(lm.id, lm)
+
+    const checkBone = (
+      parentId: number,
+      childId: number,
+      med: number | null,
+    ) => {
+      if (med === null) return
+      const p = byId.get(parentId)
+      const c = byId.get(childId)
+      if (!p || !c) return
+      // Only penalize the child end. The parent (shoulder/elbow) may be
+      // fine on its own — we only know its pairing looked weird. Zeroing
+      // both ends would take out a good shoulder because of a bad elbow.
+      if (outOfRange(distance2D(p, c), med)) {
+        c.visibility = 0
+      }
+    }
+
+    checkBone(LM_LEFT_SHOULDER, LM_LEFT_ELBOW, leftUpperMed)
+    checkBone(LM_RIGHT_SHOULDER, LM_RIGHT_ELBOW, rightUpperMed)
+    checkBone(LM_LEFT_ELBOW, LM_LEFT_WRIST, leftForeMed)
+    checkBone(LM_RIGHT_ELBOW, LM_RIGHT_WRIST, rightForeMed)
+
+    return { ...f, landmarks }
+  })
+}

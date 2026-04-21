@@ -4,6 +4,7 @@ import {
   landmarkBboxArea,
   isFrameConfident,
   smoothFrames,
+  filterImplausibleArmJoints,
 } from '@/lib/poseSmoothing'
 import { LANDMARK_INDICES } from '@/lib/jointAngles'
 import { makeLandmark, makeFrame, makeStandingPose } from '../helpers'
@@ -240,6 +241,111 @@ describe('smoothFrames', () => {
     // One Euro has small phase lag at low cutoffs; a 3-frame shift is fine.
     expect(Math.abs(peakIdx - 15)).toBeLessThanOrEqual(3)
     expect(peakVal).toBeGreaterThan(0.7 * 0.7)
+  })
+
+  it('filterImplausibleArmJoints: zeros elbow visibility when upper-arm length is wildly off', () => {
+    // Build 10 frames where the right upper arm sits at a consistent
+    // normalized length of 0.1, then inject one frame where the right
+    // elbow is placed 0.5 units away from the shoulder -- clearly a
+    // blurred/misplaced detection.
+    const makeFrame = (
+      i: number,
+      rightElbow: { x: number; y: number },
+    ) => ({
+      frame_index: i,
+      timestamp_ms: i * 33,
+      joint_angles: {},
+      landmarks: [
+        // shoulders
+        { id: 11, name: 'lshoulder', x: 0.5, y: 0.5, z: 0, visibility: 0.95 },
+        { id: 12, name: 'rshoulder', x: 0.6, y: 0.5, z: 0, visibility: 0.95 },
+        // elbows
+        { id: 13, name: 'lelbow', x: 0.4, y: 0.5, z: 0, visibility: 0.95 },
+        {
+          id: 14,
+          name: 'relbow',
+          x: rightElbow.x,
+          y: rightElbow.y,
+          z: 0,
+          visibility: 0.95,
+        },
+        // wrists
+        { id: 15, name: 'lwrist', x: 0.3, y: 0.5, z: 0, visibility: 0.95 },
+        { id: 16, name: 'rwrist', x: 0.8, y: 0.5, z: 0, visibility: 0.95 },
+      ],
+    })
+
+    const frames = [
+      ...Array.from({ length: 10 }, (_, i) =>
+        makeFrame(i, { x: 0.7, y: 0.5 }), // upper arm length = 0.1
+      ),
+      makeFrame(10, { x: 1.1, y: 0.5 }), // upper arm length = 0.5 -> 5x median
+    ]
+
+    const result = filterImplausibleArmJoints(frames)
+
+    // Frames 0-9 should be untouched (length == median).
+    for (let i = 0; i < 10; i++) {
+      const relbow = result[i].landmarks.find((l) => l.id === 14)!
+      expect(relbow.visibility).toBe(0.95)
+    }
+    // Frame 10's right elbow is implausible -> visibility zeroed.
+    const badElbow = result[10].landmarks.find((l) => l.id === 14)!
+    expect(badElbow.visibility).toBe(0)
+    // Shoulders untouched -- only the child end of a bad bone is penalized.
+    const badShoulder = result[10].landmarks.find((l) => l.id === 12)!
+    expect(badShoulder.visibility).toBe(0.95)
+  })
+
+  it('filterImplausibleArmJoints: no-ops when there are not enough confident samples', () => {
+    // Only 3 confident frames -- below MIN_SAMPLES_FOR_MEDIAN=5.
+    const frames = Array.from({ length: 3 }, (_, i) => ({
+      frame_index: i,
+      timestamp_ms: i * 33,
+      joint_angles: {},
+      landmarks: [
+        { id: 12, name: 'rshoulder', x: 0.6, y: 0.5, z: 0, visibility: 0.95 },
+        { id: 14, name: 'relbow', x: 0.9, y: 0.5, z: 0, visibility: 0.95 },
+      ],
+    }))
+
+    const result = filterImplausibleArmJoints(frames)
+    for (const f of result) {
+      for (const lm of f.landmarks) {
+        expect(lm.visibility).toBe(0.95)
+      }
+    }
+  })
+
+  it('filterImplausibleArmJoints: ignores low-visibility samples when computing median', () => {
+    // Build 10 frames with good (0.95 vis) shoulder-elbow pairs at length
+    // 0.1, plus one frame with an implausible length but below the 0.7
+    // vis gate -- that bad sample must not pollute the median.
+    const ok = (i: number) => ({
+      frame_index: i,
+      timestamp_ms: i * 33,
+      joint_angles: {},
+      landmarks: [
+        { id: 12, name: 'rshoulder', x: 0.6, y: 0.5, z: 0, visibility: 0.95 },
+        { id: 14, name: 'relbow', x: 0.7, y: 0.5, z: 0, visibility: 0.95 },
+      ],
+    })
+    const hiddenBad = {
+      frame_index: 99,
+      timestamp_ms: 99 * 33,
+      joint_angles: {},
+      landmarks: [
+        { id: 12, name: 'rshoulder', x: 0.6, y: 0.5, z: 0, visibility: 0.5 },
+        { id: 14, name: 'relbow', x: 1.5, y: 0.5, z: 0, visibility: 0.5 },
+      ],
+    }
+    const frames = [...Array.from({ length: 10 }, (_, i) => ok(i)), hiddenBad]
+    const result = filterImplausibleArmJoints(frames)
+    // The good frames remain untouched (median stayed at 0.1 because the
+    // low-vis bad frame was excluded from the sample).
+    for (let i = 0; i < 10; i++) {
+      expect(result[i].landmarks.find((l) => l.id === 14)!.visibility).toBe(0.95)
+    }
   })
 
   it('zero-phase mode shifts the peak less than causal mode', () => {

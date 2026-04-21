@@ -2,7 +2,11 @@
 
 import { getPoseLandmarker } from '@/lib/mediapipe'
 import { computeJointAngles } from '@/lib/jointAngles'
-import { isFrameConfident, smoothFrames } from '@/lib/poseSmoothing'
+import {
+  isFrameConfident,
+  smoothFrames,
+  filterImplausibleArmJoints,
+} from '@/lib/poseSmoothing'
 import type { PoseFrame, Landmark } from '@/lib/supabase'
 
 // Side of the square canvas used for the pass-2 crop. MediaPipe's Heavy
@@ -284,8 +288,14 @@ export async function extractPoseFromVideo(
       }
     }
 
+    // Smooth first (filtfilt zero-phase), then apply bone-length
+    // plausibility so the filter works on the smoothed trajectories.
+    // Implausibly-placed elbow/wrist landmarks have their visibility
+    // zeroed so the render-side cutoff hides them — partial skeletons
+    // through contact instead of wrong-but-visible ones.
     const smoothed = smoothFrames(frames)
-    return { frames: smoothed, fps, objectUrl }
+    const cleaned = filterImplausibleArmJoints(smoothed)
+    return { frames: cleaned, fps, objectUrl }
   } catch (err) {
     // On abort or error, release the object URL — nobody's going to use it
     URL.revokeObjectURL(objectUrl)
