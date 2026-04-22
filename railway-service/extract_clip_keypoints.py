@@ -107,29 +107,106 @@ def _try_load_racket_detector():
         return None
 
 
+# How far past the wrist (along the forearm direction) to place the
+# fallback racket-center point. 0.4 = 40% of the elbow->wrist vector,
+# which puts the estimate roughly where the middle of the strung area
+# sits for a standard adult racket held at full extension. Empirically
+# tuned for side-view framing; slightly short on close-ups, slightly
+# long on wide shots.
+RACKET_FALLBACK_EXTENSION = 0.4
+
+# Confidence we stamp on fallback racket detections. Has to clear the
+# frontend tracer's 0.3 gate but stay below real YOLO detections so a
+# downstream "real vs estimated" filter can distinguish them later.
+RACKET_FALLBACK_CONFIDENCE = 0.35
+
+# BlazePose-33 indices (same on the MediaPipe path and after the
+# pose_rtmpose COCO-17 -> BlazePose-33 remap).
+_LM_LEFT_ELBOW = 13
+_LM_RIGHT_ELBOW = 14
+_LM_LEFT_WRIST = 15
+_LM_RIGHT_WRIST = 16
+
+
+def _racket_fallback_from_forearm(landmarks):
+    """Estimate a racket-center point from the dominant wrist extended
+    along the forearm direction. Runs when YOLO is unavailable (weights
+    missing on deploy, ONNX session failed to load, inference errored)
+    or when YOLO returned no racket bbox on this frame.
+
+    Returns a dict with the same shape YOLO would emit, or None when
+    the pose itself is too weak to derive a position.
+    """
+    if len(landmarks) <= max(_LM_LEFT_WRIST, _LM_RIGHT_WRIST, _LM_LEFT_ELBOW, _LM_RIGHT_ELBOW):
+        return None
+
+    lw = landmarks[_LM_LEFT_WRIST]
+    rw = landmarks[_LM_RIGHT_WRIST]
+    le = landmarks[_LM_LEFT_ELBOW]
+    re = landmarks[_LM_RIGHT_ELBOW]
+
+    # Pick the higher-visibility wrist as the racket-holding side.
+    lw_vis = lw.get("visibility", 0) if lw else 0
+    rw_vis = rw.get("visibility", 0) if rw else 0
+    if lw_vis == 0 and rw_vis == 0:
+        return None
+
+    if rw_vis >= lw_vis:
+        wrist, elbow = rw, re
+    else:
+        wrist, elbow = lw, le
+
+    # Need at least a reasonably-confident wrist to anchor on.
+    if wrist is None or wrist.get("visibility", 0) < 0.5:
+        return None
+
+    wx, wy = wrist["x"], wrist["y"]
+    if elbow and elbow.get("visibility", 0) >= 0.5:
+        # Extend past the wrist along the forearm direction.
+        rx = wx + (wx - elbow["x"]) * RACKET_FALLBACK_EXTENSION
+        ry = wy + (wy - elbow["y"]) * RACKET_FALLBACK_EXTENSION
+    else:
+        # Elbow too weak: degrade to raw wrist position. Better than nothing.
+        rx, ry = wx, wy
+
+    return {
+        "x": round(max(0.0, min(1.0, rx)), 4),
+        "y": round(max(0.0, min(1.0, ry)), 4),
+        "confidence": RACKET_FALLBACK_CONFIDENCE,
+    }
+
+
 def _detect_racket_for_frame(detect_racket, frame_bgr, landmarks, processed_index):
-    if detect_racket is None:
-        return None
-    h, w = frame_bgr.shape[:2]
-    lw = landmarks[15] if len(landmarks) > 15 else None
-    rw = landmarks[16] if len(landmarks) > 16 else None
-    dominant = None
-    if lw and rw:
-        dominant = rw if rw["visibility"] >= lw["visibility"] else lw
-    elif lw:
-        dominant = lw
-    elif rw:
-        dominant = rw
-    wrist_xy = (
-        (dominant["x"] * w, dominant["y"] * h)
-        if dominant is not None
-        else None
-    )
-    try:
-        return detect_racket(frame_bgr, wrist_xy)
-    except Exception as e:  # noqa: BLE001
-        print(f"[extract] racket detect failed on frame {processed_index}: {e}", file=sys.stderr)
-        return None
+    # Try YOLO first when it's available. On Railway the weights ship
+    # committed (railway-service/models/yolo11n.onnx) so this normally
+    # works; if it doesn't, fall through to the forearm-extension
+    # fallback below so the racket trail still renders.
+    if detect_racket is not None:
+        h, w = frame_bgr.shape[:2]
+        lw = landmarks[_LM_LEFT_WRIST] if len(landmarks) > _LM_LEFT_WRIST else None
+        rw = landmarks[_LM_RIGHT_WRIST] if len(landmarks) > _LM_RIGHT_WRIST else None
+        dominant = None
+        if lw and rw:
+            dominant = rw if rw["visibility"] >= lw["visibility"] else lw
+        elif lw:
+            dominant = lw
+        elif rw:
+            dominant = rw
+        wrist_xy = (
+            (dominant["x"] * w, dominant["y"] * h)
+            if dominant is not None
+            else None
+        )
+        try:
+            yolo = detect_racket(frame_bgr, wrist_xy)
+            if yolo is not None:
+                return yolo
+        except Exception as e:  # noqa: BLE001
+            print(f"[extract] racket detect failed on frame {processed_index}: {e}", file=sys.stderr)
+
+    # Forearm-extension fallback. Approximate but always available when
+    # the pose detector found the player's arm.
+    return _racket_fallback_from_forearm(landmarks)
 
 
 def _extract_mediapipe(video_path, sample_fps):
