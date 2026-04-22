@@ -924,3 +924,59 @@ async def trim_video(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/debug/racket-detector")
+def debug_racket_detector():
+    """One-shot diagnostic: is the YOLO racket detector actually wired up on
+    this deploy? Returns model-file paths + existence, attempts a session
+    load, runs inference on a blank image. Meant for debugging "racket
+    detected: 0 / N" situations where the frontend has no visibility into
+    server state.
+    """
+    import numpy as np
+    from pathlib import Path
+
+    from racket_detector import (
+        MODEL_DIR,
+        YOLO_ONNX_PATH,
+        YOLO_PT_PATH,
+        detect_racket,
+    )
+    import racket_detector as rd
+
+    def _size_or_none(p: Path):
+        try:
+            return p.stat().st_size if p.exists() else None
+        except OSError:
+            return None
+
+    status = {
+        "model_dir": str(MODEL_DIR),
+        "model_dir_exists": MODEL_DIR.exists(),
+        "onnx_path": str(YOLO_ONNX_PATH),
+        "onnx_exists": YOLO_ONNX_PATH.exists(),
+        "onnx_size_bytes": _size_or_none(YOLO_ONNX_PATH),
+        "pt_path": str(YOLO_PT_PATH),
+        "pt_exists": YOLO_PT_PATH.exists(),
+        "pt_size_bytes": _size_or_none(YOLO_PT_PATH),
+        "session_loaded": rd._session is not None,
+    }
+
+    try:
+        rd._ensure_model()
+        status["ensure_model"] = "ok"
+        status["session_loaded"] = rd._session is not None
+    except Exception as e:  # noqa: BLE001
+        status["ensure_model"] = f"FAILED: {type(e).__name__}: {e}"
+        return status
+
+    try:
+        blank = np.zeros((360, 640, 3), dtype=np.uint8)
+        result = detect_racket(blank)
+        status["blank_inference"] = "ok"
+        status["blank_detection"] = result  # expected: None
+    except Exception as e:  # noqa: BLE001
+        status["blank_inference"] = f"FAILED: {type(e).__name__}: {e}"
+
+    return status
