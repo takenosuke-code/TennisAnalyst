@@ -103,7 +103,7 @@ def _try_load_racket_detector():
 
         return detect_racket
     except Exception as e:  # noqa: BLE001
-        print(f"[extract] racket_detector unavailable: {e}")
+        print(f"[extract] racket_detector unavailable: {e}", file=sys.stderr)
         return None
 
 
@@ -128,7 +128,7 @@ def _detect_racket_for_frame(detect_racket, frame_bgr, landmarks, processed_inde
     try:
         return detect_racket(frame_bgr, wrist_xy)
     except Exception as e:  # noqa: BLE001
-        print(f"[extract] racket detect failed on frame {processed_index}: {e}")
+        print(f"[extract] racket detect failed on frame {processed_index}: {e}", file=sys.stderr)
         return None
 
 
@@ -239,7 +239,7 @@ def _extract_rtmpose(video_path, sample_fps):
             try:
                 landmarks = infer_pose_for_frame(frame)
             except Exception as e:  # noqa: BLE001
-                print(f"[extract:rtmpose] inference failed on frame {frame_index}: {e}")
+                print(f"[extract:rtmpose] inference failed on frame {frame_index}: {e}", file=sys.stderr)
                 landmarks = None
 
             if landmarks is not None:
