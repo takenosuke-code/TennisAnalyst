@@ -1,16 +1,18 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import JointTogglePanel from '@/components/JointTogglePanel'
 import SwingSelector from '@/components/SwingSelector'
+import SegmentPickerGrid from '@/components/SegmentPickerGrid'
+import type { SegmentCardSaveOverride } from '@/components/SegmentCard'
 import { usePoseStore, useJointStore } from '@/store'
 import { detectSwings } from '@/lib/jointAngles'
 import { useUser } from '@/hooks/useUser'
 import { useProfile } from '@/hooks/useProfile'
 import type { SwingSegment } from '@/lib/jointAngles'
-import type { PoseFrame } from '@/lib/supabase'
+import type { PoseFrame, VideoSegment } from '@/lib/supabase'
 
 const VALID_BASELINE_SHOTS = new Set(['forehand', 'backhand', 'serve', 'volley', 'slice'])
 
@@ -34,6 +36,14 @@ export default function AnalyzePage() {
   // onboarding — onboarded users already have a tier, anons can't persist one.
   const showProfileHint = !profileLoading && skipped && !profile
 
+  // Per-segment baseline save state for the multi-shot grid. Kept on the
+  // analyze page (not inside the grid) so optimistic UI survives grid
+  // remounts and so multiple cards can't be mid-save simultaneously.
+  const [segments, setSegments] = useState<VideoSegment[]>([])
+  const [savingSegmentId, setSavingSegmentId] = useState<string | null>(null)
+  const [savedSegmentIds, setSavedSegmentIds] = useState<Set<string>>(new Set())
+  const [errorBySegmentId, setErrorBySegmentId] = useState<Record<string, string | null>>({})
+
   const swings = useMemo(() => detectSwings(allFrames), [allFrames])
   const hasMultipleSwings = swings.length > 1
 
@@ -46,6 +56,77 @@ export default function AnalyzePage() {
       setSelectedSwing(null)
     }
     setDone(true)
+  }
+
+  // Fetch video_segments rows for this session so we know whether to
+  // render the multi-shot picker grid. The endpoint returns [] for
+  // single-shot sessions, so segments.length > 1 is the signal.
+  useEffect(() => {
+    if (!done || !sessionId) {
+      setSegments([])
+      return
+    }
+    let ignore = false
+    fetch(`/api/segments/${sessionId}`, { credentials: 'same-origin' })
+      .then(async (res) => (res.ok ? ((await res.json()) as VideoSegment[]) : []))
+      .then((rows) => {
+        if (!ignore) setSegments(Array.isArray(rows) ? rows : [])
+      })
+      .catch(() => {
+        if (!ignore) setSegments([])
+      })
+    return () => {
+      ignore = true
+    }
+  }, [done, sessionId])
+
+  // Reset per-segment save state when the user uploads a new video so
+  // saved/error badges from the previous session don't bleed through.
+  useEffect(() => {
+    if (!done) {
+      setSavingSegmentId(null)
+      setSavedSegmentIds(new Set())
+      setErrorBySegmentId({})
+    }
+  }, [done])
+
+  const handleSaveSegmentAsBaseline = async (
+    segmentId: string,
+    override: SegmentCardSaveOverride,
+  ) => {
+    if (!sessionId || savingSegmentId) return
+    setSavingSegmentId(segmentId)
+    setErrorBySegmentId((prev) => ({ ...prev, [segmentId]: null }))
+    try {
+      const res = await fetch('/api/baselines/from-segment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          sessionId,
+          segmentId,
+          shotTypeOverride: override.shotType,
+          label: override.label,
+        }),
+      })
+      if (!res.ok) {
+        const msg = (await res.text()) || `HTTP ${res.status}`
+        setErrorBySegmentId((prev) => ({ ...prev, [segmentId]: msg }))
+        return
+      }
+      setSavedSegmentIds((prev) => {
+        const next = new Set(prev)
+        next.add(segmentId)
+        return next
+      })
+    } catch (err) {
+      setErrorBySegmentId((prev) => ({
+        ...prev,
+        [segmentId]: err instanceof Error ? err.message : 'Failed to save baseline',
+      }))
+    } finally {
+      setSavingSegmentId((current) => (current === segmentId ? null : current))
+    }
   }
 
   const handleSwingSelect = (seg: SwingSegment) => {
@@ -150,6 +231,23 @@ export default function AnalyzePage() {
               allFrames={allFrames}
               selectedIndex={selectedSwing}
               onSelect={handleSwingSelect}
+            />
+          )}
+
+          {/* Multi-shot picker. Rendered whenever the server detected >1
+              segment for this session. Users can save any single segment
+              as a baseline via /api/baselines/from-segment. The existing
+              "Save as baseline" CTAs below are left alone per spec. */}
+          {done && sessionId && blobUrl && segments.length > 1 && (
+            <SegmentPickerGrid
+              sessionId={sessionId}
+              segments={segments}
+              blobUrl={blobUrl}
+              onSaveAsBaseline={handleSaveSegmentAsBaseline}
+              signedIn={!!user}
+              savingSegmentId={savingSegmentId}
+              savedSegmentIds={savedSegmentIds}
+              errorBySegmentId={errorBySegmentId}
             />
           )}
 
