@@ -130,6 +130,27 @@ describe('SegmentCard', () => {
     expect(screen.getByText(/trim failed/i)).toBeInTheDocument()
   })
 
+  it('disables Save and shows a prompt when classifier is unknown and user has not picked', () => {
+    const seg = makeSegment({ shot_type: 'unknown' })
+    render(<SegmentCard segment={seg} blobUrl={BLOB} onSave={vi.fn()} />)
+    const btn = screen.getByRole('button', { name: /save as baseline/i }) as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    expect(
+      screen.getByText(/classified as unknown — pick a shot type/i),
+    ).toBeInTheDocument()
+  })
+
+  it('enables Save once the user picks a shot type for an unknown classifier', () => {
+    const seg = makeSegment({ shot_type: 'idle' })
+    render(<SegmentCard segment={seg} blobUrl={BLOB} onSave={vi.fn()} />)
+    const select = screen.getByLabelText(/shot type override/i) as HTMLSelectElement
+    // Default option is already 'forehand' visually; the user must actively
+    // change it (even to the same value isn't a change) to confirm intent.
+    fireEvent.change(select, { target: { value: 'backhand' } })
+    const btn = screen.getByRole('button', { name: /save as baseline/i }) as HTMLButtonElement
+    expect(btn.disabled).toBe(false)
+  })
+
   it('propagates a user-edited label through onSave', () => {
     const onSave = vi.fn()
     render(<SegmentCard segment={makeSegment()} blobUrl={BLOB} onSave={onSave} />)

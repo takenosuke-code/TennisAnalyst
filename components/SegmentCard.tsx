@@ -47,8 +47,18 @@ export default function SegmentCard({
   signedIn = true,
 }: SegmentCardProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
-  const initialShot = isBaselineShot(segment.shot_type) ? segment.shot_type : 'forehand'
+  const classifierIsBaselineShot = isBaselineShot(segment.shot_type)
+  // Inline isBaselineShot() call gives TS the type narrowing it needs.
+  const initialShot: BaselineShot = isBaselineShot(segment.shot_type)
+    ? segment.shot_type
+    : 'forehand'
   const [overrideShot, setOverrideShot] = useState<BaselineShot>(initialShot)
+  // Tracks whether the user has actively picked from the dropdown. When the
+  // classifier returns 'unknown' or 'idle' (not a valid baseline shot type),
+  // the dropdown silently defaults to 'forehand' — we must not let the user
+  // save a rest-period segment as a forehand without at least a deliberate
+  // selection.
+  const [overrideTouched, setOverrideTouched] = useState(false)
   const [label, setLabel] = useState<string>(
     segment.label?.trim() || `Segment #${segment.segment_index + 1} — ${overrideShot}`,
   )
@@ -112,14 +122,29 @@ export default function SegmentCard({
     return () => video.removeEventListener('timeupdate', handleTime)
   }, [segment.end_ms, midpointMs])
 
+  // Release the <video> decoder and range requests on unmount. A multi-shot
+  // rally clip can produce 10+ cards, and `preload="metadata"` keeps every
+  // decoder warm until GC fires. Without this cleanup, navigating away or
+  // unmounting any card leaves stale blobs + decoders pinned.
+  useEffect(() => {
+    return () => {
+      const video = videoRef.current
+      if (!video) return
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+    }
+  }, [])
+
   const classifierShot = segment.shot_type
-  const overrideDiffers = classifierShot !== overrideShot
+  const overrideDiffers = classifierIsBaselineShot && classifierShot !== overrideShot
+  const needsOverrideConfirmation = !classifierIsBaselineShot && !overrideTouched
   const confidencePct = Number.isFinite(segment.confidence)
     ? Math.round((segment.confidence ?? 0) * 100)
     : null
 
   const handleSave = async () => {
-    if (!canSave || saving) return
+    if (!canSave || saving || needsOverrideConfirmation) return
     await onSave(segment.id, {
       shotType: overrideShot,
       label: label.trim() || undefined,
@@ -161,7 +186,10 @@ export default function SegmentCard({
         </label>
         <select
           value={overrideShot}
-          onChange={(e) => setOverrideShot(e.target.value as BaselineShot)}
+          onChange={(e) => {
+            setOverrideTouched(true)
+            setOverrideShot(e.target.value as BaselineShot)
+          }}
           className="bg-white/5 border border-white/10 text-white text-sm rounded px-2 py-1"
           aria-label="Shot type override"
         >
@@ -171,6 +199,11 @@ export default function SegmentCard({
             </option>
           ))}
         </select>
+        {needsOverrideConfirmation && (
+          <p className="text-[11px] text-amber-300/90">
+            Classified as {classifierShot} — pick a shot type to save this as a baseline.
+          </p>
+        )}
         {overrideDiffers && (
           <p className="text-[11px] text-amber-300/80">
             Classified as {classifierShot}, saving as {overrideShot}
@@ -205,9 +238,9 @@ export default function SegmentCard({
         <button
           type="button"
           onClick={handleSave}
-          disabled={!canSave || saving}
+          disabled={!canSave || saving || needsOverrideConfirmation}
           className={`px-3 py-2 rounded-lg text-sm font-semibold transition-colors ${
-            !canSave || saving
+            !canSave || saving || needsOverrideConfirmation
               ? 'bg-white/10 text-white/40 cursor-not-allowed'
               : 'bg-emerald-500 hover:bg-emerald-400 text-white'
           }`}
