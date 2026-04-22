@@ -380,8 +380,12 @@ const BONE_MEDIAN_VIS_GATE = 0.7
 // median for that bone. Tuned generous: normal within-clip length variation
 // from perspective foreshortening is small (the camera doesn't move), so
 // anything outside this range is almost certainly a blurred/misplaced joint.
-const BONE_LOW_TOL = 0.65
-const BONE_HIGH_TOL = 1.5
+// Widened from 0.65/1.5 -> 0.55/1.75: the tighter band was zeroing elbow/
+// wrist visibility on frames with legitimate racket-arm extension, making
+// the skeleton drop joints during the exact moment (contact / follow-through)
+// the user most wants to see. Still catches gross misplacements (2x+ off).
+const BONE_LOW_TOL = 0.55
+const BONE_HIGH_TOL = 1.75
 // Need at least this many frames with a clean measurement to trust the
 // median. Below that, the filter no-ops (nothing zeroed) rather than
 // zeroing everything against a noisy sample.

@@ -33,7 +33,11 @@ const JOINT_GROUP_COLORS: Record<JointGroup, string> = {
 // is dropped from the render entirely. A faded/ghost joint reads to the user
 // as "the tracker thinks the knee is here" even at 20% opacity — we'd rather
 // show nothing and let them see what the pipeline is actually confident about.
-const VISIBILITY_CUTOFF = 0.6
+// Loosened from 0.6 -> 0.5: at 0.6 the overlay was dropping joints on every
+// slightly-noisy frame (user: "too fluid, loses the joints easy"). 0.5 still
+// filters out genuinely-off-screen / genuinely-hidden joints but keeps the
+// skeleton anchored through small detection dips.
+const VISIBILITY_CUTOFF = 0.5
 
 export function renderPose(
   ctx: CanvasRenderingContext2D,
