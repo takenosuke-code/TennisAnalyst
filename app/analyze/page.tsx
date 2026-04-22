@@ -386,8 +386,19 @@ export default function AnalyzePage() {
           <JointTogglePanel />
 
           {framesData.length > 0 && (() => {
-            const racketFrames = framesData.filter((f) => f.racket_head != null).length
-            const racketDetected = racketFrames > 0
+            // YOLO detections: frames where the server actually identified
+            // a tennis racket. Wrist-visible frames: frames where the
+            // client-side fallback can draw a trail point even without
+            // server detection. Trail coverage is the union.
+            const yoloFrames = framesData.filter((f) => f.racket_head != null).length
+            const wristVisibleFrames = framesData.filter((f) => {
+              const lw = f.landmarks.find((l) => l.id === 15)
+              const rw = f.landmarks.find((l) => l.id === 16)
+              return (lw && lw.visibility > 0.5) || (rw && rw.visibility > 0.5)
+            }).length
+            const trailCoverage = Math.max(yoloFrames, wristVisibleFrames)
+            const fallbackActive = yoloFrames === 0 && wristVisibleFrames > 0
+            const noTrailAtAll = trailCoverage === 0
             return (
               <div className="rounded-xl bg-white/5 border border-white/10 p-4">
                 <h3 className="text-sm font-semibold text-white mb-2">Analysis Stats</h3>
@@ -407,25 +418,42 @@ export default function AnalyzePage() {
                     <span className="text-emerald-400 font-medium">Ready</span>
                   </div>
                   <div className="flex justify-between text-white/60">
-                    <span>Racket detected</span>
+                    <span>Racket trail coverage</span>
                     <span
                       className={
-                        racketDetected
-                          ? 'text-emerald-400 font-mono'
-                          : 'text-amber-400 font-mono'
+                        noTrailAtAll
+                          ? 'text-amber-400 font-mono'
+                          : 'text-emerald-400 font-mono'
                       }
                     >
-                      {racketFrames} / {framesData.length}
+                      {trailCoverage} / {framesData.length}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-white/40 text-[11px]">
+                    <span className="pl-2">YOLO (racket detector)</span>
+                    <span className="font-mono">{yoloFrames}</span>
+                  </div>
+                  <div className="flex justify-between text-white/40 text-[11px]">
+                    <span className="pl-2">Wrist fallback</span>
+                    <span className="font-mono">
+                      {Math.max(0, wristVisibleFrames - yoloFrames)}
                     </span>
                   </div>
                 </div>
-                {!racketDetected && (
+                {fallbackActive && (
+                  <p className="text-[11px] text-white/50 mt-2">
+                    Server-side racket detector didn&apos;t fire for this clip,
+                    so the trail is following your wrist (grip position) as a
+                    fallback. It&apos;s accurate to the grip, not the middle of
+                    the racket — for true racket-middle tracking the YOLO
+                    detector on Railway needs to be working.
+                  </p>
+                )}
+                {noTrailAtAll && (
                   <p className="text-[11px] text-amber-300/80 mt-2">
-                    No racket was detected in this clip. The racket-path trail
-                    needs YOLO to find a tennis racket in the frame — if this
-                    keeps happening, the detector may not be loading on the
-                    server. Check Railway logs for &quot;racket_detector produced
-                    zero detections&quot;.
+                    Neither the racket detector nor the pose detector picked
+                    up enough signal to draw a trail. Try a clip with the
+                    player more visible in frame.
                   </p>
                 )}
               </div>
