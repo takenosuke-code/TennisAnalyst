@@ -7,6 +7,47 @@ const TRAIL_LENGTH = 40 // number of frames to keep in trail buffer
 // swing typically peaks around 1500 px/s at the wrist; tune empirically.
 const MAX_TRAIL_VELOCITY = 1500
 
+// Client-side fallback for when the server didn't emit a racket_head or
+// emitted it below the render threshold. Extends 40% past the wrist along
+// the elbow->wrist vector, which lands roughly at the middle of a standard
+// racket at full extension for a side-view frame. Mirrors the server-side
+// fallback in railway-service/extract_clip_keypoints.py — duplicated here
+// so the trail renders regardless of Railway deploy state.
+const RACKET_FALLBACK_EXTENSION = 0.4
+const RACKET_FALLBACK_VIS_GATE = 0.5
+
+function racketCenterFromPose(frame: PoseFrame):
+  | { x: number; y: number }
+  | null {
+  const find = (id: number) => frame.landmarks.find((l) => l.id === id)
+  const lWrist = find(LANDMARK_INDICES.LEFT_WRIST)
+  const rWrist = find(LANDMARK_INDICES.RIGHT_WRIST)
+  const lElbow = find(LANDMARK_INDICES.LEFT_ELBOW)
+  const rElbow = find(LANDMARK_INDICES.RIGHT_ELBOW)
+
+  // Pick the higher-visibility wrist as the racket-holding side.
+  // Strict > matches the wrist-trail convention in push() above.
+  const lVis = lWrist?.visibility ?? 0
+  const rVis = rWrist?.visibility ?? 0
+  if (lVis <= RACKET_FALLBACK_VIS_GATE && rVis <= RACKET_FALLBACK_VIS_GATE) return null
+
+  const wrist = rVis >= lVis ? rWrist : lWrist
+  const elbow = rVis >= lVis ? rElbow : lElbow
+  if (!wrist) return null
+
+  if (elbow && (elbow.visibility ?? 0) > RACKET_FALLBACK_VIS_GATE) {
+    const dx = wrist.x - elbow.x
+    const dy = wrist.y - elbow.y
+    return {
+      x: Math.max(0, Math.min(1, wrist.x + dx * RACKET_FALLBACK_EXTENSION)),
+      y: Math.max(0, Math.min(1, wrist.y + dy * RACKET_FALLBACK_EXTENSION)),
+    }
+  }
+  // Elbow too weak: fall back to raw wrist position. Still better than
+  // an empty trail.
+  return { x: wrist.x, y: wrist.y }
+}
+
 export type TrailPoint = {
   x: number
   y: number
@@ -62,18 +103,23 @@ export class SwingPathTracer {
       }
     }
 
-    // Racket-head: optional, only present on schema_version 2+ frames. May be
-    // explicitly null (no detection) on those, or absent entirely on legacy.
-    // Threshold matches the YOLOv11 detector's own cutoff in
-    // racket_detector.py (CONFIDENCE_THRESHOLD = 0.3). Earlier we gated at
-    // 0.4, which silently dropped the [0.3, 0.4) band that passed the
-    // detector's own filter — making the racket trail disappear on clips
-    // the user had every reason to believe should show it.
+    // Racket-head: prefer the server's YOLO detection when confident, but
+    // fall back to a forearm-extension estimate from the pose so the trail
+    // ALWAYS renders when the arm is visible. Server-side fallback also
+    // exists (afb0043) but the client copy guarantees rendering even if
+    // the server didn't redeploy or stored older all-null racket_head
+    // values in keypoints_json.
     const racket = frame.racket_head
+    let racketPoint: { x: number; y: number } | null = null
     if (racket && racket.confidence >= 0.3) {
+      racketPoint = { x: racket.x, y: racket.y }
+    } else {
+      racketPoint = racketCenterFromPose(frame)
+    }
+    if (racketPoint) {
       this.racketTrail.push({
-        x: racket.x * canvasWidth,
-        y: racket.y * canvasHeight,
+        x: racketPoint.x * canvasWidth,
+        y: racketPoint.y * canvasHeight,
         timestamp: frame.timestamp_ms,
       })
       if (this.racketTrail.length > TRAIL_LENGTH) {
