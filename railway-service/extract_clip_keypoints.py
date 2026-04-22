@@ -177,11 +177,21 @@ def _racket_fallback_from_forearm(landmarks):
     }
 
 
-def _detect_racket_for_frame(detect_racket, frame_bgr, landmarks, processed_index):
-    # Try YOLO first when it's available. On Railway the weights ship
-    # committed (railway-service/models/yolo11n.onnx) so this normally
-    # works; if it doesn't, fall through to the forearm-extension
-    # fallback below so the racket trail still renders.
+def _detect_racket_for_frame(
+    detect_racket,
+    frame_bgr,
+    landmarks,
+    processed_index,
+    timestamp_ms=None,
+    racket_tracker=None,
+):
+    # Feeds the Kalman racket tracker (when provided): YOLO detection is
+    # the measurement, absence of detection is a miss. Tracker coasts
+    # short motion-blur gaps with a constant-velocity prediction and
+    # emits a decayed-confidence point. When the tracker finally gives
+    # up (> max_coast_frames with no YOLO hit), we fall through to the
+    # forearm-extension fallback so the trail still renders.
+    yolo_point = None
     if detect_racket is not None:
         h, w = frame_bgr.shape[:2]
         lw = landmarks[_LM_LEFT_WRIST] if len(landmarks) > _LM_LEFT_WRIST else None
@@ -199,11 +209,20 @@ def _detect_racket_for_frame(detect_racket, frame_bgr, landmarks, processed_inde
             else None
         )
         try:
-            yolo = detect_racket(frame_bgr, wrist_xy)
-            if yolo is not None:
-                return yolo
+            yolo_point = detect_racket(frame_bgr, wrist_xy)
         except Exception as e:  # noqa: BLE001
             print(f"[extract] racket detect failed on frame {processed_index}: {e}", file=sys.stderr)
+            yolo_point = None
+
+    # When a tracker is provided, route YOLO output through it so short
+    # detection gaps are filled by a constant-velocity prediction rather
+    # than falling immediately to the forearm estimate.
+    if racket_tracker is not None and timestamp_ms is not None:
+        tracked = racket_tracker.update(yolo_point, timestamp_ms=timestamp_ms)
+        if tracked is not None:
+            return tracked
+    elif yolo_point is not None:
+        return yolo_point
 
     # Forearm-extension fallback. Approximate but always available when
     # the pose detector found the player's arm.
@@ -211,6 +230,8 @@ def _detect_racket_for_frame(detect_racket, frame_bgr, landmarks, processed_inde
 
 
 def _extract_mediapipe(video_path, sample_fps):
+    from tracking import RacketTracker
+
     detect_racket = _try_load_racket_detector()
 
     cap = cv2.VideoCapture(video_path)
@@ -222,6 +243,11 @@ def _extract_mediapipe(video_path, sample_fps):
     frames = []
     frame_index = 0
     processed_index = 0
+
+    # Single RacketTracker instance. Smooths per-frame YOLO jitter and
+    # bridges short motion-blur gaps (e.g. the 2–3 frames around contact
+    # where the racket head blurs out of YOLO's confidence range).
+    racket_tracker = RacketTracker()
 
     BaseOptions = mp.tasks.BaseOptions
     PoseLandmarker = mp.tasks.vision.PoseLandmarker
@@ -264,7 +290,9 @@ def _extract_mediapipe(video_path, sample_fps):
                     ]
                     joint_angles = compute_joint_angles(landmarks)
                     racket_head = _detect_racket_for_frame(
-                        detect_racket, frame, landmarks, processed_index
+                        detect_racket, frame, landmarks, processed_index,
+                        timestamp_ms=timestamp_ms,
+                        racket_tracker=racket_tracker,
                     )
                     frames.append({
                         "frame_index": processed_index,
@@ -305,7 +333,7 @@ def _extract_mediapipe(video_path, sample_fps):
 
 def _extract_rtmpose(video_path, sample_fps):
     from pose_rtmpose import infer_pose_for_frame
-    from tracking import PersonTracker
+    from tracking import PersonTracker, RacketTracker
 
     detect_racket = _try_load_racket_detector()
 
@@ -326,6 +354,9 @@ def _extract_rtmpose(video_path, sample_fps):
     # area×centrality×aspect scoring and locks on via IoU from there.
     person_tracker = PersonTracker()
 
+    # Single RacketTracker — see _extract_mediapipe for rationale.
+    racket_tracker = RacketTracker()
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -343,7 +374,9 @@ def _extract_rtmpose(video_path, sample_fps):
                 # min_visibility=0.1: see the matching note in main.py
                 joint_angles = compute_joint_angles(landmarks, min_visibility=0.1)
                 racket_head = _detect_racket_for_frame(
-                    detect_racket, frame, landmarks, processed_index
+                    detect_racket, frame, landmarks, processed_index,
+                    timestamp_ms=timestamp_ms,
+                    racket_tracker=racket_tracker,
                 )
                 frames.append({
                     "frame_index": processed_index,

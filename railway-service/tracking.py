@@ -20,9 +20,12 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+import numpy as np
+
 
 BBox = tuple[float, float, float, float]
 BBoxWithConf = tuple[float, float, float, float, float]
+PointDetection = dict  # {"x": float, "y": float, "confidence": float} — normalized
 
 
 def iou(a: BBox, b: BBox) -> float:
@@ -218,4 +221,217 @@ class PersonTracker:
         return (x1, y1, x2, y2, self._last_confidence)
 
 
-__all__ = ["PersonTracker", "iou"]
+class RacketTracker:
+    """Kalman-filter single-point tracker for the racket center.
+
+    The racket disappears from YOLO regularly — motion blur at the top of
+    a forehand, the racket head leaving the frame during a serve toss,
+    the hand briefly occluding the strings. A stateless gate (show when
+    conf >= 0.3, else nothing) produces a trail full of gaps. This
+    tracker fills short gaps with a constant-velocity prediction and
+    only gives up (returns None) after several consecutive miss frames.
+
+    State layout: [cx, cy, vx, vy] in normalized image coordinates, with
+    velocity in units of (normalized coord) per second. Working in
+    normalized space means the tuning is resolution-independent — a
+    1080p and a 720p clip both see a forehand contact as "~0.8
+    normalized units per second."
+
+    Why a Kalman filter and not an EMA here (but not for PersonTracker):
+    racket motion is ballistic across frames (predictable from velocity),
+    and we need to interpolate through miss frames — both are exactly
+    what a Kalman filter is for. PersonTracker doesn't need it because a
+    person doesn't vanish unpredictably between sampled frames.
+
+    Tunables:
+      sigma_a — process-noise acceleration std dev. Must be large enough
+        to follow a racket accelerating 0 → 1500 px/s in ~100ms during a
+        forehand (≈ 8 normalized/s² on a 1080p frame). Too small = the
+        filter lags during contact; too large = noisy predictions during
+        the backswing's smooth phase.
+      sigma_m — measurement-noise std dev. ~0.01 matches the observed
+        frame-to-frame jitter on YOLO bbox centers. Bigger = smoother
+        but laggier; smaller = trusts YOLO more.
+      association_radius — max allowed distance between the filter's
+        prediction and a new YOLO detection for the detection to be
+        accepted (otherwise treated as a miss). 0.15 normalized units
+        covers the gap a fast wrist can traverse between sampled frames.
+      max_coast_frames — after this many consecutive missed detections,
+        the filter resets. Short enough to re-lock on the right racket
+        after a scene transition; long enough to coast through a swing's
+        motion-blur plateau.
+      conf_decay / conf_floor — coasted frames don't carry real YOLO
+        confidence; we emit `prev_conf × conf_decay` on each coast,
+        floored so the short fill is still above the client tracer's
+        threshold. Long coasts eventually fall below the floor and
+        return None, at which point the forearm fallback takes over.
+    """
+
+    # State indices
+    _CX, _CY, _VX, _VY = 0, 1, 2, 3
+
+    def __init__(
+        self,
+        sigma_a: float = 8.0,
+        sigma_m: float = 0.01,
+        association_radius: float = 0.15,
+        max_coast_frames: int = 4,
+        conf_decay: float = 0.9,
+        conf_floor: float = 0.31,
+    ) -> None:
+        self._x: Optional[np.ndarray] = None  # (4,)
+        self._P: Optional[np.ndarray] = None  # (4, 4)
+        self._last_ts_ms: Optional[float] = None
+        self._last_confidence: float = 0.0
+        self._frames_since_detection: int = 0
+
+        self.sigma_a = sigma_a
+        self.sigma_m = sigma_m
+        self.association_radius = association_radius
+        self.max_coast_frames = max_coast_frames
+        self.conf_decay = conf_decay
+        self.conf_floor = conf_floor
+
+    @property
+    def is_locked(self) -> bool:
+        return self._x is not None
+
+    def reset(self) -> None:
+        self._x = None
+        self._P = None
+        self._last_ts_ms = None
+        self._last_confidence = 0.0
+        self._frames_since_detection = 0
+
+    @staticmethod
+    def _F(dt: float) -> np.ndarray:
+        return np.array(
+            [
+                [1.0, 0.0, dt, 0.0],
+                [0.0, 1.0, 0.0, dt],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+
+    def _Q(self, dt: float) -> np.ndarray:
+        """Discrete white-noise acceleration process-noise matrix.
+        Standard constant-acceleration model: assume white-noise
+        acceleration with std dev sigma_a on each axis independently.
+        """
+        sa2 = self.sigma_a * self.sigma_a
+        dt2 = dt * dt
+        dt3 = dt2 * dt
+        dt4 = dt2 * dt2
+        return sa2 * np.array(
+            [
+                [dt4 / 4.0, 0.0,       dt3 / 2.0, 0.0      ],
+                [0.0,       dt4 / 4.0, 0.0,       dt3 / 2.0],
+                [dt3 / 2.0, 0.0,       dt2,       0.0      ],
+                [0.0,       dt3 / 2.0, 0.0,       dt2      ],
+            ]
+        )
+
+    @staticmethod
+    def _H() -> np.ndarray:
+        return np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
+
+    def _R(self) -> np.ndarray:
+        sm2 = self.sigma_m * self.sigma_m
+        return np.array([[sm2, 0.0], [0.0, sm2]])
+
+    def update(
+        self,
+        detection: Optional[PointDetection],
+        timestamp_ms: float,
+    ) -> Optional[PointDetection]:
+        """Advance the tracker by one frame. Returns the emitted racket
+        position (YOLO measurement, smoothed) or a prediction-only coast,
+        or None if the filter is cold and this frame has no detection
+        (or has coasted past max_coast_frames).
+
+        timestamp_ms is the monotonically-increasing per-frame sample
+        time. dt is computed internally; the caller doesn't guess.
+        """
+        # Cold start: wait for the first detection to arm the filter.
+        if self._x is None:
+            if detection is None:
+                return None
+            self._x = np.array([detection["x"], detection["y"], 0.0, 0.0])
+            # Initial uncertainty: position ≈ sigma_m, velocity unknown
+            # so set a large variance for vx/vy.
+            self._P = np.diag([self.sigma_m ** 2, self.sigma_m ** 2, 1.0, 1.0])
+            self._last_ts_ms = timestamp_ms
+            self._last_confidence = float(detection["confidence"])
+            self._frames_since_detection = 0
+            return {
+                "x": round(detection["x"], 4),
+                "y": round(detection["y"], 4),
+                "confidence": round(self._last_confidence, 3),
+            }
+
+        # Warm path: predict forward by dt, then maybe update.
+        assert self._P is not None and self._last_ts_ms is not None
+        dt_ms = timestamp_ms - self._last_ts_ms
+        # Guard against out-of-order or duplicate timestamps from the
+        # caller (rare but possible on variable-fps inputs). A zero or
+        # negative dt makes the Kalman predict a no-op, which is safe.
+        dt = max(0.0, dt_ms / 1000.0)
+
+        F = self._F(dt)
+        Q = self._Q(dt)
+        self._x = F @ self._x
+        self._P = F @ self._P @ F.T + Q
+
+        # Association: compare the detection to the prediction. The gate
+        # inflates linearly with coast time so a re-acquisition after a
+        # motion-blur gap isn't rejected for being past where the
+        # constant-velocity momentum said the racket should be. During a
+        # swing contact the racket decelerates sharply — the filter
+        # doesn't know that, so its prediction can be ~0.08 normalized
+        # units off after 3 coasted frames. Inflating the gate by 50%
+        # per coast frame covers that drift.
+        accepted = False
+        effective_gate = self.association_radius * (
+            1.0 + 0.5 * self._frames_since_detection
+        )
+        if detection is not None:
+            pred_x = float(self._x[self._CX])
+            pred_y = float(self._x[self._CY])
+            dx = float(detection["x"]) - pred_x
+            dy = float(detection["y"]) - pred_y
+            if math.hypot(dx, dy) <= effective_gate:
+                # Kalman update step
+                H = self._H()
+                R = self._R()
+                z = np.array([detection["x"], detection["y"]])
+                y = z - H @ self._x
+                S = H @ self._P @ H.T + R
+                K = self._P @ H.T @ np.linalg.inv(S)
+                self._x = self._x + K @ y
+                self._P = (np.eye(4) - K @ H) @ self._P
+                self._last_confidence = float(detection["confidence"])
+                self._frames_since_detection = 0
+                self._last_ts_ms = timestamp_ms
+                accepted = True
+
+        if not accepted:
+            # Miss: decay confidence, bump coast counter.
+            self._frames_since_detection += 1
+            self._last_confidence *= self.conf_decay
+            self._last_ts_ms = timestamp_ms
+            if (
+                self._frames_since_detection > self.max_coast_frames
+                or self._last_confidence < self.conf_floor
+            ):
+                self.reset()
+                return None
+
+        return {
+            "x": round(float(np.clip(self._x[self._CX], 0.0, 1.0)), 4),
+            "y": round(float(np.clip(self._x[self._CY], 0.0, 1.0)), 4),
+            "confidence": round(self._last_confidence, 3),
+        }
+
+
+__all__ = ["PersonTracker", "RacketTracker", "iou"]

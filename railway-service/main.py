@@ -168,6 +168,8 @@ def _extract_with_mediapipe(
     """Pose extraction via MediaPipe Heavy. Original implementation, unchanged
     in behavior -- factored into its own function so the rtmpose path can sit
     next to it without a giant if/else nested branch."""
+    from tracking import RacketTracker
+
     detect_racket = _try_load_racket_detector()
 
     cap = cv2.VideoCapture(video_path)
@@ -180,6 +182,7 @@ def _extract_with_mediapipe(
     frames = []
     frame_index = 0
     processed_index = 0
+    racket_tracker = RacketTracker()
 
     BaseOptions = mp.tasks.BaseOptions
     PoseLandmarker = mp.tasks.vision.PoseLandmarker
@@ -225,7 +228,9 @@ def _extract_with_mediapipe(
                     joint_angles = compute_joint_angles_from_dicts(landmarks)
 
                     racket_head = _detect_racket_for_frame(
-                        detect_racket, frame, landmarks, processed_index
+                        detect_racket, frame, landmarks, processed_index,
+                        timestamp_ms=timestamp_ms,
+                        racket_tracker=racket_tracker,
                     )
 
                     frames.append({
@@ -254,32 +259,45 @@ def _extract_with_mediapipe(
     }
 
 
-def _detect_racket_for_frame(detect_racket, frame_bgr, landmarks: list[dict], processed_index: int):
+def _detect_racket_for_frame(
+    detect_racket,
+    frame_bgr,
+    landmarks: list[dict],
+    processed_index: int,
+    timestamp_ms: float | None = None,
+    racket_tracker=None,
+):
     """Shared racket-head detection. Picks the higher-visibility wrist as the
-    dominant hand and feeds the racket detector. Returns None on any failure
-    (logged but never raised)."""
-    if detect_racket is None:
-        return None
-    h, w = frame_bgr.shape[:2]
-    lw = landmarks[15] if len(landmarks) > 15 else None
-    rw = landmarks[16] if len(landmarks) > 16 else None
-    dominant = None
-    if lw and rw:
-        dominant = rw if rw["visibility"] >= lw["visibility"] else lw
-    elif lw:
-        dominant = lw
-    elif rw:
-        dominant = rw
-    wrist_xy = (
-        (dominant["x"] * w, dominant["y"] * h)
-        if dominant is not None
-        else None
-    )
-    try:
-        return detect_racket(frame_bgr, wrist_xy)
-    except Exception as e:  # noqa: BLE001
-        print(f"[extract] racket detect failed on frame {processed_index}: {e}")
-        return None
+    dominant hand and feeds the racket detector. Routes the result through a
+    Kalman `racket_tracker` (when provided) to smooth YOLO jitter and coast
+    short motion-blur gaps. Returns None on any failure (logged but never
+    raised)."""
+    yolo_point = None
+    if detect_racket is not None:
+        h, w = frame_bgr.shape[:2]
+        lw = landmarks[15] if len(landmarks) > 15 else None
+        rw = landmarks[16] if len(landmarks) > 16 else None
+        dominant = None
+        if lw and rw:
+            dominant = rw if rw["visibility"] >= lw["visibility"] else lw
+        elif lw:
+            dominant = lw
+        elif rw:
+            dominant = rw
+        wrist_xy = (
+            (dominant["x"] * w, dominant["y"] * h)
+            if dominant is not None
+            else None
+        )
+        try:
+            yolo_point = detect_racket(frame_bgr, wrist_xy)
+        except Exception as e:  # noqa: BLE001
+            print(f"[extract] racket detect failed on frame {processed_index}: {e}")
+            yolo_point = None
+
+    if racket_tracker is not None and timestamp_ms is not None:
+        return racket_tracker.update(yolo_point, timestamp_ms=timestamp_ms)
+    return yolo_point
 
 
 def _extract_with_rtmpose(
@@ -293,7 +311,7 @@ def _extract_with_rtmpose(
     index-finger landmarks (BlazePose 19/20) aren't filled.
     """
     from pose_rtmpose import infer_pose_for_frame  # local import: heavy onnx setup
-    from tracking import PersonTracker
+    from tracking import PersonTracker, RacketTracker
 
     detect_racket = _try_load_racket_detector()
 
@@ -310,6 +328,7 @@ def _extract_with_rtmpose(
 
     # See _extract_rtmpose in extract_clip_keypoints.py for rationale.
     person_tracker = PersonTracker()
+    racket_tracker = RacketTracker()
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -338,7 +357,9 @@ def _extract_with_rtmpose(
                     landmarks, min_visibility=0.1
                 )
                 racket_head = _detect_racket_for_frame(
-                    detect_racket, frame, landmarks, processed_index
+                    detect_racket, frame, landmarks, processed_index,
+                    timestamp_ms=timestamp_ms,
+                    racket_tracker=racket_tracker,
                 )
                 frames.append({
                     "frame_index": processed_index,
