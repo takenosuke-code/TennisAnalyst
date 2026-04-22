@@ -8,12 +8,14 @@ const TRAIL_LENGTH = 40 // number of frames to keep in trail buffer
 const MAX_TRAIL_VELOCITY = 1500
 
 // Client-side fallback for when the server didn't emit a racket_head or
-// emitted it below the render threshold. Extends 40% past the wrist along
-// the elbow->wrist vector, which lands roughly at the middle of a standard
-// racket at full extension for a side-view frame. Mirrors the server-side
-// fallback in railway-service/extract_clip_keypoints.py — duplicated here
-// so the trail renders regardless of Railway deploy state.
-const RACKET_FALLBACK_EXTENSION = 0.4
+// emitted it below the render threshold. Pins the point AT the wrist
+// (grip position). Extension was 0.4 (~40% past wrist, approximating
+// the middle of the racket) but the user reported that read as
+// "predictive / joints moving ahead of the person" — exactly what an
+// extension produces during a fast swing. Zero extension = no forward
+// extrapolation. When real YOLO comes back online, the server's bbox
+// center takes precedence and you get the true racket-middle position.
+const RACKET_FALLBACK_EXTENSION = 0.0
 const RACKET_FALLBACK_VIS_GATE = 0.5
 
 function racketCenterFromPose(frame: PoseFrame):

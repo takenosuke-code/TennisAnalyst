@@ -6,12 +6,13 @@ import type { JointGroup } from '@/lib/jointAngles'
 import { renderPose, normalizeLandmarks } from './PoseRenderer'
 import { SwingPathTracer } from './SwingPathTracer'
 
-// Nearest-neighbor lookup: return the sampled pose frame whose timestamp
-// is closest to the requested time. We deliberately do NOT interpolate
-// between bracketing frames — interpolation synthesizes a position the
-// detector never actually saw, which reads to the user as the overlay
-// "predicting" joints between samples. With zero-phase (filtfilt) smoothing
-// upstream, nearest-neighbor at 30fps sample rate stays visibly locked.
+// Strict-previous lookup: return the latest sampled pose frame whose
+// timestamp is at or before the requested time. The overlay never leads
+// the video; at worst it trails by one sample interval (~33ms at 30fps
+// sampling). Earlier we used nearest-neighbor, but that can return a
+// frame 16ms in the future of the video moment — which the user reads
+// as "joints moving ahead of the person." Still no interpolation
+// (don't synthesize positions the detector never saw).
 export function getFrameAtTime(frames: PoseFrame[], timeSec: number): PoseFrame | null {
   if (!frames.length) return null
   const timeMs = timeSec * 1000
@@ -19,12 +20,8 @@ export function getFrameAtTime(frames: PoseFrame[], timeSec: number): PoseFrame 
   const last = frames[frames.length - 1]
   if (timeMs >= last.timestamp_ms) return last
   for (let i = 1; i < frames.length; i++) {
-    const cur = frames[i]
-    if (cur.timestamp_ms >= timeMs) {
-      const prev = frames[i - 1]
-      const dPrev = timeMs - prev.timestamp_ms
-      const dCur = cur.timestamp_ms - timeMs
-      return dCur < dPrev ? cur : prev
+    if (frames[i].timestamp_ms > timeMs) {
+      return frames[i - 1]
     }
   }
   return last

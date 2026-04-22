@@ -108,12 +108,13 @@ def _try_load_racket_detector():
 
 
 # How far past the wrist (along the forearm direction) to place the
-# fallback racket-center point. 0.4 = 40% of the elbow->wrist vector,
-# which puts the estimate roughly where the middle of the strung area
-# sits for a standard adult racket held at full extension. Empirically
-# tuned for side-view framing; slightly short on close-ups, slightly
-# long on wide shots.
-RACKET_FALLBACK_EXTENSION = 0.4
+# fallback racket point. 0 = pin to the wrist (grip position). Was 0.4
+# (approximating the middle of the racket) but user reported that as
+# "predictive / joints moving ahead of the person" — an extension does
+# literally lead the wrist spatially during a fast swing, so dropping
+# to 0 removes the predictive component. When real YOLO runs server-
+# side, its bbox center still takes precedence over this fallback.
+RACKET_FALLBACK_EXTENSION = 0.0
 
 # Confidence we stamp on fallback racket detections. Has to clear the
 # frontend tracer's 0.3 gate but stay below real YOLO detections so a

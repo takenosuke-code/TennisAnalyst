@@ -26,18 +26,17 @@ describe('getFrameAtTime', () => {
     expect(getFrameAtTime(frames, 5.0)).toBe(frames[1])
   })
 
-  it('returns the nearest sample when time falls between two frames', () => {
-    // samples at 100ms and 200ms; 140ms is closer to 100ms than 200ms.
+  it('returns the latest sample at or before the requested time', () => {
+    // samples at 100ms and 200ms. Strict-previous means both 140ms and
+    // 170ms resolve to frames[0] -- the overlay never shows a future
+    // keypoint relative to the video moment (user reported the old
+    // nearest-neighbor behavior as "joints moving ahead of the person").
     const frames = [frameAt(100, 0.10, 90), frameAt(200, 0.20, 110)]
     expect(getFrameAtTime(frames, 0.14)).toBe(frames[0])
-    // 170ms is closer to 200ms.
-    expect(getFrameAtTime(frames, 0.17)).toBe(frames[1])
-  })
-
-  it('breaks ties toward the previous frame at exact midpoint', () => {
-    const frames = [frameAt(100, 0.10, 90), frameAt(200, 0.20, 110)]
-    // midpoint 150ms: dPrev=50, dCur=50; implementation picks prev (dCur<dPrev is false)
-    expect(getFrameAtTime(frames, 0.15)).toBe(frames[0])
+    expect(getFrameAtTime(frames, 0.17)).toBe(frames[0])
+    // 200ms exactly should resolve to the frame at 200 (the post-loop
+    // clamp catches this case).
+    expect(getFrameAtTime(frames, 0.2)).toBe(frames[1])
   })
 
   it('returns the frame whose timestamp exactly matches', () => {
