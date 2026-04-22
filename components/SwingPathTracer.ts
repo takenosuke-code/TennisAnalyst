@@ -62,10 +62,15 @@ export class SwingPathTracer {
       }
     }
 
-    // Racket-head: optional, only present on schema_version 2 frames. May be
+    // Racket-head: optional, only present on schema_version 2+ frames. May be
     // explicitly null (no detection) on those, or absent entirely on legacy.
+    // Threshold matches the YOLOv11 detector's own cutoff in
+    // racket_detector.py (CONFIDENCE_THRESHOLD = 0.3). Earlier we gated at
+    // 0.4, which silently dropped the [0.3, 0.4) band that passed the
+    // detector's own filter — making the racket trail disappear on clips
+    // the user had every reason to believe should show it.
     const racket = frame.racket_head
-    if (racket && racket.confidence >= 0.4) {
+    if (racket && racket.confidence >= 0.3) {
       this.racketTrail.push({
         x: racket.x * canvasWidth,
         y: racket.y * canvasHeight,

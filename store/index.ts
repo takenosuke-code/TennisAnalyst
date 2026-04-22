@@ -105,7 +105,10 @@ const defaultVisible: VisibilityMap = {
 export const useJointStore = create<JointStore>((set) => ({
   visible: { ...defaultVisible },
   showSkeleton: true,
-  showTrail: true,
+  // Wrist-trail overlay was retired as visual noise once the racket-path
+  // overlay became the primary signal. Field + toggle kept on the store
+  // so downstream consumers still compile; no UI surfaces it.
+  showTrail: false,
   // On by default. The tracer now follows the bbox center of the detected
   // racket (sweet-spot proxy) — user explicitly wants this as the primary
   // swing-path signal, so it renders out of the box and is still toggleable

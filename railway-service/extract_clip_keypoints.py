@@ -204,6 +204,17 @@ def _extract_mediapipe(video_path, sample_fps):
     total_frames = frame_index
     total_duration_ms = (total_frames / video_fps) * 1000
 
+    # Zero-detection alarm: surfaces the "YOLO model failed to load and we're
+    # silently emitting all-null racket_head" case in Railway logs. detector_loaded
+    # separates "detector disabled" from "detector ran and found nothing."
+    racket_count = sum(1 for f in frames if f.get("racket_head") is not None)
+    if len(frames) > 0 and racket_count == 0:
+        print(
+            f"[extract:mediapipe] racket_detector produced zero detections across"
+            f" {len(frames)} frames (detector_loaded={detect_racket is not None})",
+            file=sys.stderr,
+        )
+
     return {
         "fps_sampled": sample_fps,
         "frame_count": len(frames),
@@ -263,6 +274,15 @@ def _extract_rtmpose(video_path, sample_fps):
 
     total_frames = frame_index
     total_duration_ms = (total_frames / video_fps) * 1000
+
+    # Zero-detection alarm: see the matching block in _extract_mediapipe above.
+    racket_count = sum(1 for f in frames if f.get("racket_head") is not None)
+    if len(frames) > 0 and racket_count == 0:
+        print(
+            f"[extract:rtmpose] racket_detector produced zero detections across"
+            f" {len(frames)} frames (detector_loaded={detect_racket is not None})",
+            file=sys.stderr,
+        )
 
     return {
         "fps_sampled": sample_fps,

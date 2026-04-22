@@ -23,7 +23,7 @@ const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), 
 
 export default function AnalyzePage() {
   const { framesData, blobUrl, localVideoUrl, sessionId, shotType } = usePoseStore()
-  const { visible, showSkeleton, showTrail, showRacket } = useJointStore()
+  const { visible, showSkeleton, showRacket } = useJointStore()
   const [done, setDone] = useState(false)
   const [allFrames, setAllFrames] = useState<PoseFrame[]>([])
   const [selectedSwing, setSelectedSwing] = useState<number | null>(null)
@@ -226,7 +226,6 @@ export default function AnalyzePage() {
                   framesData={framesData}
                   visible={visible}
                   showSkeleton={showSkeleton}
-                  showTrail={showTrail}
                   showRacket={showRacket}
                   dominantHand={dominantHand}
                   showControls

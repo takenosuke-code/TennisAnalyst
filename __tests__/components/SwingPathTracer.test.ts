@@ -244,7 +244,7 @@ describe('SwingPathTracer', () => {
     expect(mockCtx.beginPath).toHaveBeenCalled()
   })
 
-  it('ignores racket_head when confidence < 0.4', () => {
+  it('ignores racket_head when confidence < 0.3', () => {
     for (let i = 0; i < 5; i++) {
       const frame = makeFrame(i, i * 33, [])
       ;(frame as unknown as { racket_head: { x: number; y: number; confidence: number } }).racket_head = {
@@ -261,6 +261,28 @@ describe('SwingPathTracer', () => {
       showRacketTrail: true,
     })
     expect(mockCtx.beginPath).not.toHaveBeenCalled()
+  })
+
+  it('draws the racket trail for detections at confidence 0.35', () => {
+    // Regression guard: earlier the tracer gated at >= 0.4 while the YOLO
+    // detector in racket_detector.py gated at 0.3, so the [0.3, 0.4) band
+    // passed the extractor and silently disappeared at render time. After
+    // aligning thresholds, a 0.35 detection must render.
+    for (let i = 0; i < 6; i++) {
+      const frame = makeFrame(i, i * 33, [])
+      ;(frame as unknown as { racket_head: { x: number; y: number; confidence: number } }).racket_head = {
+        x: 0.5 + i * 0.01,
+        y: 0.5,
+        confidence: 0.35,
+      }
+      tracer.push(frame, 800, 600)
+    }
+    const mockCtx = createMockCanvasContext()
+    tracer.render(mockCtx as unknown as CanvasRenderingContext2D, {
+      showWristTrails: false,
+      showRacketTrail: true,
+    })
+    expect(mockCtx.beginPath).toHaveBeenCalled()
   })
 
   it('tolerates null and absent racket_head (schema v1 / no-detection)', () => {

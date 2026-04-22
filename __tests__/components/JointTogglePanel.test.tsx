@@ -58,11 +58,13 @@ describe('JointTogglePanel', () => {
     expect(screen.getByText('Ankles')).toBeInTheDocument()
   })
 
-  it('renders skeleton, trail, and racket toggles', () => {
+  it('renders skeleton and racket toggles, but not the swing path trail', () => {
     render(<JointTogglePanel />)
     expect(screen.getByText('Skeleton Lines')).toBeInTheDocument()
-    expect(screen.getByText('Swing Path Trail')).toBeInTheDocument()
     expect(screen.getByText(/Racket Path/i)).toBeInTheDocument()
+    // Swing Path Trail (wrist trail) toggle was retired once the racket-path
+    // overlay became the primary signal — it should no longer render.
+    expect(screen.queryByText('Swing Path Trail')).toBeNull()
   })
 
   it('clicking the racket toggle calls toggleRacket', () => {
@@ -90,11 +92,8 @@ describe('JointTogglePanel', () => {
     expect(mockToggleSkeleton).toHaveBeenCalledOnce()
   })
 
-  it('clicking trail toggle calls toggleTrail', () => {
-    render(<JointTogglePanel />)
-    fireEvent.click(screen.getByText('Swing Path Trail'))
-    expect(mockToggleTrail).toHaveBeenCalledOnce()
-  })
+  // "clicking trail toggle calls toggleTrail" removed — the Swing Path Trail
+  // toggle no longer renders in the panel.
 
   it('shows "Hide all" when all joints are visible and calls setAllVisible(false)', () => {
     render(<JointTogglePanel />)

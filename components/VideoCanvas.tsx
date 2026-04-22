@@ -35,7 +35,8 @@ interface VideoCanvasProps {
   framesData: PoseFrame[]
   visible: Record<JointGroup, boolean>
   showSkeleton: boolean
-  showTrail: boolean
+  /** Wrist-trail overlay; off by default and no UI surfaces it anymore. */
+  showTrail?: boolean
   /** Render the racket-head trail (schema v2 only; no-op on legacy clips). */
   showRacket?: boolean
   /**
@@ -66,7 +67,7 @@ export default function VideoCanvas({
   framesData,
   visible,
   showSkeleton,
-  showTrail,
+  showTrail = false,
   showRacket = true,
   dominantHand = null,
   overlayColor,
