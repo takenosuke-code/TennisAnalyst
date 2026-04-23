@@ -129,12 +129,13 @@ _LM_LEFT_WRIST = 15
 _LM_RIGHT_WRIST = 16
 
 # How far (as a fraction of bbox side length) to expand the landmark-
-# derived person bbox before cropping for racket detection. Must be
-# generous enough to include the racket at full forehand extension
-# (roughly 0.4× body height past the wrist) plus a margin for
-# landmark-visibility gaps. 0.6 = a 400×600 torso crop expands to
-# ~640×960, which comfortably clears any arm reach on 960p footage.
-_PERSON_CROP_EXPAND = 0.6
+# derived person bbox before cropping for racket detection. Measured
+# sweep on IMG_1097.mov: 0.4→1103, 0.6→1555, 0.8→1821 real-racket
+# frames. 0.8 picks up rackets at full-extension contact that 0.6 was
+# cropping off; further expansion (1.0+) starts diluting the racket's
+# pixel share in the YOLO input and hits diminishing returns while
+# doubling inference cost.
+_PERSON_CROP_EXPAND = 0.8
 
 
 def _person_crop_bbox(landmarks, img_w, img_h):

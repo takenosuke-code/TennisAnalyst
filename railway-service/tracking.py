@@ -277,7 +277,15 @@ class RacketTracker:
         association_radius: float = 0.15,
         max_coast_frames: int = 4,
         conf_decay: float = 0.9,
-        conf_floor: float = 0.31,
+        # Dropped from 0.31 → 0.10 after the crop-to-person path went
+        # live. Cropped YOLO legitimately emits detections as low as
+        # 0.15 (false-positive rate is ~zero in a person-cropped frame,
+        # so the threshold on the detector side was lowered too). Keeping
+        # the old 0.31 floor killed those detections the moment they
+        # took one coast step: 0.15 × 0.9 = 0.135 < 0.31 triggered a
+        # reset every time. Low floor lets low-conf detections survive
+        # coasting; max_coast_frames still bounds how long we fake it.
+        conf_floor: float = 0.10,
     ) -> None:
         self._x: Optional[np.ndarray] = None  # (4,)
         self._P: Optional[np.ndarray] = None  # (4, 4)

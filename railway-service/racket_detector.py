@@ -28,6 +28,12 @@ YOLO_ONNX_PATH = MODEL_DIR / "yolo11n.onnx"
 # COCO class 38 = tennis racket
 TENNIS_RACKET_CLASS_ID = 38
 CONFIDENCE_THRESHOLD = 0.3
+# INPUT_SIZE = 640 matches the committed yolo11n.onnx. A bump to 960
+# was tried (commit not shipped) and measured WORSE detection on
+# IMG_1097.mov (1217 vs 1555 real-racket frames), likely due to the
+# opset-conversion fallback during re-export subtly changing decode
+# semantics. Keep at 640 unless the ONNX is regenerated with a clean
+# toolchain and re-verified on a real clip.
 INPUT_SIZE = 640
 
 _session = None
@@ -55,9 +61,15 @@ def _ensure_model() -> None:
             # Import torch-heavy ultralytics only at setup; swap to onnxruntime
             # for steady-state inference.
             from ultralytics import YOLO
+            from contextlib import redirect_stdout
+            import sys as _sys
 
-            model = YOLO(str(YOLO_PT_PATH) if YOLO_PT_PATH.exists() else "yolo11n.pt")
-            exported = model.export(format="onnx", imgsz=INPUT_SIZE, opset=12)
+            # Redirect ultralytics/torch export chatter to stderr so it
+            # doesn't corrupt the JSON-on-stdout subprocess contract used
+            # by extract_clip_keypoints.py. Same pattern as rtmlib init.
+            with redirect_stdout(_sys.stderr):
+                model = YOLO(str(YOLO_PT_PATH) if YOLO_PT_PATH.exists() else "yolo11n.pt")
+                exported = model.export(format="onnx", imgsz=INPUT_SIZE, opset=12)
             exported_path = Path(exported)
             if exported_path != YOLO_ONNX_PATH:
                 exported_path.replace(YOLO_ONNX_PATH)

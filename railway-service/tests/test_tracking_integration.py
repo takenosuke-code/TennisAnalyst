@@ -790,15 +790,22 @@ class TestPersonCropBbox:
         lms[28] = {"x": 500 / 1920, "y": 800 / 1080, "visibility": 0.9}
         bbox = _person_crop_bbox(lms, 1920, 1080)
         assert bbox is not None
-        # Pre-expansion envelope: 200x600. Expanding 0.6 on EACH side
-        # adds 120 to each horizontal side (+240 total), 360 to each
-        # vertical side (+720 total). Vertical is clipped to image
-        # height (1080) since 200-360<0.
+        # Pre-expansion envelope: 200x600. Width expansion ∈ [0.4, 1.0]
+        # so the width after expansion is 200*(1 + 2*expand). Height
+        # hits the image ceiling (1080) for anything ≥ 0.4 because
+        # 200 - 0.4*600 = -40 clips to 0 and 800 + 0.4*600 = 1040. We
+        # test the envelope, not the exact constant, so the test
+        # doesn't break when we sweep the tuning.
         bw = bbox[2] - bbox[0]
         bh = bbox[3] - bbox[1]
-        # Expected: width 440 (280..720), height 1080 (clipped).
-        assert 430 < bw < 450, f"bbox width after expansion off (got {bw})"
-        assert 1070 <= bh <= 1080, f"bbox height after expansion off (got {bh})"
+        from extract_clip_keypoints import _PERSON_CROP_EXPAND
+        expected_bw = 200 * (1 + 2 * _PERSON_CROP_EXPAND)
+        assert abs(bw - expected_bw) < 5, (
+            f"bbox width after expansion off "
+            f"(got {bw}, expected ~{expected_bw} for expand={_PERSON_CROP_EXPAND})"
+        )
+        # Height is either clipped to 1080 or exactly 600*(1 + 2*expand).
+        assert bh == pytest.approx(min(1080, 600 * (1 + 2 * _PERSON_CROP_EXPAND)), abs=5)
 
     def test_crop_clips_to_image_bounds(self):
         """Near a frame edge, the expanded bbox could go negative or

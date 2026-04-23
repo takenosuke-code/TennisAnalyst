@@ -58,7 +58,7 @@ YOLO_PT_PATH = MODEL_DIR / "yolo11n.pt"
 YOLO_ONNX_PATH = MODEL_DIR / "yolo11n.onnx"
 PERSON_CLASS_ID = 0
 PERSON_CONFIDENCE_THRESHOLD = 0.3
-YOLO_INPUT_SIZE = 640
+YOLO_INPUT_SIZE = 640  # matches racket_detector.INPUT_SIZE — both share yolo11n.onnx
 
 # Bbox padding around the YOLO detection before we pass it to RTMPose.
 # RTMPose's preprocessing already adds a 1.25 padding factor on the
@@ -159,9 +159,13 @@ def _ensure_yolo() -> None:
 
             if not YOLO_ONNX_PATH.exists():
                 from ultralytics import YOLO  # heavy import; setup-time only
+                from contextlib import redirect_stdout
+                import sys as _sys
 
-                model = YOLO(str(YOLO_PT_PATH) if YOLO_PT_PATH.exists() else "yolo11n.pt")
-                exported = model.export(format="onnx", imgsz=YOLO_INPUT_SIZE, opset=12)
+                # See racket_detector._ensure_model for the redirect rationale.
+                with redirect_stdout(_sys.stderr):
+                    model = YOLO(str(YOLO_PT_PATH) if YOLO_PT_PATH.exists() else "yolo11n.pt")
+                    exported = model.export(format="onnx", imgsz=YOLO_INPUT_SIZE, opset=12)
                 exported_path = Path(exported)
                 if exported_path != YOLO_ONNX_PATH:
                     exported_path.replace(YOLO_ONNX_PATH)
