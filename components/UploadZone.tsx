@@ -4,7 +4,15 @@ import { useRef, useState, useEffect } from 'react'
 import { upload } from '@vercel/blob/client'
 import { usePoseStore } from '@/store'
 import { usePoseExtractor } from '@/hooks/usePoseExtractor'
+import { extractPoseViaRailway, RailwayExtractError } from '@/lib/poseExtractionRailway'
+import type { ExtractResult } from '@/lib/poseExtraction'
 import type { PoseFrame } from '@/lib/supabase'
+
+// Gate the server-side (Railway) extraction path behind an env flag so a
+// rollout can be toggled without redeploying code. When unset / false the
+// upload flow keeps using in-browser MediaPipe exactly as before.
+const USE_RAILWAY_EXTRACT =
+  process.env.NEXT_PUBLIC_USE_RAILWAY_EXTRACT === 'true'
 
 function safeBlobFilename(name: string): string {
   return (
@@ -82,17 +90,63 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     }
 
     setOverallProgress(15)
-    setStatusMsg('Loading pose model...')
 
-    setOverallProgress(25)
-    setStatusMsg('Analyzing pose from video...')
+    let result: ExtractResult | null = null
+    let usedRailway = false
+    let pendingSessionId: string | null = null
 
-    const result = await extract(file)
+    // Railway path: create the session row FIRST (so Railway has something
+    // to write back to), then ask Railway to extract, then poll. On any
+    // failure we fall through to the browser MediaPipe path below — the
+    // user should never see an upload die because Railway had a bad day.
+    if (USE_RAILWAY_EXTRACT) {
+      setStatusMsg('Queuing server-side extraction...')
+      setOverallProgress(20)
+      try {
+        const pendingRes = await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blobUrl, shotType }),
+        })
+        if (!pendingRes.ok) {
+          throw new Error(`create-pending failed: ${pendingRes.status}`)
+        }
+        const pendingBody = await pendingRes.json()
+        pendingSessionId = pendingBody.sessionId
+
+        setStatusMsg('Analyzing pose on the server...')
+        result = await extractPoseViaRailway({
+          sessionId: pendingSessionId!,
+          blobUrl,
+          onProgress: (pct) => setOverallProgress(20 + Math.round((pct / 100) * 70)),
+        })
+        usedRailway = true
+      } catch (err) {
+        // Any failure falls back to in-browser extraction silently.
+        // Log the reason so we can tell 'Railway not configured' (normal
+        // during staging) from 'Railway errored out' (needs attention).
+        if (err instanceof RailwayExtractError) {
+          console.info('[UploadZone] Railway path unavailable, falling back to browser:', err.reason)
+        } else {
+          console.error('[UploadZone] Railway path errored, falling back to browser:', err)
+        }
+        result = null
+      }
+    }
+
+    // Browser MediaPipe fallback (or primary path when the feature flag
+    // is off). Matches the original behaviour verbatim so nothing about
+    // the legacy flow changes when Railway is disabled.
     if (!result) {
-      // Hook handled status/error; just release the processing lock
-      setProcessing(false)
-      setBusy(false)
-      return
+      setOverallProgress(25)
+      setStatusMsg('Analyzing pose from video...')
+      result = await extract(file)
+      if (!result) {
+        // Hook handled status/error; just release the processing lock
+        setProcessing(false)
+        setBusy(false)
+        return
+      }
     }
 
     setOverallProgress(95)
@@ -104,28 +158,41 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
       frames: result.frames,
     }
 
-    try {
-      const sessionId = usePoseStore.getState().sessionId
-      const sessRes = await fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, blobUrl, shotType, keypointsJson }),
-      })
-      if (!sessRes.ok) {
-        console.error('Failed to save session:', sessRes.status, await sessRes.text())
+    // When Railway did the work, it already wrote the keypoints to the
+    // pending session row. We only POST /api/sessions for the browser
+    // path (or on Railway fallback, to upsert the browser output into
+    // the pending row).
+    if (!usedRailway) {
+      try {
+        const sessionId =
+          pendingSessionId ?? usePoseStore.getState().sessionId
+        const sessRes = await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, blobUrl, shotType, keypointsJson }),
+        })
+        if (!sessRes.ok) {
+          console.error('Failed to save session:', sessRes.status, await sessRes.text())
+          setStatusMsg('Warning: analysis complete but failed to save session.')
+        }
+      } catch (err) {
+        console.error('Failed to save session:', err)
         setStatusMsg('Warning: analysis complete but failed to save session.')
       }
-    } catch (err) {
-      console.error('Failed to save session:', err)
-      setStatusMsg('Warning: analysis complete but failed to save session.')
     }
 
-    // Hand the object URL off to the store for playback (store revokes old on replace)
-    setLocalVideoUrl(result.objectUrl)
+    // Hand the object URL off to the store for playback (store revokes old on replace).
+    // On the Railway path we don't have a local object URL; create one from
+    // the original File so playback still works without re-downloading
+    // from Vercel Blob.
+    const playbackUrl = usedRailway ? URL.createObjectURL(file) : result.objectUrl
+    setLocalVideoUrl(playbackUrl)
     setFramesData(result.frames)
     persistShotType(shotType)
     setOverallProgress(100)
-    setStatusMsg(`Done! Analyzed ${result.frames.length} frames.`)
+    setStatusMsg(
+      `Done! Analyzed ${result.frames.length} frames${usedRailway ? ' (server)' : ''}.`,
+    )
     setProcessing(false)
     setBusy(false)
     onComplete?.(blobUrl, result.frames)
