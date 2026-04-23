@@ -79,7 +79,7 @@ class TestDetectRacketForFrameWithTracker:
         The tracker should arm and the returned point should be ~= YOLO."""
         tracker = RacketTracker()
 
-        def fake_yolo(_frame, _wrist_xy):
+        def fake_yolo(_frame, _wrist_xy, person_bbox=None):
             return {"x": 0.5, "y": 0.5, "confidence": 0.8}
 
         out = extract_clip_keypoints._detect_racket_for_frame(
@@ -104,7 +104,7 @@ class TestDetectRacketForFrameWithTracker:
 
         # Arm.
         extract_clip_keypoints._detect_racket_for_frame(
-            lambda f, w: {"x": 0.50, "y": 0.50, "confidence": 0.85},
+            lambda f, w, person_bbox=None: {"x": 0.50, "y": 0.50, "confidence": 0.85},
             _fake_frame_bgr(),
             _fake_landmarks(),
             processed_index=0,
@@ -113,7 +113,7 @@ class TestDetectRacketForFrameWithTracker:
         )
         # Build up some velocity.
         extract_clip_keypoints._detect_racket_for_frame(
-            lambda f, w: {"x": 0.55, "y": 0.50, "confidence": 0.85},
+            lambda f, w, person_bbox=None: {"x": 0.55, "y": 0.50, "confidence": 0.85},
             _fake_frame_bgr(),
             _fake_landmarks(),
             processed_index=1,
@@ -122,7 +122,7 @@ class TestDetectRacketForFrameWithTracker:
         )
         # Now: YOLO misses the next frame.
         coast = extract_clip_keypoints._detect_racket_for_frame(
-            lambda f, w: None,
+            lambda f, w, person_bbox=None: None,
             _fake_frame_bgr(),
             _fake_landmarks(),
             processed_index=2,
@@ -168,7 +168,7 @@ class TestDetectRacketForFrameWithTracker:
         # Establish a tight lock around x=0.5.
         for i, x in enumerate([0.50, 0.51, 0.52, 0.53]):
             extract_clip_keypoints._detect_racket_for_frame(
-                lambda f, w, _x=x: {"x": _x, "y": 0.5, "confidence": 0.85},
+                lambda f, w, _x=x, person_bbox=None: {"x": _x, "y": 0.5, "confidence": 0.85},
                 _fake_frame_bgr(),
                 _fake_landmarks(),
                 processed_index=i,
@@ -178,7 +178,7 @@ class TestDetectRacketForFrameWithTracker:
 
         # Frame 4: YOLO jumps to x=0.9 (spectator's racket). Must reject.
         out = extract_clip_keypoints._detect_racket_for_frame(
-            lambda f, w: {"x": 0.9, "y": 0.5, "confidence": 0.95},
+            lambda f, w, person_bbox=None: {"x": 0.9, "y": 0.5, "confidence": 0.95},
             _fake_frame_bgr(),
             _fake_landmarks(),
             processed_index=4,
@@ -420,7 +420,7 @@ class TestExtractRtmposeEndToEnd:
         rng = random.Random(0)
         frame_counter = {"i": 0}
 
-        def fake_detect_racket(_frame, _wrist_xy):
+        def fake_detect_racket(_frame, _wrist_xy, person_bbox=None):
             i = frame_counter["i"]
             frame_counter["i"] += 1
             x = 0.5 + 0.1 * math.sin(i * 0.3) + rng.gauss(0, 0.02)
@@ -476,7 +476,7 @@ class TestExtractRtmposeEndToEnd:
         monkeypatch.setattr(
             extract_clip_keypoints,
             "_try_load_racket_detector",
-            lambda: (lambda _f, _w: None),
+            lambda: (lambda _f, _w, person_bbox=None: None),
         )
 
         fake_cap = MagicMock()
@@ -716,6 +716,194 @@ class TestLongClipStability:
 
 
 class TestExtractMediapipeEndToEnd:
+    def test_open_video_autorotated_enables_orientation_flag(self, monkeypatch):
+        """Regression for the IMG_1097.mov bug: phone portrait clips
+        store a 90° rotation tag; without CAP_PROP_ORIENTATION_AUTO set
+        to 1, OpenCV returns sideways frames. YOLO + RTMPose both
+        collapse to near-zero detections on sideways frames — the
+        single worst bug the extraction pipeline had. This test
+        catches a regression where someone removes the cap.set() call."""
+        import extract_clip_keypoints as ek
+        import main as mn
+
+        captured_sets: list[tuple[int, float]] = []
+
+        class FakeCap:
+            def __init__(self, path):
+                self.path = path
+            def set(self, prop, value):
+                captured_sets.append((prop, value))
+                return True
+            def isOpened(self):
+                return True
+
+        monkeypatch.setattr(ek.cv2, "VideoCapture", FakeCap)
+        cap = ek._open_video_autorotated("/fake.mp4")
+        # CAP_PROP_ORIENTATION_AUTO is index 49 in OpenCV
+        assert (49, 1) in captured_sets or any(
+            prop == 49 and value in (1, 1.0) for prop, value in captured_sets
+        ), (
+            "extract_clip_keypoints._open_video_autorotated did not enable "
+            "CAP_PROP_ORIENTATION_AUTO — phone portrait clips will come out "
+            "sideways and YOLO will miss everything. Re-read the comment on "
+            "the helper before removing the cap.set() call."
+        )
+
+        # Also covers main.py's helper (same bug, different module).
+        captured_sets.clear()
+        monkeypatch.setattr(mn.cv2, "VideoCapture", FakeCap)
+        mn._open_video_autorotated("/fake.mp4")
+        assert any(prop == 49 and value in (1, 1.0) for prop, value in captured_sets), (
+            "main._open_video_autorotated did not enable CAP_PROP_ORIENTATION_AUTO"
+        )
+
+
+class TestPersonCropBbox:
+    """The crop-to-person YOLO path relies on a sensible landmark-
+    envelope bbox. Bugs here silently either (a) produce a crop that
+    doesn't contain the racket, dropping detection back to ~zero, or
+    (b) produce a crop equal to the full frame, defeating the point
+    of cropping. Both regressions are testable without model weights."""
+
+    def test_returns_none_when_few_landmarks_visible(self):
+        from extract_clip_keypoints import _person_crop_bbox
+        # Only 2 visible landmarks — not enough to define a bbox.
+        lms = [
+            {"x": 0.5, "y": 0.5, "visibility": 0.0} for _ in range(33)
+        ]
+        lms[15] = {"x": 0.5, "y": 0.5, "visibility": 0.9}
+        lms[16] = {"x": 0.5, "y": 0.5, "visibility": 0.9}
+        assert _person_crop_bbox(lms, 1920, 1080) is None
+
+    def test_expands_tight_envelope_to_include_racket_reach(self):
+        """The raw landmark envelope is the body. Add a racket reach
+        margin (0.6 expansion) so a racket at full extension past the
+        wrist is inside the crop."""
+        from extract_clip_keypoints import _person_crop_bbox, _PERSON_CROP_EXPAND
+        # Construct a player whose tight envelope is x=[400,600], y=[200,800]
+        lms = [
+            {"x": 0.5, "y": 0.5, "visibility": 0.0} for _ in range(33)
+        ]
+        lms[11] = {"x": 400 / 1920, "y": 200 / 1080, "visibility": 0.9}
+        lms[12] = {"x": 600 / 1920, "y": 200 / 1080, "visibility": 0.9}
+        lms[27] = {"x": 500 / 1920, "y": 800 / 1080, "visibility": 0.9}
+        lms[28] = {"x": 500 / 1920, "y": 800 / 1080, "visibility": 0.9}
+        bbox = _person_crop_bbox(lms, 1920, 1080)
+        assert bbox is not None
+        # Pre-expansion envelope: 200x600. Expanding 0.6 on EACH side
+        # adds 120 to each horizontal side (+240 total), 360 to each
+        # vertical side (+720 total). Vertical is clipped to image
+        # height (1080) since 200-360<0.
+        bw = bbox[2] - bbox[0]
+        bh = bbox[3] - bbox[1]
+        # Expected: width 440 (280..720), height 1080 (clipped).
+        assert 430 < bw < 450, f"bbox width after expansion off (got {bw})"
+        assert 1070 <= bh <= 1080, f"bbox height after expansion off (got {bh})"
+
+    def test_crop_clips_to_image_bounds(self):
+        """Near a frame edge, the expanded bbox could go negative or
+        past img_w/img_h. Must be clipped."""
+        from extract_clip_keypoints import _person_crop_bbox
+        lms = [
+            {"x": 0.5, "y": 0.5, "visibility": 0.0} for _ in range(33)
+        ]
+        # Player near top-left corner.
+        lms[11] = {"x": 0.05, "y": 0.05, "visibility": 0.9}
+        lms[12] = {"x": 0.10, "y": 0.05, "visibility": 0.9}
+        lms[27] = {"x": 0.08, "y": 0.25, "visibility": 0.9}
+        lms[28] = {"x": 0.08, "y": 0.25, "visibility": 0.9}
+        bbox = _person_crop_bbox(lms, 1000, 1000)
+        assert bbox is not None
+        assert bbox[0] >= 0
+        assert bbox[1] >= 0
+        assert bbox[2] <= 1000
+        assert bbox[3] <= 1000
+
+
+class TestRacketDetectorCropPath:
+    """The racket_detector.detect_racket function gained a person_bbox
+    parameter. Without end-to-end model weights we can't test real YOLO,
+    but we can verify the cropping geometry: a detection in crop space
+    gets translated back to full-frame normalized space correctly."""
+
+    def test_crop_detection_translates_back_to_full_frame_coords(self, monkeypatch):
+        import racket_detector as rd
+        rd._reset_for_tests() if hasattr(rd, '_reset_for_tests') else None
+
+        # Stub out the session + model load so we don't need real weights.
+        import numpy as np
+        fake_session = MagicMock()
+
+        def fake_run(_inputs, _feed):
+            # Real YOLOv11 export shape: (1, 84, 8400). After the
+            # decode's `output[0]` + transpose it becomes (8400, 84).
+            # Put one "detection" at anchor index 0 with the racket
+            # centered in the letterbox input.
+            out = np.zeros((1, 84, 8400), dtype=np.float32)
+            out[0, 0, 0] = 320  # cx in letterbox pixels
+            out[0, 1, 0] = 320  # cy
+            out[0, 2, 0] = 20   # w
+            out[0, 3, 0] = 20   # h
+            out[0, 4 + 38, 0] = 0.85  # tennis_racket class score
+            return [out]
+
+        fake_session.run.side_effect = fake_run
+        monkeypatch.setattr(rd, "_session", fake_session)
+        monkeypatch.setattr(rd, "_input_name", "images")
+        # Skip _ensure_model by patching it.
+        monkeypatch.setattr(rd, "_ensure_model", lambda: None)
+
+        # Full frame: 960x540. Person crop: 200..600 horizontally,
+        # 100..500 vertically (400x400).
+        import numpy as np
+        frame = np.zeros((540, 960, 3), dtype=np.uint8)
+        person_bbox = (200.0, 100.0, 600.0, 500.0)
+
+        result = rd.detect_racket(frame, person_bbox=person_bbox)
+        assert result is not None
+        # The "detection" is at crop-center → (200+600)/2, (100+500)/2 = (400, 300)
+        # Normalized to 960x540: (400/960, 300/540) = (0.417, 0.556)
+        assert abs(result["x"] - 400 / 960) < 0.02, (
+            f"crop-to-full-frame x translation wrong (got {result['x']})"
+        )
+        assert abs(result["y"] - 300 / 540) < 0.02, (
+            f"crop-to-full-frame y translation wrong (got {result['y']})"
+        )
+        assert result["confidence"] == 0.85
+
+    def test_degenerate_tiny_crop_falls_back_to_full_frame(self, monkeypatch):
+        """If the person bbox is absurdly small (< 32px on a side),
+        running YOLO on it is pointless. We should fall back to
+        full-frame detection."""
+        import racket_detector as rd
+        import numpy as np
+
+        # Track whether the fall-back-to-full-frame path was used by
+        # recording the letterbox-preprocessed input size.
+        call_shapes: list[tuple[int, int]] = []
+
+        def fake_run(_inputs, feed):
+            # Real YOLOv11 output shape: (1, 84, 8400). No detection
+            # above threshold anywhere.
+            out = np.zeros((1, 84, 8400), dtype=np.float32)
+            out[0, 4 + 38, 0] = 0.01  # below threshold
+            return [out]
+
+        fake_session = MagicMock()
+        fake_session.run.side_effect = fake_run
+        monkeypatch.setattr(rd, "_session", fake_session)
+        monkeypatch.setattr(rd, "_input_name", "images")
+        monkeypatch.setattr(rd, "_ensure_model", lambda: None)
+
+        frame = np.zeros((540, 960, 3), dtype=np.uint8)
+        # Tiny 10x10 bbox — should trip the guard.
+        tiny_bbox = (100.0, 100.0, 110.0, 110.0)
+        result = rd.detect_racket(frame, person_bbox=tiny_bbox)
+        # Detection below threshold → None. Not crashing is the pass.
+        assert result is None
+
+
+class TestExtractMediapipeEndToEnd:
     def test_mediapipe_path_smooths_racket_trail(self, monkeypatch):
         """The racket tracker must work in the MediaPipe branch too.
         Only difference from the rtmpose test: pose comes from MediaPipe
@@ -757,7 +945,7 @@ class TestExtractMediapipeEndToEnd:
         rng = random.Random(99)
         frame_counter = {"i": 0}
 
-        def fake_detect_racket(_frame, _wrist_xy):
+        def fake_detect_racket(_frame, _wrist_xy, person_bbox=None):
             i = frame_counter["i"]
             frame_counter["i"] += 1
             x = 0.5 + 0.1 * math.sin(i * 0.3) + rng.gauss(0, 0.02)

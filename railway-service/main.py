@@ -146,6 +146,21 @@ def compute_joint_angles_from_dicts(
     return angles
 
 
+def _open_video_autorotated(video_path: str) -> cv2.VideoCapture:
+    """cv2.VideoCapture with CAP_PROP_ORIENTATION_AUTO on. Phone portrait
+    clips carry a 90° rotation tag that OpenCV won't apply by default —
+    YOLO and RTMPose both collapse to zero detections on sideways frames.
+    See extract_clip_keypoints._open_video_autorotated for the full
+    rationale and the measured impact on IMG_1097.mov.
+    """
+    cap = cv2.VideoCapture(video_path)
+    try:
+        cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
+    except Exception:  # noqa: BLE001
+        pass
+    return cap
+
+
 def _try_load_racket_detector():
     """Best-effort import of the racket detector.
 
@@ -172,7 +187,7 @@ def _extract_with_mediapipe(
 
     detect_racket = _try_load_racket_detector()
 
-    cap = cv2.VideoCapture(video_path)
+    cap = _open_video_autorotated(video_path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {video_path}")
 
@@ -289,8 +304,14 @@ def _detect_racket_for_frame(
             if dominant is not None
             else None
         )
+        # Crop to landmark envelope + reach margin. See
+        # extract_clip_keypoints._person_crop_bbox for rationale.
+        from extract_clip_keypoints import _person_crop_bbox
+        person_bbox = _person_crop_bbox(landmarks, w, h)
         try:
-            yolo_point = detect_racket(frame_bgr, wrist_xy)
+            yolo_point = detect_racket(
+                frame_bgr, wrist_xy, person_bbox=person_bbox,
+            )
         except Exception as e:  # noqa: BLE001
             print(f"[extract] racket detect failed on frame {processed_index}: {e}")
             yolo_point = None
@@ -315,7 +336,7 @@ def _extract_with_rtmpose(
 
     detect_racket = _try_load_racket_detector()
 
-    cap = cv2.VideoCapture(video_path)
+    cap = _open_video_autorotated(video_path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {video_path}")
 
@@ -757,7 +778,7 @@ def _classify_video_frames(video_path: str) -> tuple[str, int]:
     """
     from camera_classifier import classify_frame  # local import so tests can patch
 
-    cap = cv2.VideoCapture(video_path)
+    cap = _open_video_autorotated(video_path)
     if not cap.isOpened():
         return "unknown", 0
     try:

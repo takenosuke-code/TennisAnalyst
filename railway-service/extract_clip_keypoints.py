@@ -128,6 +128,47 @@ _LM_RIGHT_ELBOW = 14
 _LM_LEFT_WRIST = 15
 _LM_RIGHT_WRIST = 16
 
+# How far (as a fraction of bbox side length) to expand the landmark-
+# derived person bbox before cropping for racket detection. Must be
+# generous enough to include the racket at full forehand extension
+# (roughly 0.4× body height past the wrist) plus a margin for
+# landmark-visibility gaps. 0.6 = a 400×600 torso crop expands to
+# ~640×960, which comfortably clears any arm reach on 960p footage.
+_PERSON_CROP_EXPAND = 0.6
+
+
+def _person_crop_bbox(landmarks, img_w, img_h):
+    """Derive a person bounding box from visible pose landmarks, then
+    expand it generously to include racket reach. Returns xyxy tuple in
+    frame-pixel coordinates, or None when too few landmarks are visible.
+
+    Using the landmark envelope (instead of the YOLO person bbox) means
+    this works for both MediaPipe and RTMPose paths without needing a
+    separate person tracker on the MediaPipe side. Also: the landmark
+    envelope already excludes background people whose landmarks aren't
+    in our pose output, so we don't need additional filtering.
+    """
+    xs, ys = [], []
+    for lm in landmarks:
+        if lm.get("visibility", 0) > 0.3:
+            xs.append(lm["x"] * img_w)
+            ys.append(lm["y"] * img_h)
+    if len(xs) < 4:
+        return None
+
+    x1, x2 = min(xs), max(xs)
+    y1, y2 = min(ys), max(ys)
+    bw = x2 - x1
+    bh = y2 - y1
+    dx = bw * _PERSON_CROP_EXPAND
+    dy = bh * _PERSON_CROP_EXPAND
+    return (
+        max(0.0, x1 - dx),
+        max(0.0, y1 - dy),
+        min(float(img_w), x2 + dx),
+        min(float(img_h), y2 + dy),
+    )
+
 
 def _racket_fallback_from_forearm(landmarks):
     """Estimate a racket-center point from the dominant wrist extended
@@ -208,8 +249,16 @@ def _detect_racket_for_frame(
             if dominant is not None
             else None
         )
+        # Person bbox derived from landmarks + reach-margin expansion.
+        # YOLO runs on this crop instead of the full frame so a small
+        # racket in a low-res clip gets enough effective resolution to
+        # be detected. See racket_detector.detect_racket docstring for
+        # the measured impact vs. the full-frame path.
+        person_bbox = _person_crop_bbox(landmarks, w, h)
         try:
-            yolo_point = detect_racket(frame_bgr, wrist_xy)
+            yolo_point = detect_racket(
+                frame_bgr, wrist_xy, person_bbox=person_bbox,
+            )
         except Exception as e:  # noqa: BLE001
             print(f"[extract] racket detect failed on frame {processed_index}: {e}", file=sys.stderr)
             yolo_point = None
@@ -229,12 +278,36 @@ def _detect_racket_for_frame(
     return _racket_fallback_from_forearm(landmarks)
 
 
+def _open_video_autorotated(video_path):
+    """cv2.VideoCapture with orientation auto-rotate enabled.
+
+    Phone portrait clips store a 90° rotation tag but OpenCV defaults to
+    leaving it off, so frames come out sideways. YOLO and RTMPose were
+    both trained on upright images — a sideways player is outside the
+    distribution and detections collapse to zero. Measured impact on
+    IMG_1097.mov: rotation flag was set (CAP_PROP_ORIENTATION_META=90),
+    and without the auto-rotate flip the racket never got detected at
+    all for 580 out of 590 frames.
+    """
+    cap = cv2.VideoCapture(video_path)
+    # Setting this property before reading frames makes OpenCV consult
+    # the container's rotation tag and rotate frames on decode. Safe on
+    # clips that have no rotation metadata (no-op).
+    try:
+        cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
+    except Exception:  # noqa: BLE001
+        # Older OpenCV builds may not support this property; the raw
+        # unrotated frames will be used instead.
+        pass
+    return cap
+
+
 def _extract_mediapipe(video_path, sample_fps):
     from tracking import RacketTracker
 
     detect_racket = _try_load_racket_detector()
 
-    cap = cv2.VideoCapture(video_path)
+    cap = _open_video_autorotated(video_path)
     if not cap.isOpened():
         return {"error": f"Cannot open video: {video_path}"}
 
@@ -337,7 +410,7 @@ def _extract_rtmpose(video_path, sample_fps):
 
     detect_racket = _try_load_racket_detector()
 
-    cap = cv2.VideoCapture(video_path)
+    cap = _open_video_autorotated(video_path)
     if not cap.isOpened():
         return {"error": f"Cannot open video: {video_path}"}
 

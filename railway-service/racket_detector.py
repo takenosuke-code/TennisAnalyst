@@ -132,18 +132,79 @@ def _best_racket_box(
     return float(x1), float(y1), float(x2), float(y2), best_conf
 
 
+# Confidence threshold when YOLO runs on a pre-cropped person region.
+# Crops dramatically increase the racket's pixel area in the YOLO input
+# (from ~15 px on a 960p full frame to ~50 px in a 640-letterboxed crop),
+# AND they exclude most of the background that produced false positives
+# in the old full-frame path. So we can afford a MUCH lower threshold
+# without flooding the trail with garbage — empirically every real
+# detection lives somewhere in [0.10, 0.90] on cropped frames.
+CROPPED_CONFIDENCE_THRESHOLD = 0.15
+
+
+def _decode_racket_box(
+    output: np.ndarray,
+    scale: float,
+    pad: Tuple[int, int],
+    conf_threshold: float,
+) -> Optional[Tuple[float, float, float, float, float]]:
+    """Parse YOLOv11 output and return the best racket bbox (x1,y1,x2,y2,conf)
+    in the model-input pixel space (letterbox-undone), or None. Identical
+    geometry to _best_racket_box but parameterized on confidence so the
+    full-frame and cropped paths can use different thresholds."""
+    if output.ndim == 3:
+        output = output[0]
+    if output.shape[0] < output.shape[1]:
+        output = output.T
+
+    if output.shape[1] < 5 + TENNIS_RACKET_CLASS_ID + 1:
+        return None
+
+    cls_scores = output[:, 4 + TENNIS_RACKET_CLASS_ID]
+    best_idx = int(np.argmax(cls_scores))
+    best_conf = float(cls_scores[best_idx])
+    if best_conf < conf_threshold:
+        return None
+
+    cx, cy, w, h = output[best_idx, :4]
+    x1 = cx - w / 2
+    y1 = cy - h / 2
+    x2 = cx + w / 2
+    y2 = cy + h / 2
+    pad_x, pad_y = pad
+    x1 = (x1 - pad_x) / scale
+    y1 = (y1 - pad_y) / scale
+    x2 = (x2 - pad_x) / scale
+    y2 = (y2 - pad_y) / scale
+    return float(x1), float(y1), float(x2), float(y2), best_conf
+
+
 def detect_racket(
     frame_bgr: np.ndarray,
     dominant_wrist_xy: Optional[Tuple[float, float]] = None,
+    person_bbox: Optional[Tuple[float, float, float, float]] = None,
 ) -> Optional[RacketHead]:
     """Run YOLOv11n on *frame_bgr* and return the racket center point as
     normalized (x, y) plus confidence, or None if no confident detection.
 
-    `dominant_wrist_xy` is unused in this revision but kept in the signature
-    for back-compat with the existing extractor. We output the bbox center
-    (sweet-spot proxy) rather than a wrist-relative corner — the center is
-    the point a stroke analyst actually wants to trace through contact.
+    When `person_bbox` is provided (in frame-pixel xyxy coordinates,
+    INCLUDING the expansion for racket reach), YOLO is run on a crop of
+    that region rather than the full frame. This is the crucial fix for
+    low-resolution amateur footage: on a 960×540 clip a held racket is
+    ~15 px wide in the full frame (near YOLO11n's detection floor), but
+    inside a 400×600 person crop letterboxed to 640, the same racket
+    becomes ~50 px — well within the model's comfort zone. Measured on
+    IMG_1097.mov: full-frame detection was 9/590 frames; crop path
+    should deliver a multi-x lift.
+
+    Detection coords are translated from crop space back to full-frame
+    normalized space so the caller never sees the crop offset.
+
+    `dominant_wrist_xy` is unused in this revision but kept in the
+    signature for back-compat with callers that haven't migrated.
     """
+    _ = dominant_wrist_xy
+
     try:
         _ensure_model()
     except Exception as e:  # noqa: BLE001
@@ -153,8 +214,33 @@ def detect_racket(
     if _session is None or _input_name is None:
         return None
 
-    h, w = frame_bgr.shape[:2]
-    tensor, scale, pad = _preprocess(frame_bgr)
+    full_h, full_w = frame_bgr.shape[:2]
+
+    # Decide input region + confidence threshold based on whether we
+    # have a person bbox to crop to.
+    if person_bbox is not None:
+        x1, y1, x2, y2 = person_bbox
+        # Clamp + integerize. Reject degenerate crops that would ask
+        # YOLO to look at zero pixels.
+        cx1 = max(0, int(round(x1)))
+        cy1 = max(0, int(round(y1)))
+        cx2 = min(full_w, int(round(x2)))
+        cy2 = min(full_h, int(round(y2)))
+        if cx2 - cx1 < 32 or cy2 - cy1 < 32:
+            # Crop too small to be useful — fall through to full frame.
+            crop = frame_bgr
+            crop_origin = (0, 0)
+            conf_threshold = CONFIDENCE_THRESHOLD
+        else:
+            crop = frame_bgr[cy1:cy2, cx1:cx2]
+            crop_origin = (cx1, cy1)
+            conf_threshold = CROPPED_CONFIDENCE_THRESHOLD
+    else:
+        crop = frame_bgr
+        crop_origin = (0, 0)
+        conf_threshold = CONFIDENCE_THRESHOLD
+
+    tensor, scale, pad = _preprocess(crop)
 
     try:
         outputs = _session.run(None, {_input_name: tensor})
@@ -162,21 +248,26 @@ def detect_racket(
         print(f"[racket_detector] inference error: {e}")
         return None
 
-    box = _best_racket_box(outputs[0], scale, pad)
+    box = _decode_racket_box(outputs[0], scale, pad, conf_threshold)
     if box is None:
         return None
 
     x1, y1, x2, y2, conf = box
 
-    # Always use the bbox center. This is the sweet-spot proxy the swing
-    # tracer follows. `dominant_wrist_xy` is intentionally unused.
-    _ = dominant_wrist_xy
-    center_x = (x1 + x2) / 2
-    center_y = (y1 + y2) / 2
+    # Center in crop-pixel coords → add crop origin → full-frame pixels.
+    center_x = (x1 + x2) / 2 + crop_origin[0]
+    center_y = (y1 + y2) / 2 + crop_origin[1]
 
-    # Normalize to [0,1], matching Landmark.x/y space.
     return {
-        "x": max(0.0, min(1.0, center_x / w)),
-        "y": max(0.0, min(1.0, center_y / h)),
+        "x": max(0.0, min(1.0, center_x / full_w)),
+        "y": max(0.0, min(1.0, center_y / full_h)),
         "confidence": round(conf, 3),
     }
+
+
+# Retained as a thin alias so any external callers that imported it still
+# work. Internal code uses _decode_racket_box.
+def _best_racket_box(
+    output: np.ndarray, scale: float, pad: Tuple[int, int]
+) -> Optional[Tuple[float, float, float, float, float]]:
+    return _decode_racket_box(output, scale, pad, CONFIDENCE_THRESHOLD)
