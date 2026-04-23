@@ -61,14 +61,32 @@ describe('POST /api/sessions', () => {
     expect(res.status).toBe(400)
   })
 
-  it('returns 400 when keypointsJson is missing', async () => {
+  it('creates a pending session when keypointsJson is omitted (Railway path)', async () => {
+    mockSingle.mockResolvedValueOnce({
+      data: { id: 'pending-id', status: 'pending' },
+      error: null,
+    })
+
     const { POST } = await import('@/app/api/sessions/route')
     const req = new NextRequest('http://localhost/api/sessions', {
       method: 'POST',
       body: JSON.stringify({ blobUrl: 'https://blob.test/v.mp4' }),
     })
     const res = await POST(req)
-    expect(res.status).toBe(400)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.sessionId).toBe('pending-id')
+    // Upsert must carry status='pending' and must NOT carry keypoints_json
+    // (Railway will fill that in when extraction completes).
+    expect(mockUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        blob_url: 'https://blob.test/v.mp4',
+        status: 'pending',
+      }),
+      { onConflict: 'blob_url' },
+    )
+    const upsertCall = mockUpsert.mock.calls[0][0]
+    expect(upsertCall.keypoints_json).toBeUndefined()
   })
 
   it('uses upsert with onConflict blob_url when no sessionId', async () => {
