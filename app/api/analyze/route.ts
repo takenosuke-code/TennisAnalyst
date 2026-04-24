@@ -9,8 +9,9 @@ import { after } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase, supabaseAdmin } from '@/lib/supabase'
 import { createClient } from '@/lib/supabase/server'
-import { buildAngleSummary } from '@/lib/jointAngles'
+import { buildAngleSummary, detectSwings } from '@/lib/jointAngles'
 import { getBiomechanicsReference } from '@/lib/biomechanics-reference'
+import { SHOT_TYPE_CONFIGS } from '@/lib/shotTypeConfig'
 import { classifyAndTagCaptureQuality } from '@/lib/captureQuality'
 import {
   buildCoachingToolInput,
@@ -99,6 +100,79 @@ export async function POST(request: NextRequest) {
   // Build compact angle summary for the user
   const userSummary = buildAngleSummary(userKeypoints.frames)
 
+  // Resolve shot type once, early. Used by both the prompt (shape the coaching
+  // for forehand vs. backhand vs. serve) and the telemetry row (kept as-is
+  // downstream). Priority: request body > session metadata > null.
+  let resolvedShotType: string | null = typeof bodyShotType === 'string' ? bodyShotType : null
+  let resolvedBlobUrl: string | null = typeof bodyBlobUrl === 'string' ? bodyBlobUrl : null
+  if ((!resolvedShotType || !resolvedBlobUrl) && sessionId) {
+    try {
+      const { data: sessionMeta } = await supabase
+        .from('user_sessions')
+        .select('shot_type, blob_url')
+        .eq('id', sessionId)
+        .single()
+      if (sessionMeta) {
+        resolvedShotType = resolvedShotType ?? sessionMeta.shot_type ?? null
+        resolvedBlobUrl = resolvedBlobUrl ?? sessionMeta.blob_url ?? null
+      }
+    } catch (err) {
+      console.error('analyze: shot_type/blob_url lookup failed:', err)
+    }
+  }
+
+  // Run the shot-type-specific mistakeChecks from SHOT_TYPE_CONFIGS against
+  // the peak-activity frame of the primary swing. Gives the LLM a curated
+  // list of issues to prioritize instead of fabricating from raw angles.
+  // Only runs when we actually know the shot type — SHOT_TYPE_CONFIGS
+  // normalizes unknown to forehand, and running forehand checks on a serve
+  // would produce bogus detected-issue cites. Capped at 2 so the model can
+  // still speak freely.
+  let detectedMistakes: string[] = []
+  if (
+    resolvedShotType &&
+    SHOT_TYPE_CONFIGS[resolvedShotType] &&
+    userKeypoints.frames.length > 0
+  ) {
+    const swings = detectSwings(userKeypoints.frames)
+    const primary = swings[0]
+    if (primary) {
+      // peakFrame is an index into allFrames; primary.frames is a slice of
+      // those (from startFrame to endFrame). Translate so we index the slice.
+      const peakIdxInSlice = primary.peakFrame - primary.startFrame
+      const peakFrame = primary.frames[Math.max(0, Math.min(primary.frames.length - 1, peakIdxInSlice))]
+      if (peakFrame && peakFrame.joint_angles) {
+        const checks = SHOT_TYPE_CONFIGS[resolvedShotType].mistakeChecks
+        for (const check of checks) {
+          try {
+            if (check.detect(peakFrame.joint_angles)) {
+              detectedMistakes.push(`${check.label}: ${check.tip}`)
+              if (detectedMistakes.length >= 2) break
+            }
+          } catch {
+            // Defensive: a mistakeCheck that throws on unexpected input
+            // shouldn't block coaching. Silent skip is fine.
+          }
+        }
+      }
+    }
+  }
+
+  // Map to the reference library's vocabulary. Only forehand/backhand/serve
+  // have dedicated references; volley/slice/unknown fall back to 'all'.
+  const refShotType: 'forehand' | 'backhand' | 'serve' | 'all' =
+    resolvedShotType === 'forehand' || resolvedShotType === 'backhand' || resolvedShotType === 'serve'
+      ? resolvedShotType
+      : 'all'
+
+  // Shared prompt blocks injected into BOTH the solo and compare branches.
+  const shotIntroBlock = resolvedShotType
+    ? `\nSHOT TYPE: You are analyzing a ${resolvedShotType} swing. Tailor every cue and reference angle to this specific shot. Do NOT generalize across shot types.\n`
+    : `\nSHOT TYPE: Not specified. Infer from the pose and open your response by naming which shot you think this is (forehand / backhand / serve / volley) so the player can confirm.\n`
+  const detectedIssuesBlock = detectedMistakes.length > 0
+    ? `\nAUTO-DETECTED ISSUES (system-flagged for this swing — weave coaching around these, don't just list them):\n${detectedMistakes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n`
+    : ''
+
   // Optional second-take keypoints for self-compare mode. Validated the same
   // way as user keypoints to avoid crashes inside buildAngleSummary.
   let compareSummary: string | null = null
@@ -141,7 +215,7 @@ export async function POST(request: NextRequest) {
     // Baseline variant (compareMode === 'baseline'): same data plumbing, but
     // the framing shifts from "two takes side by side" to "best day vs today".
     // Everything else (rules, voice, biomechanics reference) is identical.
-    const soloRef = getBiomechanicsReference('all')
+    const soloRef = getBiomechanicsReference(refShotType)
 
     const framingParagraph = isBaselineCompare
       ? `You are a tennis coach helping a player compare today's swing against their best-day baseline ("${baselineTag}"). Your job is progress tracking — show them what's held up since that peak, what's drifted, and how to lock the good stuff back in.`
@@ -175,9 +249,9 @@ export async function POST(request: NextRequest) {
       : `Two short sentences on what to groove next session so these swings match.`
 
     prompt = `${framingParagraph}
-
+${shotIntroBlock}
 ${tierBlock}
-${focusBlock}
+${focusBlock}${detectedIssuesBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Describe everything in feel and body language.
 - NEVER rate or score the player. No X/100, no percentages, no grades.
@@ -213,7 +287,7 @@ ${lockItBody}
 Keep it under 350 words. Sound like a coach helping them tighten up.`
   } else {
     // Solo mode: single clip, general coaching without any reference.
-    const soloRef = getBiomechanicsReference('all')
+    const soloRef = getBiomechanicsReference(refShotType)
 
     // Advanced players get a trimmed prompt because listing three "tips"
     // when the swing is already clean forces the model to fabricate
@@ -225,9 +299,9 @@ Keep it under 350 words. Sound like a coach helping them tighten up.`
       : ''
 
     prompt = `You are a tennis coach talking to a player right after watching their swing on video. Be encouraging and practical.
-
+${shotIntroBlock}
 ${tierBlock}
-${advancedTrim}${focusBlock}
+${advancedTrim}${focusBlock}${detectedIssuesBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Not even once. Describe everything in feel and body language.
 - NEVER rate or score the player (no X/100, no percentages, no grades). Just give advice.
@@ -308,27 +382,9 @@ You will emit your response by calling the emit_coaching tool. Do not write pros
   // metadata (tierKey) stays null so metrics and downgrade logic don't lie.
   const toolSchema = COACHING_TOOL_SCHEMAS[tierKey ?? 'intermediate']
 
-  // Derive shot_type and blob_url for the telemetry row. Falls back to fetching
-  // from user_sessions when a sessionId was provided but the body didn't
-  // include them. Best-effort: a failure here shouldn't block coaching, so any
-  // DB error falls through to nulls.
-  let resolvedShotType: string | null = typeof bodyShotType === 'string' ? bodyShotType : null
-  let resolvedBlobUrl: string | null = typeof bodyBlobUrl === 'string' ? bodyBlobUrl : null
-  if ((!resolvedShotType || !resolvedBlobUrl) && sessionId) {
-    try {
-      const { data: sessionMeta } = await supabase
-        .from('user_sessions')
-        .select('shot_type, blob_url')
-        .eq('id', sessionId)
-        .single()
-      if (sessionMeta) {
-        resolvedShotType = resolvedShotType ?? sessionMeta.shot_type ?? null
-        resolvedBlobUrl = resolvedBlobUrl ?? sessionMeta.blob_url ?? null
-      }
-    } catch (err) {
-      console.error('analysis_events shot_type/blob_url lookup failed:', err)
-    }
-  }
+  // resolvedShotType + resolvedBlobUrl are set above (before the prompt is
+  // built) so the coaching prompt can be shot-type-aware. The telemetry row
+  // below just consumes those same resolved values.
 
   // Insert the telemetry row BEFORE streaming starts so the X-Analysis-Event-Id
   // header can be set on the response the frontend binds its thumbs button to.

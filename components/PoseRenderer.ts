@@ -5,6 +5,7 @@ import {
   SKELETON_CONNECTIONS,
   LANDMARK_INDICES,
 } from '@/lib/jointAngles'
+import { SHOT_TYPE_CONFIGS, scoreAngleVsIdeal } from '@/lib/shotTypeConfig'
 
 export type RenderOptions = {
   visible: Record<JointGroup, boolean>
@@ -306,39 +307,57 @@ const ANGLE_LABELS: { key: keyof import('@/lib/supabase').JointAngles; anchor: n
   { key: 'left_knee', anchor: LANDMARK_INDICES.LEFT_KNEE, side: 'left' },
 ]
 
+// Colors keyed to the deviation level that scoreAngleVsIdeal returns.
+// `good` = inside the ideal range, `moderate` = within 15° of it,
+// `poor` = further off. When no shot-type config is available we keep the
+// neutral white fill (the legacy behavior).
+const BENCHMARK_COLORS = {
+  good: '#10b981',      // emerald
+  moderate: '#f59e0b',  // amber
+  poor: '#ef4444',      // red
+  unknown: '#ffffff',   // white (legacy neutral)
+} as const
+
 /**
  * Draw degree labels next to elbow and knee joints (matches SportAI's
  * on-skeleton annotation style). Call AFTER renderPose so the labels
  * layer on top of the bones.
  *
- * Angles come straight from `frame.joint_angles` — they're already
- * computed on every frame by `computeJointAngles` in lib/jointAngles.ts.
- * The off-hand filter (dominantHand) skips labels on the non-racket
- * side's elbow so the important joint isn't crowded. Knees always
- * render — footwork reads from both legs.
+ * When `shotType` + `phase` are supplied, each badge is color-coded
+ * against the ideal range for that shot at that phase (from
+ * SHOT_TYPE_CONFIGS.keyAngleSpecs via scoreAngleVsIdeal). Without them
+ * or when no matching spec exists, badges render in the legacy white.
+ *
+ * Phase is typically 'contact' (passed in by the caller when the
+ * current frame is the detected peak). Other phases are rendered
+ * neutral-white to avoid a sea of red during prep/follow-through where
+ * the angles legitimately span a wide range.
  */
 export function renderAngleLabels(
   ctx: CanvasRenderingContext2D,
   frame: PoseFrame,
   canvasWidth: number,
   canvasHeight: number,
-  options: Pick<RenderOptions, 'dominantHand' | 'scale'>,
+  options: Pick<RenderOptions, 'dominantHand' | 'scale'> & {
+    shotType?: string | null
+    phase?: string | null
+  },
 ): void {
-  const { dominantHand = null, scale = 1 } = options
+  const { dominantHand = null, scale = 1, shotType = null, phase = null } = options
 
-  // Which sides to suppress based on dominantHand. Matches the
-  // same filter renderPose applies to off-hand elbow/wrist dots.
-  const suppressSides: Array<'left' | 'right'> =
-    dominantHand === 'right'
-      ? []
-      : dominantHand === 'left'
-        ? []
-        : []
-  // Off-hand elbow labels are suppressed, but knees stay on both sides.
+  // Off-hand elbow labels are suppressed when we know the racket hand
+  // (keeps the hitting-arm number uncrowded). Knees always render —
+  // footwork reads from both legs.
   const offHandElbow: 'left' | 'right' | null =
     dominantHand === 'right' ? 'left'
       : dominantHand === 'left' ? 'right'
         : null
+
+  // Shot-type config lookup for benchmark coloring. Skipped when shotType
+  // or phase is null so we don't invent a benchmark against the wrong
+  // reference (unknown shot type → no color).
+  const config = shotType ? SHOT_TYPE_CONFIGS[shotType] : null
+  const canBenchmark = !!(config && phase)
 
   ctx.save()
   ctx.globalAlpha = 0.95 * scale
@@ -346,7 +365,6 @@ export function renderAngleLabels(
   ctx.textBaseline = 'middle'
 
   for (const { key, anchor, side } of ANGLE_LABELS) {
-    if (suppressSides.includes(side)) continue
     // Elbow labels: skip the off-hand side so the racket arm's angle
     // isn't competing with a non-swinging arm's number.
     if (key.includes('elbow') && offHandElbow === side) continue
@@ -360,14 +378,38 @@ export function renderAngleLabels(
     const px = lm.x * canvasWidth
     const py = lm.y * canvasHeight
 
-    // Offset the label so it doesn't sit on the joint dot.
-    // Right-side joints get labels on the right; left-side on the left.
-    const text = `${Math.round(angle)}°`
-    const textWidth = ctx.measureText(text).width
+    // Look up the ideal range for this joint at this phase (if benchmarking).
+    let level: keyof typeof BENCHMARK_COLORS = 'unknown'
+    let delta: number | null = null
+    if (canBenchmark && config) {
+      const spec = config.keyAngleSpecs.find(
+        (s) => s.angleKey === key && s.phase === phase,
+      )
+      if (spec) {
+        const scored = scoreAngleVsIdeal(angle, spec.idealRange)
+        level = scored.level
+        delta = scored.delta
+      }
+    }
+
+    // Badge text: "145°" on top; when off-ideal, a smaller "+8° off" beneath.
+    const primary = `${Math.round(angle)}°`
+    const deltaText =
+      canBenchmark && delta != null && delta > 0 && level !== 'good'
+        ? `${Math.round(delta)}° off`
+        : null
+
     const padX = 6
     const padY = 3
-    const pillW = textWidth + padX * 2
-    const pillH = 20
+    // Pill geometry: two-line badges are taller. Width = widest of the
+    // two lines + padding.
+    const primaryW = ctx.measureText(primary).width
+    ctx.save()
+    ctx.font = '500 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    const deltaW = deltaText ? ctx.measureText(deltaText).width : 0
+    ctx.restore()
+    const pillW = Math.max(primaryW, deltaW) + padX * 2
+    const pillH = deltaText ? 32 : 20
 
     const offsetX = side === 'right' ? 16 : -16 - pillW
     const pillX = px + offsetX
@@ -378,15 +420,30 @@ export function renderAngleLabels(
     roundRect(ctx, pillX, pillY, pillW, pillH, 4)
     ctx.fill()
 
-    // Pill border (faint) so it reads as a deliberate badge, not video.
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)'
-    ctx.lineWidth = 1
+    // Border: neutral faint white when not benchmarking, colored when we
+    // have a deviation level. The border is the "at-a-glance" signal —
+    // the text stays white for readability even on a red/green pill.
+    const borderColor = canBenchmark ? BENCHMARK_COLORS[level] : 'rgba(255,255,255,0.25)'
+    ctx.strokeStyle = borderColor
+    ctx.lineWidth = canBenchmark && level !== 'unknown' ? 2 : 1
     roundRect(ctx, pillX, pillY, pillW, pillH, 4)
     ctx.stroke()
 
     ctx.fillStyle = 'white'
     ctx.textAlign = 'left'
-    ctx.fillText(text, pillX + padX, pillY + pillH / 2)
+    // Primary degree text
+    const primaryY = deltaText ? pillY + 11 : pillY + pillH / 2
+    ctx.fillText(primary, pillX + padX, primaryY)
+
+    if (deltaText) {
+      // Secondary "+Xº off" text in the benchmark color so the deviation
+      // reads at a glance without having to see the border.
+      ctx.save()
+      ctx.font = '500 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+      ctx.fillStyle = BENCHMARK_COLORS[level]
+      ctx.fillText(deltaText, pillX + padX, pillY + 23)
+      ctx.restore()
+    }
   }
 
   ctx.restore()

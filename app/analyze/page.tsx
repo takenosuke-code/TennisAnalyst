@@ -55,6 +55,23 @@ export default function AnalyzePage() {
   const swings = useMemo(() => detectSwings(allFrames), [allFrames])
   const hasMultipleSwings = swings.length > 1
 
+  // Contact frame for the currently-displayed swing. When multiple swings
+  // exist we use the selected swing's peakFrame; otherwise the single swing's
+  // peakFrame. Passed to VideoCanvas so the angle badges color-code against
+  // pro benchmarks only on the contact frame — avoids a sea of red badges
+  // during backswing/follow-through where the angles legitimately span a
+  // wide range.
+  const contactFrameIndex = useMemo<number | null>(() => {
+    if (swings.length === 0) return null
+    const active = selectedSwing != null ? swings[selectedSwing - 1] : swings[0]
+    if (!active) return null
+    // peakFrame is already an index into allFrames, and VideoCanvas uses
+    // frame.frame_index for matching — they line up because extraction
+    // assigns frame_index monotonically from 0.
+    const peakFrame = active.frames[active.peakFrame - active.startFrame]
+    return peakFrame?.frame_index ?? null
+  }, [swings, selectedSwing])
+
   const handleComplete = (_url: string, frames: PoseFrame[]) => {
     setAllFrames(frames)
     const detected = detectSwings(frames)
@@ -227,6 +244,8 @@ export default function AnalyzePage() {
                   showSkeleton={showSkeleton}
                   showRacket={showRacket}
                   showAngles={showAngles}
+                  shotType={shotType}
+                  contactFrameIndex={contactFrameIndex}
                   dominantHand={dominantHand}
                   showControls
                   className="p-2"

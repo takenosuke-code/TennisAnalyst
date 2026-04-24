@@ -39,6 +39,13 @@ interface VideoCanvasProps {
   /** Render on-canvas angle labels next to elbow/knee joints. */
   showAngles?: boolean
   /**
+   * When set with a contactFrameIndex, angle badges are color-coded against
+   * the ideal range for this shot type at the 'contact' phase. Non-contact
+   * frames render neutral-white (avoids a sea of red on prep/follow-through).
+   */
+  shotType?: string | null
+  contactFrameIndex?: number | null
+  /**
    * Hide the off-hand's elbow/wrist (and its swing-path trail) so the
    * overlay focuses on the racket arm. 'right' keeps right side, 'left'
    * keeps left, null shows both. Shoulders stay visible on both sides.
@@ -69,6 +76,8 @@ export default function VideoCanvas({
   showTrail = false,
   showRacket = false,
   showAngles = true,
+  shotType = null,
+  contactFrameIndex = null,
   dominantHand = null,
   overlayColor,
   overlaySkeletonColor,
@@ -180,10 +189,16 @@ export default function VideoCanvas({
       // Angle labels go on top of the skeleton so the degree pills
       // aren't hidden under a bone. Skipped on ghost/overlay renders
       // (overlayColor set) to avoid two overlapping sets of numbers in
-      // comparison mode.
+      // comparison mode. When the current frame matches the detected
+      // contact frame, pass phase='contact' so the badges color-code
+      // against the ideal range; otherwise phase stays null (neutral).
       if (showAngles && !overlayColor) {
+        const isContactFrame =
+          contactFrameIndex != null && frame.frame_index === contactFrameIndex
         renderAngleLabels(ctx, displayFrame, logicalW, logicalH, {
           dominantHand,
+          shotType,
+          phase: isContactFrame ? 'contact' : null,
         })
       }
     },
@@ -193,6 +208,8 @@ export default function VideoCanvas({
       showTrail,
       showRacket,
       showAngles,
+      shotType,
+      contactFrameIndex,
       dominantHand,
       overlayColor,
       overlaySkeletonColor,
