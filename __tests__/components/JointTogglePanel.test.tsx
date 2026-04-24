@@ -7,6 +7,7 @@ const mockToggleJoint = vi.fn()
 const mockToggleSkeleton = vi.fn()
 const mockToggleTrail = vi.fn()
 const mockToggleRacket = vi.fn()
+const mockToggleAngles = vi.fn()
 const mockSetAllVisible = vi.fn()
 const mockSetVisibility = vi.fn()
 
@@ -23,11 +24,13 @@ const defaultStoreState = {
   visible: { ...defaultVisible },
   showSkeleton: true,
   showTrail: true,
-  showRacket: true,
+  showRacket: false,
+  showAngles: true,
   toggleJoint: mockToggleJoint,
   toggleSkeleton: mockToggleSkeleton,
   toggleTrail: mockToggleTrail,
   toggleRacket: mockToggleRacket,
+  toggleAngles: mockToggleAngles,
   setAllVisible: mockSetAllVisible,
   setVisibility: mockSetVisibility,
 }
@@ -60,19 +63,21 @@ describe('JointTogglePanel', () => {
     expect(screen.queryByText(/Wrists/i)).toBeNull()
   })
 
-  it('renders skeleton and racket toggles, but not the swing path trail', () => {
+  it('renders skeleton and angles toggles, but not racket or swing path trail', () => {
     render(<JointTogglePanel />)
     expect(screen.getByText('Skeleton Lines')).toBeInTheDocument()
-    expect(screen.getByText(/Racket Path/i)).toBeInTheDocument()
-    // Swing Path Trail (wrist trail) toggle was retired once the racket-path
-    // overlay became the primary signal — it should no longer render.
+    expect(screen.getByText(/Joint Angles/i)).toBeInTheDocument()
+    // Racket Path toggle was retired from the panel — without a reliable
+    // server-side racket detector the trail was the wrist fallback, and
+    // it crowded the hitting arm. Flag stays on the store, just no UI.
+    expect(screen.queryByText(/Racket Path/i)).toBeNull()
     expect(screen.queryByText('Swing Path Trail')).toBeNull()
   })
 
-  it('clicking the racket toggle calls toggleRacket', () => {
+  it('clicking the angles toggle calls toggleAngles', () => {
     render(<JointTogglePanel />)
-    fireEvent.click(screen.getByText(/Racket Path/i))
-    expect(mockToggleRacket).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByText(/Joint Angles/i))
+    expect(mockToggleAngles).toHaveBeenCalledOnce()
   })
 
   it('clicking a joint group calls toggleJoint with correct group', () => {

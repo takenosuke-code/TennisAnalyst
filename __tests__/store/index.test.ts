@@ -340,7 +340,8 @@ describe('useJointStore', () => {
       },
       showSkeleton: true,
       showTrail: true,
-      showRacket: true,
+      showRacket: false,
+      showAngles: true,
     })
   })
 
@@ -388,12 +389,22 @@ describe('useJointStore', () => {
     expect(useJointStore.getState().showTrail).toBe(true)
   })
 
-  it('showRacket is true by default and toggleRacket flips it', () => {
-    expect(useJointStore.getState().showRacket).toBe(true)
-    useJointStore.getState().toggleRacket()
+  it('showRacket is false by default and toggleRacket flips it', () => {
+    // Racket trail was retired from the demo (see store comment).
+    // Flag + toggle remain so Railway-backed flows can re-enable it.
     expect(useJointStore.getState().showRacket).toBe(false)
     useJointStore.getState().toggleRacket()
     expect(useJointStore.getState().showRacket).toBe(true)
+    useJointStore.getState().toggleRacket()
+    expect(useJointStore.getState().showRacket).toBe(false)
+  })
+
+  it('showAngles is true by default and toggleAngles flips it', () => {
+    expect(useJointStore.getState().showAngles).toBe(true)
+    useJointStore.getState().toggleAngles()
+    expect(useJointStore.getState().showAngles).toBe(false)
+    useJointStore.getState().toggleAngles()
+    expect(useJointStore.getState().showAngles).toBe(true)
   })
 
   it('setAllVisible(false) turns off everything', () => {

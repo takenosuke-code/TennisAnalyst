@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   normalizeLandmarks,
   computeLandmarkBounds,
+  renderAngleLabels,
 } from '@/components/PoseRenderer'
 import { LANDMARK_INDICES } from '@/lib/jointAngles'
 import { makeLandmark, makeFrame, makeStandingPose } from '../helpers'
@@ -215,5 +216,114 @@ describe('computeLandmarkBounds', () => {
     expect(bounds!.maxX).toBeCloseTo(0.72, 2)
     expect(bounds!.minY).toBeCloseTo(0.28, 2)
     expect(bounds!.maxY).toBeCloseTo(0.72, 2)
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// renderAngleLabels
+// ---------------------------------------------------------------------------
+
+function createMockCanvasContext() {
+  return {
+    save: vi.fn(),
+    restore: vi.fn(),
+    beginPath: vi.fn(),
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
+    quadraticCurveTo: vi.fn(),
+    closePath: vi.fn(),
+    fill: vi.fn(),
+    stroke: vi.fn(),
+    fillText: vi.fn(),
+    measureText: vi.fn().mockReturnValue({ width: 30 }),
+    globalAlpha: 1,
+    font: '',
+    fillStyle: '',
+    strokeStyle: '',
+    lineWidth: 1,
+    textBaseline: 'alphabetic' as CanvasTextBaseline,
+    textAlign: 'start' as CanvasTextAlign,
+  }
+}
+
+describe('renderAngleLabels', () => {
+  it('draws a degree label for each visible elbow and knee with an angle', () => {
+    const landmarks = makeStandingPose()
+    const frame = makeFrame(0, 0, landmarks, {
+      right_elbow: 135,
+      left_elbow: 142,
+      right_knee: 170,
+      left_knee: 168,
+    })
+    const ctx = createMockCanvasContext()
+    renderAngleLabels(ctx as unknown as CanvasRenderingContext2D, frame, 1000, 1000, {})
+    // 4 angles → 4 fillText calls for the degree strings (pill bg is fill(), text is fillText).
+    expect(ctx.fillText).toHaveBeenCalledTimes(4)
+    const rendered = ctx.fillText.mock.calls.map((c) => c[0])
+    expect(rendered).toEqual(
+      expect.arrayContaining(['135°', '142°', '170°', '168°']),
+    )
+  })
+
+  it('skips a label when the anchor landmark is below the visibility cutoff', () => {
+    const landmarks = makeStandingPose().map((l) =>
+      l.id === LANDMARK_INDICES.RIGHT_ELBOW ? { ...l, visibility: 0.2 } : l,
+    )
+    const frame = makeFrame(0, 0, landmarks, {
+      right_elbow: 135,
+      left_elbow: 142,
+      right_knee: 170,
+      left_knee: 168,
+    })
+    const ctx = createMockCanvasContext()
+    renderAngleLabels(ctx as unknown as CanvasRenderingContext2D, frame, 1000, 1000, {})
+    expect(ctx.fillText).toHaveBeenCalledTimes(3)
+    const rendered = ctx.fillText.mock.calls.map((c) => c[0])
+    expect(rendered).not.toContain('135°')
+  })
+
+  it('skips a label when the angle value is missing', () => {
+    const landmarks = makeStandingPose()
+    const frame = makeFrame(0, 0, landmarks, {
+      // Only knee angles present — elbow labels should be skipped.
+      right_knee: 170,
+      left_knee: 168,
+    })
+    const ctx = createMockCanvasContext()
+    renderAngleLabels(ctx as unknown as CanvasRenderingContext2D, frame, 1000, 1000, {})
+    expect(ctx.fillText).toHaveBeenCalledTimes(2)
+  })
+
+  it('suppresses the off-hand elbow label when dominantHand is set', () => {
+    // dominantHand='right' means left_elbow is the off-hand → label drops.
+    const landmarks = makeStandingPose()
+    const frame = makeFrame(0, 0, landmarks, {
+      right_elbow: 135,
+      left_elbow: 142,
+      right_knee: 170,
+      left_knee: 168,
+    })
+    const ctx = createMockCanvasContext()
+    renderAngleLabels(ctx as unknown as CanvasRenderingContext2D, frame, 1000, 1000, {
+      dominantHand: 'right',
+    })
+    // 3 expected: right_elbow + both knees. left_elbow suppressed.
+    expect(ctx.fillText).toHaveBeenCalledTimes(3)
+    const rendered = ctx.fillText.mock.calls.map((c) => c[0])
+    expect(rendered).not.toContain('142°')
+    expect(rendered).toContain('135°')
+    // Knees always stay — footwork reads from both legs.
+    expect(rendered).toContain('170°')
+    expect(rendered).toContain('168°')
+  })
+
+  it('does not throw when no landmarks or angles are present', () => {
+    const frame = makeFrame(0, 0, [], {})
+    const ctx = createMockCanvasContext()
+    expect(() =>
+      renderAngleLabels(ctx as unknown as CanvasRenderingContext2D, frame, 1000, 1000, {}),
+    ).not.toThrow()
+    expect(ctx.fillText).not.toHaveBeenCalled()
   })
 })

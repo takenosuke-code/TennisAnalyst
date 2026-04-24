@@ -3,7 +3,7 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import type { PoseFrame } from '@/lib/supabase'
 import type { JointGroup } from '@/lib/jointAngles'
-import { renderPose, normalizeLandmarks } from './PoseRenderer'
+import { renderPose, renderAngleLabels, normalizeLandmarks } from './PoseRenderer'
 import { SwingPathTracer } from './SwingPathTracer'
 
 // Strict-previous lookup: return the latest sampled pose frame whose
@@ -36,6 +36,8 @@ interface VideoCanvasProps {
   showTrail?: boolean
   /** Render the racket-head trail (schema v2 only; no-op on legacy clips). */
   showRacket?: boolean
+  /** Render on-canvas angle labels next to elbow/knee joints. */
+  showAngles?: boolean
   /**
    * Hide the off-hand's elbow/wrist (and its swing-path trail) so the
    * overlay focuses on the racket arm. 'right' keeps right side, 'left'
@@ -65,7 +67,8 @@ export default function VideoCanvas({
   visible,
   showSkeleton,
   showTrail = false,
-  showRacket = true,
+  showRacket = false,
+  showAngles = true,
   dominantHand = null,
   overlayColor,
   overlaySkeletonColor,
@@ -173,12 +176,23 @@ export default function VideoCanvas({
         skeletonColor: overlaySkeletonColor,
         dominantHand,
       })
+
+      // Angle labels go on top of the skeleton so the degree pills
+      // aren't hidden under a bone. Skipped on ghost/overlay renders
+      // (overlayColor set) to avoid two overlapping sets of numbers in
+      // comparison mode.
+      if (showAngles && !overlayColor) {
+        renderAngleLabels(ctx, displayFrame, logicalW, logicalH, {
+          dominantHand,
+        })
+      }
     },
     [
       visible,
       showSkeleton,
       showTrail,
       showRacket,
+      showAngles,
       dominantHand,
       overlayColor,
       overlaySkeletonColor,

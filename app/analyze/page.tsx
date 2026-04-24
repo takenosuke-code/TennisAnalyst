@@ -23,7 +23,7 @@ const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), 
 
 export default function AnalyzePage() {
   const { framesData, blobUrl, localVideoUrl, sessionId, shotType } = usePoseStore()
-  const { visible, showSkeleton, showRacket } = useJointStore()
+  const { visible, showSkeleton, showRacket, showAngles } = useJointStore()
   const [done, setDone] = useState(false)
   const [allFrames, setAllFrames] = useState<PoseFrame[]>([])
   const [selectedSwing, setSelectedSwing] = useState<number | null>(null)
@@ -227,6 +227,7 @@ export default function AnalyzePage() {
                   visible={visible}
                   showSkeleton={showSkeleton}
                   showRacket={showRacket}
+                  showAngles={showAngles}
                   dominantHand={dominantHand}
                   showControls
                   className="p-2"
@@ -386,19 +387,24 @@ export default function AnalyzePage() {
           <JointTogglePanel />
 
           {framesData.length > 0 && (() => {
-            // YOLO detections: frames where the server actually identified
-            // a tennis racket. Wrist-visible frames: frames where the
-            // client-side fallback can draw a trail point even without
-            // server detection. Trail coverage is the union.
-            const yoloFrames = framesData.filter((f) => f.racket_head != null).length
-            const wristVisibleFrames = framesData.filter((f) => {
-              const lw = f.landmarks.find((l) => l.id === 15)
-              const rw = f.landmarks.find((l) => l.id === 16)
-              return (lw && lw.visibility > 0.5) || (rw && rw.visibility > 0.5)
+            // Joint-centric stats. Racket detection was pulled from the
+            // demo (it was firing the wrist fallback ~97% of the time
+            // and reading as "jittery racket line" rather than a real
+            // signal). What we DO have reliably: per-frame joint
+            // visibility + computed angles — those are what the overlay
+            // and the LLM coach consume.
+            const confidentFrames = framesData.filter((f) => {
+              const ls = f.landmarks.find((l) => l.id === 11)
+              const rs = f.landmarks.find((l) => l.id === 12)
+              return (
+                (ls?.visibility ?? 0) > 0.5 &&
+                (rs?.visibility ?? 0) > 0.5
+              )
             }).length
-            const trailCoverage = Math.max(yoloFrames, wristVisibleFrames)
-            const fallbackActive = yoloFrames === 0 && wristVisibleFrames > 0
-            const noTrailAtAll = trailCoverage === 0
+            const anglesPct =
+              framesData.length === 0
+                ? 0
+                : Math.round((confidentFrames / framesData.length) * 100)
             return (
               <div className="rounded-xl bg-white/5 border border-white/10 p-4">
                 <h3 className="text-sm font-semibold text-white mb-2">Analysis Stats</h3>
@@ -418,42 +424,24 @@ export default function AnalyzePage() {
                     <span className="text-emerald-400 font-medium">Ready</span>
                   </div>
                   <div className="flex justify-between text-white/60">
-                    <span>Racket trail coverage</span>
+                    <span>Upper-body tracking</span>
                     <span
                       className={
-                        noTrailAtAll
-                          ? 'text-amber-400 font-mono'
-                          : 'text-emerald-400 font-mono'
+                        anglesPct >= 70
+                          ? 'text-emerald-400 font-mono'
+                          : 'text-amber-400 font-mono'
                       }
                     >
-                      {trailCoverage} / {framesData.length}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-white/40 text-[11px]">
-                    <span className="pl-2">YOLO (racket detector)</span>
-                    <span className="font-mono">{yoloFrames}</span>
-                  </div>
-                  <div className="flex justify-between text-white/40 text-[11px]">
-                    <span className="pl-2">Wrist fallback</span>
-                    <span className="font-mono">
-                      {Math.max(0, wristVisibleFrames - yoloFrames)}
+                      {anglesPct}%
                     </span>
                   </div>
                 </div>
-                {fallbackActive && (
-                  <p className="text-[11px] text-white/50 mt-2">
-                    Server-side racket detector didn&apos;t fire for this clip,
-                    so the trail is following your wrist (grip position) as a
-                    fallback. It&apos;s accurate to the grip, not the middle of
-                    the racket — for true racket-middle tracking the YOLO
-                    detector on Railway needs to be working.
-                  </p>
-                )}
-                {noTrailAtAll && (
+                {anglesPct < 70 && (
                   <p className="text-[11px] text-amber-300/80 mt-2">
-                    Neither the racket detector nor the pose detector picked
-                    up enough signal to draw a trail. Try a clip with the
-                    player more visible in frame.
+                    Your upper body wasn&apos;t consistently visible in the
+                    frame. For best joint-angle analysis, film
+                    perpendicular to your baseline with your full body in
+                    view.
                   </p>
                 )}
               </div>

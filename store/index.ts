@@ -85,10 +85,16 @@ interface JointStore {
   // JointGroup visibility map so existing `visible: Record<JointGroup, boolean>`
   // consumers stay untouched.
   showRacket: boolean
+  // On-canvas joint-angle labels (elbow/knee degree badges). On by
+  // default — they're the single biggest "looks like a coaching tool,
+  // not a hobby project" visual cue, and they surface data we already
+  // compute per-frame in jointAngles.ts but weren't drawing.
+  showAngles: boolean
   toggleJoint: (group: JointGroup) => void
   toggleSkeleton: () => void
   toggleTrail: () => void
   toggleRacket: () => void
+  toggleAngles: () => void
   setAllVisible: (v: boolean) => void
   setVisibility: (map: VisibilityMap) => void
 }
@@ -112,11 +118,15 @@ export const useJointStore = create<JointStore>((set) => ({
   // overlay became the primary signal. Field + toggle kept on the store
   // so downstream consumers still compile; no UI surfaces it.
   showTrail: false,
-  // On by default. The tracer now follows the bbox center of the detected
-  // racket (sweet-spot proxy) — user explicitly wants this as the primary
-  // swing-path signal, so it renders out of the box and is still toggleable
-  // from JointTogglePanel.
-  showRacket: true,
+  // Default OFF. The racket-path tracer was retired from the demo —
+  // without server-side YOLO it was rendering the wrist position (the
+  // "forearm fallback") and labelling it "racket trail", which misled
+  // viewers and added visual noise on top of the hitting-arm joint
+  // dot that already marks the same point. Kept on the store +
+  // toggleable so the Railway-backed code path can re-enable it per-
+  // clip once real detection is wired end-to-end.
+  showRacket: false,
+  showAngles: true,
   toggleJoint: (group) =>
     set((state) => ({
       visible: { ...state.visible, [group]: !state.visible[group] },
@@ -125,6 +135,7 @@ export const useJointStore = create<JointStore>((set) => ({
     set((state) => ({ showSkeleton: !state.showSkeleton })),
   toggleTrail: () => set((state) => ({ showTrail: !state.showTrail })),
   toggleRacket: () => set((state) => ({ showRacket: !state.showRacket })),
+  toggleAngles: () => set((state) => ({ showAngles: !state.showAngles })),
   setAllVisible: (v) =>
     set({
       visible: Object.fromEntries(

@@ -18,6 +18,11 @@ export type RenderOptions = {
   // left_elbow/left_wrist. Null = show both (default). Shoulders stay
   // visible on both sides since they anchor rotation.
   dominantHand?: 'left' | 'right' | null
+  // When true, draw live degree labels next to each elbow and knee joint
+  // on top of the skeleton. Matches SportAI's on-canvas annotation style
+  // and turns computed joint angles from a chart-only signal into a
+  // visible coaching cue.
+  showAngles?: boolean
 }
 
 const JOINT_GROUP_COLORS: Record<JointGroup, string> = {
@@ -80,25 +85,28 @@ export function renderPose(
   // on top). Makes bones readable on both bright and dark backgrounds.
   if (showSkeleton) {
     ctx.save()
-    const baseWidth = 2
-    const strokeColor = skeletonColor ?? 'rgba(255,255,255,0.7)'
+    // Bumped 2 → 3 to match the zoomed render path and close the
+    // "skeleton too thin at standard view" complaint.
+    const baseWidth = 3
+    const strokeColor = skeletonColor ?? 'rgba(255,255,255,0.75)'
 
     for (const [fromId, toId] of SKELETON_CONNECTIONS) {
       const from = pixelMap.get(fromId)
       const to = pixelMap.get(toId)
       if (!from || !to) continue
 
-      // Halo pass
-      ctx.globalAlpha = 0.6 * scale
-      ctx.strokeStyle = 'rgba(0,0,0,0.4)'
+      // Halo pass (darker, slightly wider, lower alpha for a clean edge)
+      ctx.globalAlpha = 0.7 * scale
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)'
       ctx.lineWidth = baseWidth + 2
       ctx.beginPath()
       ctx.moveTo(from.x, from.y)
       ctx.lineTo(to.x, to.y)
       ctx.stroke()
 
-      // Colored pass on top
-      ctx.globalAlpha = 0.6 * scale
+      // Colored pass on top. Alpha bumped 0.6 → 0.85 so bones read
+      // crisply against court-surface backgrounds instead of washing out.
+      ctx.globalAlpha = 0.85 * scale
       ctx.strokeStyle = strokeColor
       ctx.lineWidth = baseWidth
       ctx.beginPath()
@@ -284,6 +292,129 @@ export function renderPoseZoomed(
     ctx.globalAlpha = 1
     ctx.restore()
   }
+}
+
+// Which joint angles get drawn as on-canvas labels, and where. For each
+// entry: `anchor` is the landmark id the label is placed next to; `key`
+// is the JointAngles field. Labels are skipped when the anchor landmark
+// is below the visibility cutoff (same gate as the skeleton) OR the
+// angle itself is not computed for this frame.
+const ANGLE_LABELS: { key: keyof import('@/lib/supabase').JointAngles; anchor: number; side: 'left' | 'right' }[] = [
+  { key: 'right_elbow', anchor: LANDMARK_INDICES.RIGHT_ELBOW, side: 'right' },
+  { key: 'left_elbow', anchor: LANDMARK_INDICES.LEFT_ELBOW, side: 'left' },
+  { key: 'right_knee', anchor: LANDMARK_INDICES.RIGHT_KNEE, side: 'right' },
+  { key: 'left_knee', anchor: LANDMARK_INDICES.LEFT_KNEE, side: 'left' },
+]
+
+/**
+ * Draw degree labels next to elbow and knee joints (matches SportAI's
+ * on-skeleton annotation style). Call AFTER renderPose so the labels
+ * layer on top of the bones.
+ *
+ * Angles come straight from `frame.joint_angles` — they're already
+ * computed on every frame by `computeJointAngles` in lib/jointAngles.ts.
+ * The off-hand filter (dominantHand) skips labels on the non-racket
+ * side's elbow so the important joint isn't crowded. Knees always
+ * render — footwork reads from both legs.
+ */
+export function renderAngleLabels(
+  ctx: CanvasRenderingContext2D,
+  frame: PoseFrame,
+  canvasWidth: number,
+  canvasHeight: number,
+  options: Pick<RenderOptions, 'dominantHand' | 'scale'>,
+): void {
+  const { dominantHand = null, scale = 1 } = options
+
+  // Which sides to suppress based on dominantHand. Matches the
+  // same filter renderPose applies to off-hand elbow/wrist dots.
+  const suppressSides: Array<'left' | 'right'> =
+    dominantHand === 'right'
+      ? []
+      : dominantHand === 'left'
+        ? []
+        : []
+  // Off-hand elbow labels are suppressed, but knees stay on both sides.
+  const offHandElbow: 'left' | 'right' | null =
+    dominantHand === 'right' ? 'left'
+      : dominantHand === 'left' ? 'right'
+        : null
+
+  ctx.save()
+  ctx.globalAlpha = 0.95 * scale
+  ctx.font = '600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+  ctx.textBaseline = 'middle'
+
+  for (const { key, anchor, side } of ANGLE_LABELS) {
+    if (suppressSides.includes(side)) continue
+    // Elbow labels: skip the off-hand side so the racket arm's angle
+    // isn't competing with a non-swinging arm's number.
+    if (key.includes('elbow') && offHandElbow === side) continue
+
+    const angle = frame.joint_angles[key]
+    if (angle == null) continue
+
+    const lm = frame.landmarks.find((l) => l.id === anchor)
+    if (!lm || lm.visibility < VISIBILITY_CUTOFF) continue
+
+    const px = lm.x * canvasWidth
+    const py = lm.y * canvasHeight
+
+    // Offset the label so it doesn't sit on the joint dot.
+    // Right-side joints get labels on the right; left-side on the left.
+    const text = `${Math.round(angle)}°`
+    const textWidth = ctx.measureText(text).width
+    const padX = 6
+    const padY = 3
+    const pillW = textWidth + padX * 2
+    const pillH = 20
+
+    const offsetX = side === 'right' ? 16 : -16 - pillW
+    const pillX = px + offsetX
+    const pillY = py - pillH / 2
+
+    // Dark pill background for legibility over any video.
+    ctx.fillStyle = 'rgba(0,0,0,0.75)'
+    roundRect(ctx, pillX, pillY, pillW, pillH, 4)
+    ctx.fill()
+
+    // Pill border (faint) so it reads as a deliberate badge, not video.
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)'
+    ctx.lineWidth = 1
+    roundRect(ctx, pillX, pillY, pillW, pillH, 4)
+    ctx.stroke()
+
+    ctx.fillStyle = 'white'
+    ctx.textAlign = 'left'
+    ctx.fillText(text, pillX + padX, pillY + pillH / 2)
+  }
+
+  ctx.restore()
+}
+
+// Tiny rounded-rect helper — CanvasRenderingContext2D.roundRect exists
+// but shipped late and Safari <17 doesn't have it. This is the defensive
+// version.
+function roundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+) {
+  const rr = Math.min(r, w / 2, h / 2)
+  ctx.beginPath()
+  ctx.moveTo(x + rr, y)
+  ctx.lineTo(x + w - rr, y)
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr)
+  ctx.lineTo(x + w, y + h - rr)
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h)
+  ctx.lineTo(x + rr, y + h)
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rr)
+  ctx.lineTo(x, y + rr)
+  ctx.quadraticCurveTo(x, y, x + rr, y)
+  ctx.closePath()
 }
 
 // Normalize landmarks to a common scale for overlay comparison
