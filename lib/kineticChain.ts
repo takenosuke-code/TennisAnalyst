@@ -50,6 +50,29 @@ const FOREHAND_CHAIN: { name: string; angleKey: keyof JointAngles }[] = [
 ]
 
 /**
+ * Build a ChainSegment-style chain from a shot type's kineticChainOrder
+ * config. Used by the analyzeKineticChain overload that takes a shotType.
+ *
+ * Joint display names are derived from the angle key: 'right_shoulder' →
+ * 'shoulder', 'hip_rotation' → 'hips', etc. This keeps the returned
+ * chain shape compatible with FOREHAND_CHAIN so callers can render it
+ * identically.
+ */
+function chainFromShotType(
+  shotType: ShotType,
+): { name: string; angleKey: keyof JointAngles }[] {
+  const order = getShotTypeConfig(shotType).kineticChainOrder
+  return order.map((angleKey) => {
+    // Strip "left_" / "right_" / "_rotation" from the angle key for the
+    // display name. Keeps "hips" / "trunk" / "shoulder" / "elbow" / "wrist"
+    // / "knee" consistent regardless of which side the shot leads with.
+    const base = String(angleKey).replace(/^(left|right)_/, '').replace(/_rotation$/, '')
+    const name = base === 'hip' ? 'hips' : base
+    return { name, angleKey }
+  })
+}
+
+/**
  * Compute the frame index where the given angle key has its peak
  * angular velocity (largest frame-to-frame change per unit time).
  */
@@ -81,18 +104,32 @@ function findPeakAngularVelocity(
 }
 
 /**
- * Analyze the kinetic chain sequencing for a forehand swing.
+ * Analyze the kinetic chain sequencing for a tennis swing.
  *
  * Checks whether body segments fire in the correct proximal-to-distal
- * order: hips -> trunk -> shoulder -> elbow.
+ * order (hips → trunk → shoulder → elbow → wrist for groundstrokes;
+ * knees → hips → trunk → shoulder → elbow → wrist for serves).
+ *
+ * Three calling conventions for back-compat:
+ *   • `analyzeKineticChain(frames)` — uses FOREHAND_CHAIN (legacy default)
+ *   • `analyzeKineticChain(frames, customChain)` — explicit chain override
+ *   • `analyzeKineticChain(frames, shotType)` — derive chain from
+ *     SHOT_TYPE_CONFIGS for 'forehand' / 'backhand' / 'serve' / etc.
  *
  * Returns meaningful results even with partial data (some segments may
  * not be detected if angle data is missing).
  */
 export function analyzeKineticChain(
   frames: PoseFrame[],
-  chain: { name: string; angleKey: keyof JointAngles }[] = FOREHAND_CHAIN
+  chainOrShotType:
+    | { name: string; angleKey: keyof JointAngles }[]
+    | ShotType = FOREHAND_CHAIN,
 ): KineticChainResult {
+  const chain: { name: string; angleKey: keyof JointAngles }[] = Array.isArray(
+    chainOrShotType,
+  )
+    ? chainOrShotType
+    : chainFromShotType(chainOrShotType)
   if (frames.length < 2) {
     return {
       segments: chain.map((c) => ({

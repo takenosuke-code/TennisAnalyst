@@ -76,18 +76,37 @@ function dominantWristId(side: 'left' | 'right'): number {
 /**
  * Detect swing phases from a sequence of pose frames.
  *
- * Phase detection logic:
+ * Phase detection logic (groundstrokes — forehand/backhand/volley/slice):
  * - Preparation: first stable frame where trunk_rotation < 10 deg from baseline
  * - Backswing: frame where dominant wrist reaches maximum backward x-displacement from hip center
  * - Forward swing: frame with maximum angular velocity of dominant elbow
  * - Contact: frame where dominant wrist has the highest y-velocity change (proxy for ball strike)
  * - Follow through: frame where dominant wrist passes the midline after contact
  *
+ * Serve branch: the groundstroke heuristics misfire on serves because the
+ * wrist goes UP, not back. When shotType === 'serve' we use:
+ * - Preparation: first stable frame (same as above)
+ * - Backswing (= trophy position): frame with minimum dominant-knee angle
+ *   (deepest knee bend just before leg drive)
+ * - Forward swing: frame with maximum upward wrist velocity (-dy/dt)
+ * - Contact: frame where the wrist is at its highest y (smallest y value,
+ *   since y=0 is the top of the frame)
+ * - Follow through: first post-contact frame where the wrist has dropped
+ *   back below shoulder level
+ *
  * Returns only the phases that could be detected. Callers should handle
  * partial results gracefully.
  */
-export function detectSwingPhases(frames: PoseFrame[]): PhaseTimestamp[] {
+export function detectSwingPhases(
+  frames: PoseFrame[],
+  shotType?: string | null,
+): PhaseTimestamp[] {
   if (frames.length < 5) return []
+
+  // Serve has a fundamentally different kinematic signature; dispatch early.
+  if (shotType === 'serve') {
+    return detectServePhases(frames)
+  }
 
   const side = detectDominantSide(frames)
   const wristId = dominantWristId(side)
@@ -241,6 +260,157 @@ export function detectSwingPhases(frames: PoseFrame[]): PhaseTimestamp[] {
   // Sort by timestamp so phases are in chronological order
   detected.sort((a, b) => a.timestampMs - b.timestampMs)
 
+  return detected
+}
+
+// ---------------------------------------------------------------------------
+// Serve-specific phase detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Serve phase detection. Reuses the SwingPhase vocabulary but with
+ * serve-appropriate heuristics:
+ *   preparation       = first stable frame (pre-motion)
+ *   backswing (trophy)= frame with deepest knee bend (min right_knee angle)
+ *   forward_swing     = frame with peak upward wrist velocity (-dy/dt)
+ *   contact           = frame where wrist is at its highest point
+ *                       (minimum y — note y=0 is top of frame)
+ *   follow_through    = first post-contact frame where the wrist falls
+ *                       back below shoulder level
+ *
+ * These heuristics are first-principles mappings of serve kinematics and
+ * should be validated against real serve footage before tuning.
+ */
+function detectServePhases(frames: PoseFrame[]): PhaseTimestamp[] {
+  const side = detectDominantSide(frames)
+  const wristId = dominantWristId(side)
+  const kneeKey = side === 'left' ? 'left_knee' : 'right_knee'
+  const shoulderId =
+    side === 'left' ? LANDMARK_INDICES.LEFT_SHOULDER : LANDMARK_INDICES.RIGHT_SHOULDER
+
+  const detected: PhaseTimestamp[] = []
+
+  // --- Preparation ---
+  // Same baseline-trunk-stable heuristic as the groundstroke path; if the
+  // player stands still briefly before tossing, this catches it.
+  const baselineTrunk = (() => {
+    let sum = 0
+    let n = 0
+    for (let i = 0; i < Math.min(5, frames.length); i++) {
+      const tr = frames[i].joint_angles?.trunk_rotation
+      if (tr != null) {
+        sum += tr
+        n++
+      }
+    }
+    return n > 0 ? sum / n : null
+  })()
+
+  if (baselineTrunk != null) {
+    for (let i = 0; i < frames.length; i++) {
+      const tr = frames[i].joint_angles?.trunk_rotation
+      if (tr != null && Math.abs(tr - baselineTrunk) < 10) {
+        detected.push({
+          phase: 'preparation',
+          timestampMs: frames[i].timestamp_ms,
+          frameIndex: frames[i].frame_index,
+        })
+        break
+      }
+    }
+  }
+
+  // --- Trophy position (mapped to 'backswing') ---
+  // Deepest dominant-knee bend. Serves load into the legs before launching;
+  // this minimum-knee-angle frame is the serve equivalent of racket-back
+  // on a groundstroke.
+  let trophyIdx = -1
+  let trophyKnee = Infinity
+  for (let i = 0; i < frames.length; i++) {
+    const k = frames[i].joint_angles?.[kneeKey]
+    if (k != null && k < trophyKnee) {
+      trophyKnee = k
+      trophyIdx = i
+    }
+  }
+  if (trophyIdx >= 0) {
+    detected.push({
+      phase: 'backswing',
+      timestampMs: frames[trophyIdx].timestamp_ms,
+      frameIndex: frames[trophyIdx].frame_index,
+    })
+  }
+
+  // --- Forward swing ---
+  // Peak upward wrist velocity. Wrist y goes from ~0.6 (at hip) up to
+  // ~0.1 (at contact) during a serve; peak -dy/dt is the acceleration
+  // moment — closest analog to a groundstroke's max-elbow-angular-velocity
+  // frame.
+  let peakUpwardIdx = -1
+  let peakUpwardVel = -Infinity // most negative dy (= fastest upward) is what we want; we negate for clarity
+  for (let i = 1; i < frames.length; i++) {
+    const prevWrist = getLandmark(frames[i - 1].landmarks, wristId)
+    const currWrist = getLandmark(frames[i].landmarks, wristId)
+    if (!prevWrist || !currWrist) continue
+    const dt = (frames[i].timestamp_ms - frames[i - 1].timestamp_ms) / 1000
+    if (dt <= 0) continue
+    // Upward motion: y decreases. We want the frame where y decreased
+    // fastest, so negate the velocity to turn "most negative" into a max.
+    const upwardVel = -(currWrist.y - prevWrist.y) / dt
+    if (upwardVel > peakUpwardVel) {
+      peakUpwardVel = upwardVel
+      peakUpwardIdx = i
+    }
+  }
+  if (peakUpwardIdx >= 0) {
+    detected.push({
+      phase: 'forward_swing',
+      timestampMs: frames[peakUpwardIdx].timestamp_ms,
+      frameIndex: frames[peakUpwardIdx].frame_index,
+    })
+  }
+
+  // --- Contact ---
+  // Wrist at its highest point (minimum y). Must come AFTER trophy, so
+  // scan only frames at or after the trophy index (if we found one).
+  const contactSearchStart = trophyIdx >= 0 ? trophyIdx : 0
+  let contactIdx = -1
+  let contactY = Infinity
+  for (let i = contactSearchStart; i < frames.length; i++) {
+    const wrist = getLandmark(frames[i].landmarks, wristId)
+    if (!wrist) continue
+    if (wrist.y < contactY) {
+      contactY = wrist.y
+      contactIdx = i
+    }
+  }
+  if (contactIdx >= 0) {
+    detected.push({
+      phase: 'contact',
+      timestampMs: frames[contactIdx].timestamp_ms,
+      frameIndex: frames[contactIdx].frame_index,
+    })
+  }
+
+  // --- Follow through ---
+  // First frame after contact where the wrist drops back to (or below)
+  // the shoulder level.
+  const contactRefIdx = contactIdx >= 0 ? contactIdx : Math.floor(frames.length / 2)
+  for (let i = contactRefIdx + 1; i < frames.length; i++) {
+    const wrist = getLandmark(frames[i].landmarks, wristId)
+    const shoulder = getLandmark(frames[i].landmarks, shoulderId)
+    if (!wrist || !shoulder) continue
+    if (wrist.y >= shoulder.y) {
+      detected.push({
+        phase: 'follow_through',
+        timestampMs: frames[i].timestamp_ms,
+        frameIndex: frames[i].frame_index,
+      })
+      break
+    }
+  }
+
+  detected.sort((a, b) => a.timestampMs - b.timestampMs)
   return detected
 }
 

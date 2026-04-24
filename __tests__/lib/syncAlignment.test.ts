@@ -464,3 +464,120 @@ describe('selectBestProClip', () => {
     expect(idx).toBeLessThan(clips.length)
   })
 })
+
+
+// ---------------------------------------------------------------------------
+// Serve-specific phase detection (detectSwingPhases with shotType='serve')
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a synthetic serve frame sequence. Serve kinematics:
+ *   - frames 0-2: stance (wrist low near hip, knees straight)
+ *   - frames 3-6: knee bend ramps to trophy (knees bend to min at frame 6)
+ *   - frames 6-9: wrist accelerates upward (peak -dy/dt around frame 8)
+ *   - frame 9-10: contact (wrist at highest point)
+ *   - frames 11-14: follow-through (wrist drops back)
+ */
+function makeServeFrames(): PoseFrame[] {
+  const frames: PoseFrame[] = []
+  for (let i = 0; i < 15; i++) {
+    // Wrist y trajectory: 0.55 → 0.5 → 0.1 (up) → 0.3 (down)
+    let wristY: number
+    if (i < 3) wristY = 0.55
+    else if (i < 6) wristY = 0.5 - (i - 3) * 0.02
+    else if (i < 10) wristY = 0.44 - (i - 6) * 0.08  // fast upward to ~0.12
+    else wristY = 0.12 + (i - 10) * 0.05 // drop back down
+
+    // Right-knee angle trajectory: 175 → 175 → bends to 135 at trophy
+    // (frame 6) → extends back to 165+ by contact
+    let rKnee: number
+    if (i < 3) rKnee = 175
+    else if (i <= 6) rKnee = 175 - (i - 3) * (175 - 135) / 3
+    else if (i < 10) rKnee = 135 + (i - 6) * ((165 - 135) / 4)
+    else rKnee = 170
+
+    // Right hand is dominant: right_wrist sits far from hip center while
+    // left_wrist stays close, so detectDominantSide picks 'right'.
+    const lms = [
+      makeLandmark(LANDMARK_INDICES.LEFT_SHOULDER, 0.45, 0.3),
+      makeLandmark(LANDMARK_INDICES.RIGHT_SHOULDER, 0.55, 0.3),
+      makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.47, 0.55),
+      makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.53, 0.55),
+      makeLandmark(LANDMARK_INDICES.LEFT_WRIST, 0.5, 0.55),
+      makeLandmark(LANDMARK_INDICES.RIGHT_WRIST, 0.82, wristY),
+    ]
+    const angles: JointAngles = {
+      trunk_rotation: 8, // stable across frames (serve rotates trunk less dramatically)
+      right_knee: rKnee,
+      left_knee: rKnee, // mirror so detection is robust to which side is picked
+      right_elbow: 150,
+      right_shoulder: 90,
+    }
+    frames.push(makeFrame(i, i * 33, lms, angles))
+  }
+  return frames
+}
+
+describe('detectSwingPhases (serve branch)', () => {
+  it('dispatches to serve heuristics when shotType="serve"', () => {
+    const frames = makeServeFrames()
+    const phases = detectSwingPhases(frames, 'serve')
+    // Expect all 5 phases
+    const phaseNames = phases.map((p) => p.phase)
+    expect(phaseNames).toContain('preparation')
+    expect(phaseNames).toContain('backswing')
+    expect(phaseNames).toContain('contact')
+    expect(phaseNames).toContain('follow_through')
+  })
+
+  it('places backswing (trophy) at the deepest knee-bend frame', () => {
+    const frames = makeServeFrames()
+    const phases = detectSwingPhases(frames, 'serve')
+    const trophy = phases.find((p) => p.phase === 'backswing')
+    expect(trophy).toBeDefined()
+    // Synthetic trajectory bottoms out at frame 6
+    expect(trophy!.frameIndex).toBe(6)
+  })
+
+  it('places contact at the highest-wrist frame (min y)', () => {
+    const frames = makeServeFrames()
+    const phases = detectSwingPhases(frames, 'serve')
+    const contact = phases.find((p) => p.phase === 'contact')
+    expect(contact).toBeDefined()
+    // Wrist y reaches its minimum value (highest on screen, since y=0 is
+    // top) at frame 10 in the synthetic trajectory; that's the contact
+    // frame per the "peak height" heuristic.
+    expect(contact!.frameIndex).toBe(10)
+  })
+
+  it('contact frame must come after backswing frame', () => {
+    const frames = makeServeFrames()
+    const phases = detectSwingPhases(frames, 'serve')
+    const backswing = phases.find((p) => p.phase === 'backswing')!
+    const contact = phases.find((p) => p.phase === 'contact')!
+    expect(contact.frameIndex).toBeGreaterThan(backswing.frameIndex)
+  })
+
+  it('forehand detection path still runs when shotType is undefined', () => {
+    // Back-compat: legacy callers don't pass a shotType and get the
+    // groundstroke branch.
+    const frames = Array.from({ length: 10 }, (_, i) =>
+      makeFrame(
+        i,
+        i * 33,
+        [
+          makeLandmark(LANDMARK_INDICES.LEFT_SHOULDER, 0.45, 0.3),
+          makeLandmark(LANDMARK_INDICES.RIGHT_SHOULDER, 0.55, 0.3),
+          makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.47, 0.55),
+          makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.53, 0.55),
+          makeLandmark(LANDMARK_INDICES.LEFT_WRIST, 0.3, 0.5),
+          makeLandmark(LANDMARK_INDICES.RIGHT_WRIST, 0.7 - i * 0.04, 0.5),
+        ],
+        { trunk_rotation: 5 + i * 3, right_elbow: 120 - i * 4 },
+      ),
+    )
+    // No shotType passed — should not crash and should return some phases.
+    const phases = detectSwingPhases(frames)
+    expect(Array.isArray(phases)).toBe(true)
+  })
+})

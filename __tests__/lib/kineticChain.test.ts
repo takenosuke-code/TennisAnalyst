@@ -358,3 +358,69 @@ describe('FOREHAND_KINETIC_CHAIN', () => {
     }
   })
 })
+
+
+// ---------------------------------------------------------------------------
+// Shot-type-aware chain (backhand uses left-side joints)
+// ---------------------------------------------------------------------------
+
+describe('analyzeKineticChain with shotType', () => {
+  it('derives the backhand chain from SHOT_TYPE_CONFIGS when shotType="backhand"', () => {
+    // Two-handed backhand config uses left_shoulder + left_elbow + left_wrist.
+    // Build synthetic frames where the LEFT arm angles change (i.e., left
+    // side has non-trivial angular velocity); the derived chain should pick
+    // those up as segments.
+    const frames = Array.from({ length: 10 }, (_, i) => ({
+      frame_index: i,
+      timestamp_ms: i * 33,
+      landmarks: [],
+      joint_angles: {
+        hip_rotation: 10 + i * 4,
+        trunk_rotation: 15 + i * 5,
+        left_shoulder: 60 + i * 3,
+        left_elbow: 100 + i * 2,
+        left_wrist: 170 - i,
+      },
+    }))
+
+    const result = analyzeKineticChain(frames, 'backhand')
+    const angleKeys = result.segments.map((s) => s.angleKey)
+    // The backhand config's kineticChainOrder uses the left-side joints.
+    expect(angleKeys).toContain('left_shoulder')
+    expect(angleKeys).toContain('left_elbow')
+    expect(angleKeys).toContain('left_wrist')
+    expect(angleKeys).not.toContain('right_shoulder')
+  })
+
+  it('derives the serve chain which leads with a knee joint', () => {
+    // Serve config: right_knee → hip_rotation → trunk_rotation → right_shoulder → right_elbow → right_wrist.
+    // First segment must be a knee.
+    const frames = Array.from({ length: 10 }, (_, i) => ({
+      frame_index: i,
+      timestamp_ms: i * 33,
+      landmarks: [],
+      joint_angles: {
+        right_knee: 175 - Math.abs(i - 5) * 8,
+        hip_rotation: 10 + i * 3,
+        trunk_rotation: 5 + i * 4,
+        right_shoulder: 50 + i * 5,
+        right_elbow: 110 + i * 3,
+        right_wrist: 175 - i,
+      },
+    }))
+
+    const result = analyzeKineticChain(frames, 'serve')
+    const angleKeys = result.segments.map((s) => s.angleKey)
+    // Serve chain must include right_knee as the first segment.
+    expect(angleKeys[0]).toBe('right_knee')
+  })
+
+  it('falls back to forehand chain when no shotType arg is passed', () => {
+    // Back-compat: legacy callers that omit the second arg get FOREHAND_CHAIN.
+    const result = analyzeKineticChain([])
+    const angleKeys = result.segments.map((s) => s.angleKey)
+    expect(angleKeys).toContain('right_shoulder')
+    expect(angleKeys).toContain('right_elbow')
+    expect(angleKeys).not.toContain('left_shoulder')
+  })
+})
