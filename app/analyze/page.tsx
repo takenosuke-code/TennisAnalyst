@@ -6,6 +6,7 @@ import Link from 'next/link'
 import JointTogglePanel from '@/components/JointTogglePanel'
 import SwingSelector from '@/components/SwingSelector'
 import SegmentPickerGrid from '@/components/SegmentPickerGrid'
+import SwingBaselineGrid, { type SwingBaselineSaveOverride } from '@/components/SwingBaselineGrid'
 import type { SegmentCardSaveOverride } from '@/components/SegmentCard'
 import { usePoseStore, useJointStore } from '@/store'
 import { detectSwings } from '@/lib/jointAngles'
@@ -174,6 +175,71 @@ export default function AnalyzePage() {
     baselineFrames.length > 0 &&
     (!hasMultipleSwings || selectedSwing !== null)
 
+  // Per-swing baseline save state. The SwingBaselineGrid lets the user
+  // save N independent swings from a long rally clip (e.g. 15 forehands
+  // in one upload) — each becomes its own baseline row in user_baselines.
+  // The grid does not fetch DB segments; it consumes the in-memory
+  // detectSwings() output, so no Railway / segmentation pipeline is
+  // required for this flow.
+  const [savingSwingIndex, setSavingSwingIndex] = useState<number | null>(null)
+  const [savedSwingIndices, setSavedSwingIndices] = useState<Set<number>>(new Set())
+  const [errorBySwingIndex, setErrorBySwingIndex] = useState<Record<number, string | null>>({})
+
+  // Reset per-swing save state when a new clip is uploaded so a previous
+  // session's saved/saving flags don't leak into the new clip's grid.
+  useEffect(() => {
+    setSavingSwingIndex(null)
+    setSavedSwingIndices(new Set())
+    setErrorBySwingIndex({})
+  }, [blobUrl])
+
+  const handleSaveSwingAsBaseline = async (
+    swingIndex: number,
+    override: SwingBaselineSaveOverride,
+  ) => {
+    const swing = swings[swingIndex - 1]
+    if (!swing || !blobUrl) return
+
+    setSavingSwingIndex(swingIndex)
+    setErrorBySwingIndex((prev) => ({ ...prev, [swingIndex]: null }))
+    try {
+      const keypointsJson = {
+        fps_sampled: 30,
+        frame_count: swing.frames.length,
+        frames: swing.frames,
+      }
+      const res = await fetch('/api/baselines', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          blobUrl,
+          shotType: override.shotType,
+          keypointsJson,
+          label: override.label,
+          sourceSessionId: sessionId ?? undefined,
+        }),
+      })
+      if (!res.ok) {
+        const msg = (await res.text()) || `HTTP ${res.status}`
+        setErrorBySwingIndex((prev) => ({ ...prev, [swingIndex]: msg }))
+        return
+      }
+      setSavedSwingIndices((prev) => {
+        const next = new Set(prev)
+        next.add(swingIndex)
+        return next
+      })
+    } catch (err) {
+      setErrorBySwingIndex((prev) => ({
+        ...prev,
+        [swingIndex]: err instanceof Error ? err.message : 'Failed to save baseline',
+      }))
+    } finally {
+      setSavingSwingIndex((current) => (current === swingIndex ? null : current))
+    }
+  }
+
   const saveAsBaseline = async () => {
     if (!canSaveBaseline) return
     setBaselineStatus('saving')
@@ -260,6 +326,27 @@ export default function AnalyzePage() {
               allFrames={allFrames}
               selectedIndex={selectedSwing}
               onSelect={handleSwingSelect}
+            />
+          )}
+
+          {/* Multi-swing baseline grid. Renders one card per detected
+              swing so a long rally clip (e.g. 15 forehands in a row)
+              produces 15 independently-saveable baselines. Uses the
+              client-side detectSwings() output directly — no Railway
+              / video-segments dependency. Renders only when there's
+              at least one swing AND the user has a blob URL to
+              reference; the existing single-CTA path below still
+              handles single-swing clips. */}
+          {done && hasMultipleSwings && blobUrl && (
+            <SwingBaselineGrid
+              swings={swings}
+              blobUrl={blobUrl}
+              defaultShotType={shotType ?? 'forehand'}
+              signedIn={!!user}
+              onSaveSwing={handleSaveSwingAsBaseline}
+              savingSwingIndex={savingSwingIndex}
+              savedSwingIndices={savedSwingIndices}
+              errorBySwingIndex={errorBySwingIndex}
             />
           )}
 
