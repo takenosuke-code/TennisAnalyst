@@ -218,7 +218,35 @@ export async function extractPoseFromVideo(
     check()
 
     const duration = videoEl.duration
-    const frameInterval = 1 / fps
+
+    // Adaptive sampling FPS for long clips. Browser MediaPipe detection
+    // runs at ~50-100ms per frame on a phone, so a 2-minute clip at the
+    // default 30fps would be 3,600 detections = 3-6 minutes of compute.
+    // For analysis purposes (skeleton + joint angles + swing detection)
+    // we don't need 30fps — peak swing motion only spans ~10-15 frames
+    // even at 15fps, and the visualization stays smooth because the
+    // canvas redraws on every video frame regardless of sample density.
+    //
+    // Tiers tuned so total extraction time stays roughly bounded under
+    // ~90 seconds on a typical mobile, regardless of clip length:
+    //   <= 30s  → 30 fps (current default; short clips get full fidelity)
+    //   30-60s  → 20 fps
+    //   60-120s → 15 fps
+    //   > 120s  → 10 fps
+    const effectiveFps =
+      !Number.isFinite(duration) || duration <= 30
+        ? fps
+        : duration <= 60
+          ? Math.min(fps, 20)
+          : duration <= 120
+            ? Math.min(fps, 15)
+            : Math.min(fps, 10)
+    if (effectiveFps !== fps) {
+      console.info(
+        `[poseExtraction] long clip (${duration.toFixed(1)}s) — sampling at ${effectiveFps}fps instead of ${fps}fps to keep extraction under ~90s`,
+      )
+    }
+    const frameInterval = 1 / effectiveFps
     const frames: PoseFrame[] = []
     let frameIndex = 0
 
@@ -366,7 +394,10 @@ export async function extractPoseFromVideo(
     // through contact instead of wrong-but-visible ones.
     const smoothed = smoothFrames(frames)
     const cleaned = filterImplausibleArmJoints(smoothed)
-    return { frames: cleaned, fps, objectUrl }
+    // Return the EFFECTIVE fps the loop actually used so downstream
+    // smoothing / swing-detection windows compute against real timing.
+    // Returning the requested fps would lie about the data density.
+    return { frames: cleaned, fps: effectiveFps, objectUrl }
   } catch (err) {
     // On abort or error, release the object URL — nobody's going to use it
     URL.revokeObjectURL(objectUrl)
