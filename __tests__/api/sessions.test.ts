@@ -36,14 +36,19 @@ function chainMock() {
   mockUpsert.mockReturnValue({ select: mockSelect })
 }
 
-vi.mock('@/lib/supabase', () => ({
-  supabase: new Proxy({}, {
+vi.mock('@/lib/supabase', () => {
+  // Single proxy reused for both `supabase` (anon, used by /api/sessions/[id]
+  // GET) and `supabaseAdmin` (service-role, used by POST /api/sessions for
+  // pending-row creation). Tests mock the chain on whichever client the
+  // route happens to import.
+  const proxy = new Proxy({}, {
     get: (_t: object, prop: string) => {
       if (prop === 'from') return mockFrom
       return undefined
     },
-  }),
-}))
+  })
+  return { supabase: proxy, supabaseAdmin: proxy }
+})
 
 describe('POST /api/sessions', () => {
   beforeEach(() => {

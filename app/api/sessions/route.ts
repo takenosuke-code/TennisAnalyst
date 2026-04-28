@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { supabase } from '@/lib/supabase'
+import { supabaseAdmin } from '@/lib/supabase'
 
 // POST /api/sessions
 //
@@ -35,7 +35,7 @@ export async function POST(request: NextRequest) {
     }
     if (hasKeypoints) updates.keypoints_json = keypointsJson
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('user_sessions')
       .update(updates)
       .eq('id', sessionId)
@@ -44,6 +44,7 @@ export async function POST(request: NextRequest) {
       .single()
 
     if (error || !data) {
+      console.error('[sessions] update failed:', error, { sessionId, blobUrl })
       return NextResponse.json(
         { error: 'Session not found or blob_url mismatch' },
         { status: 404 }
@@ -60,14 +61,18 @@ export async function POST(request: NextRequest) {
   }
   if (hasKeypoints) upsertPayload.keypoints_json = keypointsJson
 
-  const { data, error } = await supabase
+  const { data, error } = await supabaseAdmin
     .from('user_sessions')
     .upsert(upsertPayload, { onConflict: 'blob_url' })
     .select()
     .single()
 
   if (error) {
-    return NextResponse.json({ error: 'Failed to save session' }, { status: 500 })
+    console.error('[sessions] upsert failed:', error, { blobUrl, status })
+    return NextResponse.json(
+      { error: 'Failed to save session', detail: error.message },
+      { status: 500 }
+    )
   }
 
   return NextResponse.json({ sessionId: data.id, status: data.status })
