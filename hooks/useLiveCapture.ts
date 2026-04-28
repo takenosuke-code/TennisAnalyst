@@ -82,13 +82,23 @@ export interface UseLiveCaptureOptions {
 }
 
 export interface UseLiveCaptureReturn {
-  start: (videoEl: HTMLVideoElement) => Promise<void>
+  start: (
+    videoEl: HTMLVideoElement,
+    opts?: { facingMode?: 'user' | 'environment' },
+  ) => Promise<void>
   stop: () => Promise<LiveSessionResult | null>
   abort: () => void
   status: LiveCaptureStatus
   error: string | null
   isRecording: boolean
   pickedMimeType: string | null
+  /**
+   * Camera facing actually used by the active session. 'user' = selfie /
+   * front camera (mirror the on-screen view). 'environment' = back
+   * camera (do NOT mirror — the user is filming away from themselves).
+   * Null while no session is running.
+   */
+  facingMode: 'user' | 'environment' | null
 }
 
 // Prefer mp4 (iOS native), fall back to webm variants (Chrome/Android).
@@ -131,6 +141,7 @@ export function useLiveCapture(
   const [status, setStatusState] = useState<LiveCaptureStatus>('idle')
   const [error, setError] = useState<string | null>(null)
   const [pickedMimeType, setPickedMimeType] = useState<string | null>(null)
+  const [facingMode, setFacingMode] = useState<'user' | 'environment' | null>(null)
 
   const generationRef = useRef(0)
   const streamRef = useRef<MediaStream | null>(null)
@@ -216,6 +227,7 @@ export function useLiveCapture(
     }
     poseDetectorRef.current = null
     inflightRef.current = false
+    setFacingMode(null)
   }, [teardownLoop])
 
   const abort = useCallback(() => {
@@ -224,7 +236,11 @@ export function useLiveCapture(
     setStatus('idle')
   }, [cleanup, setStatus])
 
-  const start = useCallback(async (videoEl: HTMLVideoElement) => {
+  const start = useCallback(async (
+    videoEl: HTMLVideoElement,
+    opts: { facingMode?: 'user' | 'environment' } = {},
+  ) => {
+    const requestedFacingMode = opts.facingMode ?? 'environment'
     const generation = ++generationRef.current
     setError(null)
     framesRef.current = []
@@ -241,7 +257,7 @@ export function useLiveCapture(
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: { ideal: requestedFacingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: true,
       })
     } catch (err) {
@@ -255,6 +271,23 @@ export function useLiveCapture(
       return
     }
     streamRef.current = stream
+    // Read back the facing mode actually granted — on devices with only
+    // one camera (laptops) the browser ignores `ideal: 'environment'`
+    // and gives us the front cam, so the UI needs to know the truth
+    // before deciding whether to mirror. Defensive: not every test
+    // double / older browser exposes getVideoTracks/getSettings, so
+    // fall back to the requested mode if introspection fails.
+    let grantedFacingMode: 'user' | 'environment' = requestedFacingMode
+    try {
+      const videoTrack = stream.getVideoTracks?.()?.[0]
+      const settings = videoTrack?.getSettings?.()
+      if (settings?.facingMode === 'user' || settings?.facingMode === 'environment') {
+        grantedFacingMode = settings.facingMode
+      }
+    } catch {
+      // getSettings() throws on a few mobile browsers — keep requestedFacingMode
+    }
+    setFacingMode(grantedFacingMode)
 
     setStatus('initializing')
 
@@ -534,5 +567,6 @@ export function useLiveCapture(
     error,
     isRecording: status === 'recording',
     pickedMimeType,
+    facingMode,
   }
 }

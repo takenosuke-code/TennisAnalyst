@@ -158,6 +158,11 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   // Triggers the swing-counter scale bump. Toggles 0/1 each onSwing so
   // we always re-run the keyframe transition even on back-to-back hits.
   const [counterPulseTick, setCounterPulseTick] = useState<number>(0)
+  // Pre-start camera selection. Default: back camera ('environment') —
+  // the canonical "prop your phone side-on" tennis setup. Users testing
+  // the feature on a phone often want selfie mode to see themselves;
+  // the toggle below the video flips this before Start.
+  const [selectedFacingMode, setSelectedFacingMode] = useState<'user' | 'environment'>('environment')
   const [summary, setSummary] = useState<{ swings: number; durationMs: number } | null>(null)
   const [uploadStatus, setUploadStatus] = useState<string | null>(null)
   // The recorded session, held until the user picks Save / Discard / Re-record.
@@ -211,7 +216,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     coach.setShotType(shotType)
   }, [coach, shotType])
 
-  const { start, stop, abort, status: captureStatus, error: captureError, isRecording, pickedMimeType } = useLiveCapture({
+  const { start, stop, abort, status: captureStatus, error: captureError, isRecording, pickedMimeType, facingMode } = useLiveCapture({
     onSwing: (swing) => {
       swingCountRef.current++
       setSwingCount(swingCountRef.current)
@@ -442,8 +447,8 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     const startedAt = Date.now()
     setSessionStartedAtMs(startedAt)
     coach.markSessionStart(startedAt)
-    await start(videoEl)
-  }, [coach, setErrorMessage, setSessionStartedAtMs, setStatus, setSwingCount, start])
+    await start(videoEl, { facingMode: selectedFacingMode })
+  }, [coach, selectedFacingMode, setErrorMessage, setSessionStartedAtMs, setStatus, setSwingCount, start])
 
   // Run the upload + save pipeline against an already-finalized recording.
   // Pulled out of handleStop so the Retry button (after a failure) and the
@@ -668,8 +673,8 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
 
   return (
     <div className="space-y-4">
-      {/* Shot type picker — locked during a session */}
-      <div className="flex gap-2 flex-wrap">
+      {/* Shot type picker + camera flip — both locked once recording starts */}
+      <div className="flex items-center gap-2 flex-wrap">
         {SHOT_TYPES.map((type) => (
           <button
             key={type}
@@ -684,33 +689,70 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
             {type}
           </button>
         ))}
+        {/*
+          Camera flip — front (selfie) for testing on a phone you're
+          holding, back ('environment') for the canonical "prop the
+          phone side-on" tennis setup. Hidden during recording so a
+          mid-session flip can't desync the recorder. Defaults to back.
+        */}
+        <button
+          onClick={() =>
+            setSelectedFacingMode((m) => (m === 'user' ? 'environment' : 'user'))
+          }
+          disabled={isRecording || busy}
+          aria-pressed={selectedFacingMode === 'user'}
+          data-testid="camera-flip-button"
+          className={`ml-auto px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+            selectedFacingMode === 'user'
+              ? 'bg-white/15 text-white border border-white/20'
+              : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white border border-white/10'
+          } ${isRecording || busy ? 'opacity-40 cursor-not-allowed' : ''}`}
+        >
+          {selectedFacingMode === 'user' ? 'Selfie' : 'Back camera'}
+        </button>
       </div>
 
       {/* Preview / idle card */}
       <div className="relative rounded-2xl border border-white/10 bg-black overflow-hidden aspect-video">
-        <video
-          ref={videoRef}
-          className="w-full h-full object-cover"
-          style={{ transform: 'scaleX(-1)' }}
-          playsInline
-          muted
-        />
         {/*
-          Skeleton overlay canvas. Same scaleX(-1) as the video so
-          un-mirrored MediaPipe coords land on the on-screen body.
-          pointer-events:none keeps the controls underneath clickable.
-          We only render the canvas while recording — outside of that
-          there's nothing to draw and we'd rather not hold a context.
+          Mirror only the front (selfie) camera. The back camera films
+          AWAY from the user — mirroring that flips the world in a
+          confusing way (your right hand wave shows on the left side of
+          a court layout you're trying to coach off). When recording
+          uses the granted facingMode from useLiveCapture; before that,
+          mirror to match the user's pre-start selection so the preview
+          frame doesn't visibly flip the moment Start is tapped.
         */}
-        {isRecording ? (
-          <canvas
-            ref={overlayCanvasRef}
-            data-testid="pose-overlay-canvas"
-            aria-hidden="true"
-            className="absolute inset-0 w-full h-full pointer-events-none"
-            style={{ transform: 'scaleX(-1)' }}
-          />
-        ) : null}
+        {(() => {
+          const activeFacing = facingMode ?? selectedFacingMode
+          const mirrorTransform =
+            activeFacing === 'user' ? 'scaleX(-1)' : 'none'
+          return (
+            <>
+              <video
+                ref={videoRef}
+                className="w-full h-full object-cover"
+                style={{ transform: mirrorTransform }}
+                playsInline
+                muted
+              />
+              {/*
+                Skeleton overlay canvas. Mirror flag matches the video
+                so RTMPose's un-mirrored coords land on the on-screen
+                body. pointer-events:none keeps controls clickable.
+              */}
+              {isRecording ? (
+                <canvas
+                  ref={overlayCanvasRef}
+                  data-testid="pose-overlay-canvas"
+                  aria-hidden="true"
+                  className="absolute inset-0 w-full h-full pointer-events-none"
+                  style={{ transform: mirrorTransform }}
+                />
+              ) : null}
+            </>
+          )
+        })()}
         {!isRecording && !busy ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gradient-to-br from-emerald-500/10 to-transparent">
             <div className="text-5xl">🎾</div>

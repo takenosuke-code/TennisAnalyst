@@ -34,6 +34,7 @@ vi.mock('@/hooks/useLiveCapture', () => {
       error: null,
       isRecording: captureRecording,
       pickedMimeType: null,
+      facingMode: null,
     }),
   }
 })

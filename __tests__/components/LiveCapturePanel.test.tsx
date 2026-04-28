@@ -53,6 +53,11 @@ vi.mock('@/hooks/useLiveCapture', async (orig) => {
         error: null,
         isRecording: captureIsRecording,
         pickedMimeType: 'video/webm',
+        // 'user' so the assertion that the overlay canvas carries
+        // the scaleX(-1) mirror exercises the front-camera path —
+        // back camera ('environment') intentionally renders without
+        // mirroring so a separate test below covers that branch.
+        facingMode: captureIsRecording ? ('user' as const) : null,
       }
     },
   }
