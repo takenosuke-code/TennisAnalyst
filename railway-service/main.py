@@ -7,6 +7,7 @@ Used for processing pro player videos offline and seeding the database.
 import asyncio
 import os
 import math
+from contextlib import asynccontextmanager
 import re
 import subprocess
 import tempfile
@@ -32,7 +33,35 @@ POSE_BACKEND = (
     os.environ.get("POSE_BACKEND", "mediapipe").strip().strip("\"'").lower()
 )
 
-app = FastAPI(title="TennisIQ Pose Service")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Eagerly initialize pose-extraction models on container boot so
+    the first user upload doesn't pay the lazy-load tax (~2-3s for
+    onnxruntime + RTMPose, plus ~1-2s if rtmlib needs to download the
+    ONNX bundle from the openmmlab CDN — and that download happens on
+    every cold start since Railway containers are ephemeral and
+    ~/.cache/rtmlib isn't a persisted volume).
+
+    The Dockerfile also pre-downloads RTMPose at build time so the
+    cached ONNX is baked into the image and rtmlib's download_checkpoint
+    is a no-op here. This warmup hook then just builds the ORT session.
+
+    Failures are logged but not raised — the lazy-load path is still
+    in place per-frame as a fallback. Don't crash the whole service
+    over a transient warmup failure.
+    """
+    if POSE_BACKEND == "rtmpose":
+        try:
+            from pose_rtmpose import _ensure_yolo, _ensure_rtmpose
+            await asyncio.to_thread(_ensure_yolo)
+            await asyncio.to_thread(_ensure_rtmpose)
+            print("[startup] pose models warmed (YOLO + RTMPose)")
+        except Exception as e:  # noqa: BLE001
+            print(f"[startup] pose-model warmup failed (will lazy-load): {e}")
+    yield
+
+
+app = FastAPI(title="TennisIQ Pose Service", lifespan=_lifespan)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
