@@ -36,14 +36,19 @@ function chainMock() {
   mockUpsert.mockReturnValue({ select: mockSelect })
 }
 
-vi.mock('@/lib/supabase', () => ({
-  supabase: new Proxy({}, {
+vi.mock('@/lib/supabase', () => {
+  // Single proxy reused for both `supabase` (anon, used by /api/sessions/[id]
+  // GET) and `supabaseAdmin` (service-role, used by POST /api/sessions for
+  // pending-row creation). Tests mock the chain on whichever client the
+  // route happens to import.
+  const proxy = new Proxy({}, {
     get: (_t: object, prop: string) => {
       if (prop === 'from') return mockFrom
       return undefined
     },
-  }),
-}))
+  })
+  return { supabase: proxy, supabaseAdmin: proxy }
+})
 
 describe('POST /api/sessions', () => {
   beforeEach(() => {
@@ -61,9 +66,9 @@ describe('POST /api/sessions', () => {
     expect(res.status).toBe(400)
   })
 
-  it('creates a pending session when keypointsJson is omitted (Railway path)', async () => {
+  it('creates an in-progress session when keypointsJson is omitted (Railway path)', async () => {
     mockSingle.mockResolvedValueOnce({
-      data: { id: 'pending-id', status: 'pending' },
+      data: { id: 'pending-id', status: 'extracting' },
       error: null,
     })
 
@@ -76,12 +81,13 @@ describe('POST /api/sessions', () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.sessionId).toBe('pending-id')
-    // Upsert must carry status='pending' and must NOT carry keypoints_json
+    // Upsert must carry status='extracting' (one of the valid values per
+    // user_sessions_status_check) and must NOT carry keypoints_json
     // (Railway will fill that in when extraction completes).
     expect(mockUpsert).toHaveBeenCalledWith(
       expect.objectContaining({
         blob_url: 'https://blob.test/v.mp4',
-        status: 'pending',
+        status: 'extracting',
       }),
       { onConflict: 'blob_url' },
     )

@@ -4,13 +4,35 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import { upload } from '@vercel/blob/client'
 import JointTogglePanel from '@/components/JointTogglePanel'
 import SwingSelector from '@/components/SwingSelector'
 import { useBaselineStore } from '@/store/baseline'
 import { usePoseExtractor } from '@/hooks/usePoseExtractor'
 import { useUser } from '@/hooks/useUser'
 import { detectSwings } from '@/lib/jointAngles'
+import { extractPoseViaRailway, RailwayExtractError } from '@/lib/poseExtractionRailway'
+import type { ExtractorBackend } from '@/lib/poseExtraction'
 import type { PoseFrame, Baseline } from '@/lib/supabase'
+import BackendChip from '@/components/BackendChip'
+
+// Mirrors UploadZone's flag. When true the today's-clip extraction
+// goes through Railway (RTMPose + YOLO crop) which produces meaningfully
+// better tracing on small-in-frame subjects than browser MediaPipe.
+// Browser MediaPipe stays as the fallback if Railway is unreachable
+// or returns no result.
+const USE_RAILWAY_EXTRACT =
+  process.env.NEXT_PUBLIC_USE_RAILWAY_EXTRACT === 'true'
+
+function safeBlobFilename(name: string): string {
+  return (
+    name
+      .split(/[\\/]/)
+      .pop()!
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .slice(0, 100) || 'upload'
+  )
+}
 
 const ComparisonLayout = dynamic(() => import('@/components/ComparisonLayout'), { ssr: false })
 const MetricsComparison = dynamic(() => import('@/components/MetricsComparison'), { ssr: false })
@@ -24,6 +46,13 @@ export default function BaselineComparePage() {
 
   const [todayObjectUrl, setTodayObjectUrl] = useState<string | null>(null)
   const [todayFrames, setTodayFrames] = useState<PoseFrame[]>([])
+  // Surfaces which backend produced today's frames so the diagnostic
+  // chip can render. Null until the first upload completes.
+  const [todayExtractorBackend, setTodayExtractorBackend] =
+    useState<ExtractorBackend | null>(null)
+  // When backend is the red 'rtmpose-browser-fallback', this carries
+  // the failure reason for the chip tooltip + inline label.
+  const [todayFallbackReason, setTodayFallbackReason] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null)
   // Index (1-based) of the swing within today's clip the user wants to
@@ -85,12 +114,84 @@ export default function BaselineComparePage() {
 
   const processTodayVideo = async (file: File) => {
     if (!file.type.startsWith('video/')) return
-    const result = await extract(file)
-    if (!result) return
-    // Swap in the new object URL, revoke the old
+
+    let frames: PoseFrame[] | null = null
+    let railwayBackend: ExtractorBackend | null = null
+    let railwayFailReason: string | null = null
+
+    // Railway path: upload the file to Vercel Blob first (Railway pulls
+    // from a URL, not a multipart body), then create a pending session
+    // row, then queue + poll. On any failure fall through silently to
+    // the browser MediaPipe path so the compare flow never dies on a
+    // bad day for the server.
+    if (USE_RAILWAY_EXTRACT) {
+      try {
+        const blobPath = `videos/${Date.now()}-${safeBlobFilename(file.name)}`
+        const blob = await upload(blobPath, file, {
+          access: 'public',
+          handleUploadUrl: '/api/upload',
+          contentType: file.type,
+        })
+        const sessRes = await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blobUrl: blob.url, shotType: selectedBaseline?.shot_type ?? 'unknown' }),
+        })
+        if (sessRes.ok) {
+          const { sessionId } = await sessRes.json()
+          const result = await extractPoseViaRailway({
+            sessionId,
+            blobUrl: blob.url,
+          })
+          frames = result.frames
+          railwayBackend = result.extractorBackend
+        }
+      } catch (err) {
+        if (err instanceof RailwayExtractError) {
+          console.info(
+            '[baseline/compare] Railway path unavailable, falling back to browser:',
+            err.reason, err.message,
+          )
+          // Concatenate reason + Error.message so the chip shows the
+          // category and the actual Railway error text. See UploadZone
+          // for the parallel implementation.
+          railwayFailReason =
+            err.message && err.message !== err.reason
+              ? `${err.reason}: ${err.message}`
+              : err.reason
+        } else {
+          console.error('[baseline/compare] Railway path errored, falling back to browser:', err)
+          railwayFailReason = err instanceof Error ? err.message : 'unknown'
+        }
+        frames = null
+      }
+    }
+
+    // Browser MediaPipe fallback (or primary path when the feature flag
+    // is off). Always runs the local extractor so we still produce an
+    // object URL for inline playback even when Railway succeeded.
+    const localResult = await extract(file)
+    if (!localResult) return
     if (todayObjectUrl) URL.revokeObjectURL(todayObjectUrl)
-    setTodayObjectUrl(result.objectUrl)
-    setTodayFrames(result.frames)
+    setTodayObjectUrl(localResult.objectUrl)
+
+    // Prefer Railway frames (better quality) when available; fall back
+    // to the browser MediaPipe frames otherwise.
+    setTodayFrames(frames ?? localResult.frames)
+    // Tag the chip: railway backend if we have railway frames, else
+    // 'rtmpose-browser-fallback' (Railway was attempted and missed)
+    // when the flag is on, else plain 'rtmpose-browser'.
+    if (frames && railwayBackend) {
+      setTodayExtractorBackend(railwayBackend)
+      setTodayFallbackReason(null)
+    } else if (USE_RAILWAY_EXTRACT) {
+      setTodayExtractorBackend('rtmpose-browser-fallback')
+      setTodayFallbackReason(railwayFailReason)
+    } else {
+      setTodayExtractorBackend(localResult.extractorBackend)
+      setTodayFallbackReason(null)
+    }
+
     // Reset the per-swing selection on a new upload so the previous
     // clip's selection doesn't leak into a clip that may not have
     // that many swings.
@@ -231,16 +332,24 @@ export default function BaselineComparePage() {
           {canCompare && selectedBaseline && (
             <div className="rounded-2xl border border-white/10 overflow-hidden bg-black">
               <div className="p-3 border-b border-white/5 flex items-center justify-between">
-                <p className="text-sm text-white/60">
-                  <span className="text-emerald-300">{selectedBaseline.label}</span>
-                  <span className="text-white/30"> vs </span>
-                  <span className="text-white">Today</span>
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm text-white/60">
+                    <span className="text-emerald-300">{selectedBaseline.label}</span>
+                    <span className="text-white/30"> vs </span>
+                    <span className="text-white">Today</span>
+                  </p>
+                  <BackendChip
+                    backend={todayExtractorBackend}
+                    reason={todayFallbackReason}
+                  />
+                </div>
                 <button
                   onClick={() => {
                     if (todayObjectUrl) URL.revokeObjectURL(todayObjectUrl)
                     setTodayObjectUrl(null)
                     setTodayFrames([])
+                    setTodayExtractorBackend(null)
+                    setTodayFallbackReason(null)
                   }}
                   className="text-xs text-white/40 hover:text-white"
                 >

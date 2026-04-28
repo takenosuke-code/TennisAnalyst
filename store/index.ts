@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { PoseFrame } from '@/lib/supabase'
 import type { JointGroup } from '@/lib/jointAngles'
+import type { ExtractorBackend } from '@/lib/poseExtraction'
 
 // Video playback state
 interface VideoStore {
@@ -30,6 +31,14 @@ interface PoseStore {
   shotType: string | null
   isProcessing: boolean
   progress: number // 0–100
+  // Which extractor produced framesData. Surfaced in the UI as a
+  // diagnostic chip so we can tell at a glance which path the user is
+  // on when tracing looks wrong. Null until the first extraction lands.
+  extractorBackend: ExtractorBackend | null
+  // When extractorBackend === 'rtmpose-browser-fallback', this carries
+  // *why* Railway failed (queue-failed / not-configured / timeout / etc).
+  // Surfaced in the chip tooltip so we can debug without DevTools.
+  fallbackReason: string | null
   setFramesData: (frames: PoseFrame[]) => void
   setBlobUrl: (url: string | null) => void
   setLocalVideoUrl: (url: string | null) => void
@@ -37,6 +46,8 @@ interface PoseStore {
   setShotType: (type: string | null) => void
   setProcessing: (v: boolean) => void
   setProgress: (p: number) => void
+  setExtractorBackend: (backend: ExtractorBackend | null) => void
+  setFallbackReason: (reason: string | null) => void
   reset: () => void
 }
 
@@ -48,6 +59,8 @@ export const usePoseStore = create<PoseStore>((set, get) => ({
   shotType: null,
   isProcessing: false,
   progress: 0,
+  extractorBackend: null,
+  fallbackReason: null,
   setFramesData: (framesData) => set({ framesData }),
   setBlobUrl: (blobUrl) => set({ blobUrl }),
   setLocalVideoUrl: (url) => {
@@ -59,6 +72,8 @@ export const usePoseStore = create<PoseStore>((set, get) => ({
   setShotType: (shotType) => set({ shotType }),
   setProcessing: (isProcessing) => set({ isProcessing }),
   setProgress: (progress) => set({ progress }),
+  setExtractorBackend: (extractorBackend) => set({ extractorBackend }),
+  setFallbackReason: (fallbackReason) => set({ fallbackReason }),
   reset: () => {
     const prev = get().localVideoUrl
     if (prev) URL.revokeObjectURL(prev)
@@ -70,6 +85,8 @@ export const usePoseStore = create<PoseStore>((set, get) => ({
       shotType: null,
       isProcessing: false,
       progress: 0,
+      extractorBackend: null,
+      fallbackReason: null,
     })
   },
 }))

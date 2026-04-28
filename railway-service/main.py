@@ -21,9 +21,16 @@ from pydantic import BaseModel
 from supabase import create_client, Client
 import httpx
 
-# POSE_BACKEND selects the pose estimator. `mediapipe` is the only supported
-# value today; `rtmpose` is a deliberate seam for a future swap.
-POSE_BACKEND = os.environ.get("POSE_BACKEND", "mediapipe").lower()
+# POSE_BACKEND selects the pose estimator. Two valid values:
+#   "mediapipe" — BlazePose Heavy (default; older path)
+#   "rtmpose"   — YOLO11n + RTMPose-m (better tracing on small subjects)
+# Strip whitespace and surrounding quotes defensively. Railway dashboards
+# sometimes preserve copy-pasted quotes, and trailing newlines from shell
+# `echo` exports are easy to miss — without these, the dispatch raises
+# "Unknown POSE_BACKEND: rtmpose" even when the value LOOKS right.
+POSE_BACKEND = (
+    os.environ.get("POSE_BACKEND", "mediapipe").strip().strip("\"'").lower()
+)
 
 app = FastAPI(title="TennisIQ Pose Service")
 
@@ -271,6 +278,11 @@ def _extract_with_mediapipe(
         "video_fps": video_fps,
         "duration_ms": round(total_duration_ms),
         "schema_version": 2,
+        # Identifies which backend produced these keypoints. The browser
+        # surfaces this as a diagnostic chip so we can tell at a glance
+        # whether a "tracing is off" complaint is coming from server
+        # mediapipe vs server rtmpose vs browser fallback.
+        "pose_backend": "mediapipe",
     }
 
 
@@ -406,6 +418,9 @@ def _extract_with_rtmpose(
         "duration_ms": round(total_duration_ms),
         # v3: COCO-17 backbone via RTMPose. Wrist-flexion absent.
         "schema_version": 3,
+        # Identifies which backend produced these keypoints (see the
+        # mediapipe path above for rationale).
+        "pose_backend": "rtmpose",
     }
 
 
@@ -424,7 +439,9 @@ def extract_keypoints_from_video(video_path: str, sample_fps: int = 30, max_seco
         return _extract_with_rtmpose(video_path, sample_fps, max_seconds)
     if POSE_BACKEND == "mediapipe":
         return _extract_with_mediapipe(video_path, sample_fps, max_seconds)
-    raise ValueError(f"Unknown POSE_BACKEND: {POSE_BACKEND}")
+    # repr() so trailing whitespace, quotes, or unicode surprises in the
+    # parsed value are visible in the error message.
+    raise ValueError(f"Unknown POSE_BACKEND: {POSE_BACKEND!r}")
 
 
 class ExtractRequest(BaseModel):

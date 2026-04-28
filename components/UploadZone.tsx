@@ -48,8 +48,16 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
   const [lastFile, setLastFile] = useState<File | null>(null)
   const [showRetry, setShowRetry] = useState(false)
 
-  const { setFramesData, setBlobUrl, setLocalVideoUrl, setProcessing, isProcessing, setShotType: persistShotType } =
-    usePoseStore()
+  const {
+    setFramesData,
+    setBlobUrl,
+    setLocalVideoUrl,
+    setProcessing,
+    isProcessing,
+    setShotType: persistShotType,
+    setExtractorBackend,
+    setFallbackReason,
+  } = usePoseStore()
 
   const { extract, progress: extractProgress, error: extractError, isProcessing: extracting, abort } = usePoseExtractor()
 
@@ -121,6 +129,7 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     let result: ExtractResult | null = null
     let usedRailway = false
     let pendingSessionId: string | null = null
+    let railwayFailReason: string | null = null
 
     // Railway path: create the session row FIRST (so Railway has something
     // to write back to), then ask Railway to extract, then poll. On any
@@ -136,7 +145,24 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
           body: JSON.stringify({ blobUrl, shotType }),
         })
         if (!pendingRes.ok) {
-          throw new Error(`create-pending failed: ${pendingRes.status}`)
+          // Surface the underlying error detail (e.g. Supabase RLS message,
+          // 'Missing service key' env failure) so the chip shows *why*,
+          // not just the HTTP status. Falls back to the raw body text if
+          // the response isn't JSON.
+          let detail = ''
+          try {
+            const errBody = await pendingRes.json()
+            detail = errBody?.detail || errBody?.error || ''
+          } catch {
+            try {
+              detail = await pendingRes.text()
+            } catch {
+              detail = ''
+            }
+          }
+          throw new Error(
+            `create-pending failed: ${pendingRes.status}${detail ? ` (${detail})` : ''}`,
+          )
         }
         const pendingBody = await pendingRes.json()
         pendingSessionId = pendingBody.sessionId
@@ -152,10 +178,22 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         // Any failure falls back to in-browser extraction silently.
         // Log the reason so we can tell 'Railway not configured' (normal
         // during staging) from 'Railway errored out' (needs attention).
+        // Concatenate reason + the underlying Error.message so the
+        // diagnostic chip shows BOTH the category ('error-status') and
+        // the actual Railway error text ('OOM', 'CUDA out of memory',
+        // 'YOLO failed: ...'). The category alone is rarely actionable.
         if (err instanceof RailwayExtractError) {
-          console.info('[UploadZone] Railway path unavailable, falling back to browser:', err.reason)
+          console.info(
+            '[UploadZone] Railway path unavailable, falling back to browser:',
+            err.reason, err.message,
+          )
+          railwayFailReason =
+            err.message && err.message !== err.reason
+              ? `${err.reason}: ${err.message}`
+              : err.reason
         } else {
           console.error('[UploadZone] Railway path errored, falling back to browser:', err)
+          railwayFailReason = err instanceof Error ? err.message : 'unknown'
         }
         result = null
       }
@@ -199,6 +237,13 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         setBusy(false)
         return
       }
+      // If we ended up here AFTER attempting Railway, the user's actual
+      // pose data is browser-mediapipe but they were *expecting* server
+      // extraction — distinguish so the diagnostic chip can warn (red)
+      // rather than just informing (yellow).
+      if (USE_RAILWAY_EXTRACT) {
+        result = { ...result, extractorBackend: 'rtmpose-browser-fallback' }
+      }
     }
 
     setOverallProgress(95)
@@ -240,6 +285,10 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     const playbackUrl = usedRailway ? URL.createObjectURL(file) : result.objectUrl
     setLocalVideoUrl(playbackUrl)
     setFramesData(result.frames)
+    setExtractorBackend(result.extractorBackend)
+    setFallbackReason(
+      result.extractorBackend === 'rtmpose-browser-fallback' ? railwayFailReason : null,
+    )
     persistShotType(shotType)
     setOverallProgress(100)
     setStatusMsg(

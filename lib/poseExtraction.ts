@@ -9,12 +9,37 @@ import {
 } from '@/lib/poseSmoothing'
 import type { PoseFrame, Landmark } from '@/lib/supabase'
 
+// Which extraction backend produced these frames. Surfaced in the UI as
+// a small diagnostic chip — when tracing looks bad, the chip tells us in
+// 10 seconds which path the user is on. Phase 5 retired the MediaPipe
+// browser backend in favor of the same RTMPose-m ONNX model that runs
+// server-side, but the chip distinguishes them so a regression like
+// "live keypoints look wrong" is observable in 10s without DevTools.
+export type ExtractorBackend =
+  | 'rtmpose-railway'
+  | 'mediapipe-railway'
+  | 'rtmpose-browser'
+  | 'rtmpose-browser-fallback'
+
+// When the Railway path silently falls back to browser, this is *why*.
+// Surfaced in the diagnostic chip so the user can read off the failure
+// mode without opening DevTools — the difference between "Vercel env
+// var missing" and "Railway crashed at runtime" is decisive for what to
+// fix next.
+export type FallbackReason =
+  | 'not-configured'   // /api/extract returned 503 — Vercel env missing
+  | 'queue-failed'     // Railway rejected the job (e.g. auth 401, bad URL)
+  | 'error-status'     // Railway started the job, then errored mid-extract
+  | 'timeout'          // Railway took > 180s (OOM? model load? cold start?)
+  | 'aborted'          // user navigated away
+
 export type ExtractResult = {
   frames: PoseFrame[]
   fps: number
   // The object URL created for the hidden <video>. Caller is responsible for
   // revoking it (or handing it off for playback). Null on abort.
   objectUrl: string | null
+  extractorBackend: ExtractorBackend
 }
 
 export type ExtractOptions = {
@@ -261,12 +286,22 @@ export async function extractPoseFromVideo(
     // Return the EFFECTIVE fps the loop actually used so downstream
     // smoothing / swing-detection windows compute against real timing.
     // Returning the requested fps would lie about the data density.
-    return { frames: cleaned, fps: effectiveFps, objectUrl }
+    return {
+      frames: cleaned,
+      fps: effectiveFps,
+      objectUrl,
+      extractorBackend: 'rtmpose-browser',
+    }
   } catch (err) {
     // On abort or error, release the object URL — nobody's going to use it
     URL.revokeObjectURL(objectUrl)
     if (err instanceof AbortError) {
-      return { frames: [], fps, objectUrl: null }
+      return {
+        frames: [],
+        fps,
+        objectUrl: null,
+        extractorBackend: 'rtmpose-browser',
+      }
     }
     throw err
   } finally {
