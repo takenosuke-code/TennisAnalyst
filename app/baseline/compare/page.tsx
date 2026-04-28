@@ -167,34 +167,36 @@ export default function BaselineComparePage() {
       }
     }
 
-    // Browser MediaPipe fallback (or primary path when the feature flag
-    // is off). Always runs the local extractor so we still produce an
-    // object URL for inline playback even when Railway succeeded.
+    // Railway-success fast path: skip the browser extractor entirely.
+    // The browser extractor (now onnxruntime-web RTMPose via
+    // lib/browserPose) is heavy to load and can hang on iPhone Safari
+    // if WASM init is slow — running it just to get an object URL is
+    // wasted work that turns "Railway worked" into "stuck upload."
+    // Mirrors the `usedRailway ? createObjectURL(file) : result.objectUrl`
+    // pattern in components/UploadZone.tsx.
+    if (frames && railwayBackend) {
+      if (todayObjectUrl) URL.revokeObjectURL(todayObjectUrl)
+      setTodayObjectUrl(URL.createObjectURL(file))
+      setTodayFrames(frames)
+      setTodayExtractorBackend(railwayBackend)
+      setTodayFallbackReason(null)
+      setSelectedTodaySwing(null)
+      return
+    }
+
+    // Browser fallback (Railway disabled, errored, or returned empty).
     const localResult = await extract(file)
     if (!localResult) return
     if (todayObjectUrl) URL.revokeObjectURL(todayObjectUrl)
     setTodayObjectUrl(localResult.objectUrl)
-
-    // Prefer Railway frames (better quality) when available; fall back
-    // to the browser MediaPipe frames otherwise.
-    setTodayFrames(frames ?? localResult.frames)
-    // Tag the chip: railway backend if we have railway frames, else
-    // 'rtmpose-browser-fallback' (Railway was attempted and missed)
-    // when the flag is on, else plain 'rtmpose-browser'.
-    if (frames && railwayBackend) {
-      setTodayExtractorBackend(railwayBackend)
-      setTodayFallbackReason(null)
-    } else if (USE_RAILWAY_EXTRACT) {
+    setTodayFrames(localResult.frames)
+    if (USE_RAILWAY_EXTRACT) {
       setTodayExtractorBackend('rtmpose-browser-fallback')
       setTodayFallbackReason(railwayFailReason)
     } else {
       setTodayExtractorBackend(localResult.extractorBackend)
       setTodayFallbackReason(null)
     }
-
-    // Reset the per-swing selection on a new upload so the previous
-    // clip's selection doesn't leak into a clip that may not have
-    // that many swings.
     setSelectedTodaySwing(null)
   }
 
