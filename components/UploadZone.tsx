@@ -4,7 +4,7 @@ import { useRef, useState, useEffect } from 'react'
 import { upload } from '@vercel/blob/client'
 import { usePoseStore } from '@/store'
 import { usePoseExtractor } from '@/hooks/usePoseExtractor'
-import { getPoseLandmarker } from '@/lib/mediapipe'
+import { createPoseDetector } from '@/lib/browserPose'
 import { extractPoseViaRailway, RailwayExtractError } from '@/lib/poseExtractionRailway'
 import type { ExtractResult } from '@/lib/poseExtraction'
 import type { PoseFrame } from '@/lib/supabase'
@@ -169,13 +169,16 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     if (!result) {
       setOverallProgress(15)
       setStatusMsg('Loading pose model...')
-      // Explicit model-load step. First-time users wait ~5-15s for the
-      // pose_landmarker_heavy weights to download from MediaPipe's CDN.
-      // Indeterminate spinner is rendered while this resolves so the
-      // wait reads as "actively loading", not "stuck progress bar".
+      // Explicit model-load step. First-time users wait ~5-15s while
+      // YOLO11n + RTMPose-m weights download (then cache via the
+      // loadModel layer). Indeterminate spinner reads as "actively
+      // loading", not "stuck progress bar". We instantiate + dispose a
+      // detector here purely to warm the cache; the real extraction
+      // call below creates its own detector against the now-warm cache.
       setModelLoading(true)
       try {
-        await getPoseLandmarker()
+        const warmup = await createPoseDetector()
+        warmup.dispose()
       } catch {
         setStatusMsg('Failed to load pose model. Check your connection and tap Retry.')
         setShowRetry(true)
