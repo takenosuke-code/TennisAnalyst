@@ -40,6 +40,14 @@ interface LiveStore {
   ttsEnabled: boolean
   ttsAvailable: boolean
 
+  // True while a coach request is awaiting a response. Phase 3
+  // visibility surface — drives the "Listening to your last few
+  // swings…" pulse on the transcript header. Mirrored from
+  // useLiveCoach.isRequestInFlight() by LiveCapturePanel; we don't
+  // mutate it from inside useLiveCoach so the batching path stays
+  // untouched.
+  coachRequestInFlight: boolean
+
   setStatus: (status: LiveStatus) => void
   setErrorMessage: (msg: string | null) => void
   setShotType: (t: LiveShotType) => void
@@ -52,6 +60,7 @@ interface LiveStore {
   clearTranscript: () => void
   setTtsEnabled: (v: boolean) => void
   setTtsAvailable: (v: boolean) => void
+  setCoachRequestInFlight: (v: boolean) => void
   resetSession: () => void
 }
 
@@ -68,6 +77,7 @@ const INITIAL: Pick<
   | 'transcript'
   | 'ttsEnabled'
   | 'ttsAvailable'
+  | 'coachRequestInFlight'
 > = {
   status: 'idle',
   errorMessage: null,
@@ -80,6 +90,7 @@ const INITIAL: Pick<
   transcript: [],
   ttsEnabled: true,
   ttsAvailable: false,
+  coachRequestInFlight: false,
 }
 
 export const useLiveStore = create<LiveStore>((set) => ({
@@ -97,6 +108,7 @@ export const useLiveStore = create<LiveStore>((set) => ({
   clearTranscript: () => set({ transcript: [] }),
   setTtsEnabled: (ttsEnabled) => set({ ttsEnabled }),
   setTtsAvailable: (ttsAvailable) => set({ ttsAvailable }),
+  setCoachRequestInFlight: (coachRequestInFlight) => set({ coachRequestInFlight }),
   resetSession: () =>
     set({
       status: 'idle',
@@ -105,5 +117,6 @@ export const useLiveStore = create<LiveStore>((set) => ({
       lastBatchAtMs: null,
       sessionStartedAtMs: null,
       transcript: [],
+      coachRequestInFlight: false,
     }),
 }))
