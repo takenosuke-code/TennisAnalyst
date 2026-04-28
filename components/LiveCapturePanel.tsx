@@ -8,6 +8,7 @@ import { useLiveCoach } from '@/hooks/useLiveCoach'
 import { useLiveStore, type LiveStatus } from '@/store/live'
 import { usePoseStore } from '@/store'
 import { renderPose } from './PoseRenderer'
+import { createStreamingLandmarkSmoother } from '@/lib/poseSmoothing'
 import { JOINT_GROUPS, type JointGroup } from '@/lib/jointAngles'
 import type { PoseFrame } from '@/lib/supabase'
 import {
@@ -269,6 +270,14 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
 
     let cancelled = false
     let sizedKey: string | null = null
+    // Streaming One Euro smoother for the rendered skeleton. Causal so
+    // it adds at most one frame of phase lag, but cancels the per-frame
+    // jitter that otherwise makes live joint dots look noisier than the
+    // post-hoc /analyze view (which gets filtfilt zero-phase smoothing).
+    // Detector input is left raw — gates and swing detector see what
+    // the model produced, only the on-screen skeleton is smoothed.
+    const renderSmoother = createStreamingLandmarkSmoother()
+    let lastRenderedFrameIndex = -1
 
     const draw = () => {
       if (cancelled) return
@@ -297,6 +306,22 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
 
       const frame = latestFrameRef.current
       if (frame && logicalW > 0 && logicalH > 0) {
+        // Smooth only when a NEW frame has arrived; rAF runs at ~60Hz
+        // but pose ticks at ~15Hz, so we'd otherwise feed the smoother
+        // the same landmarks 4× per pose tick and falsely zero out its
+        // derivative.
+        const isNewFrame = frame.frame_index !== lastRenderedFrameIndex
+        const renderFrame = isNewFrame
+          ? {
+              ...frame,
+              landmarks: renderSmoother.smooth(
+                frame.landmarks,
+                frame.timestamp_ms / 1000,
+              ),
+            }
+          : frame
+        if (isNewFrame) lastRenderedFrameIndex = frame.frame_index
+
         // Swing-detected pulse: dim joint dots from alpha 1.0 → 0.4
         // over SWING_PULSE_DURATION_MS, then snap back to 1.0. We
         // drive this through renderPose's `scale` (alpha multiplier)
@@ -313,7 +338,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
           alphaScale = 1 - t * 0.6 // 1.0 → 0.4
         }
 
-        renderPose(ctx, frame, logicalW, logicalH, {
+        renderPose(ctx, renderFrame, logicalW, logicalH, {
           visible: ALL_JOINT_GROUPS_VISIBLE,
           showSkeleton: true,
           scale: alphaScale,
@@ -332,9 +357,12 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         rafHandleRef.current = null
       }
       // Drop the latest-frame reference so a stale skeleton doesn't
-      // flash if recording restarts before MediaPipe produces its
-      // first new frame.
+      // flash if recording restarts before the next session produces
+      // its first frame.
       latestFrameRef.current = null
+      // Reset the streaming smoother — next session starts with no
+      // accumulated state.
+      renderSmoother.reset()
       // Reset pose quality so the pill clears between sessions.
       setPoseQuality(null)
     }

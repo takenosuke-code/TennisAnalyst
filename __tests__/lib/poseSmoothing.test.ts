@@ -6,6 +6,7 @@ import {
   isBodyVisible,
   smoothFrames,
   filterImplausibleArmJoints,
+  createStreamingLandmarkSmoother,
 } from '@/lib/poseSmoothing'
 import { LANDMARK_INDICES } from '@/lib/jointAngles'
 import { makeLandmark, makeFrame, makeStandingPose } from '../helpers'
@@ -555,5 +556,88 @@ describe('smoothFrames', () => {
         expect(lm.x).toBeCloseTo(orig.x, 3)
       }
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// createStreamingLandmarkSmoother (Phase 5 follow-up)
+// ---------------------------------------------------------------------------
+
+describe('createStreamingLandmarkSmoother', () => {
+  it('returns the input verbatim on the very first call (seed = first sample)', () => {
+    const smoother = createStreamingLandmarkSmoother()
+    const lms = [makeLandmark(0, 0.5, 0.5, 0.9)]
+    const out = smoother.smooth(lms, 0)
+    expect(out[0].x).toBe(0.5)
+    expect(out[0].y).toBe(0.5)
+    expect(out[0].visibility).toBe(0.9)
+  })
+
+  it('attenuates per-frame jitter on a noisy stationary signal', () => {
+    const smoother = createStreamingLandmarkSmoother()
+    const rawXs: number[] = []
+    const smoothedXs: number[] = []
+    // 30 frames of "subject standing still" with ±0.04 jitter at 30fps.
+    for (let i = 0; i < 30; i++) {
+      const x = 0.5 + (i % 2 === 0 ? 0.04 : -0.04)
+      rawXs.push(x)
+      const out = smoother.smooth([makeLandmark(0, x, 0.5, 0.9)], i / 30)
+      smoothedXs.push(out[0].x)
+    }
+    // Frame-to-frame absolute delta: smoothed must be smaller than raw.
+    const delta = (xs: number[]) =>
+      xs.slice(1).map((v, i) => Math.abs(v - xs[i]))
+    const rawMean = delta(rawXs).reduce((a, b) => a + b, 0) / 29
+    const smMean = delta(smoothedXs).reduce((a, b) => a + b, 0) / 29
+    expect(smMean).toBeLessThan(rawMean)
+  })
+
+  it('preserves visibility unsmoothed (it is a confidence, not a position)', () => {
+    const smoother = createStreamingLandmarkSmoother()
+    smoother.smooth([makeLandmark(0, 0.5, 0.5, 0.9)], 0)
+    const out = smoother.smooth([makeLandmark(0, 0.6, 0.6, 0.2)], 1 / 30)
+    expect(out[0].visibility).toBe(0.2)
+  })
+
+  it('keeps independent state per landmark id', () => {
+    const smoother = createStreamingLandmarkSmoother()
+    smoother.smooth(
+      [makeLandmark(0, 0.5, 0.5, 0.9), makeLandmark(1, 0.2, 0.2, 0.9)],
+      0,
+    )
+    // Push a strong move on landmark 1 only — landmark 0's state must
+    // not be disturbed.
+    const out = smoother.smooth(
+      [makeLandmark(0, 0.5, 0.5, 0.9), makeLandmark(1, 0.8, 0.8, 0.9)],
+      1 / 30,
+    )
+    // Landmark 0 was identical → output ~= 0.5.
+    expect(out[0].x).toBeCloseTo(0.5, 4)
+    // Landmark 1 moved → output is between the previous (0.2) and the
+    // new (0.8); the One Euro filter's job is to attenuate, not freeze.
+    expect(out[1].x).toBeGreaterThan(0.2)
+    expect(out[1].x).toBeLessThan(0.8)
+  })
+
+  it('reset() clears all state — next call seeds from the new sample', () => {
+    const smoother = createStreamingLandmarkSmoother()
+    smoother.smooth([makeLandmark(0, 0.5, 0.5, 0.9)], 0)
+    smoother.smooth([makeLandmark(0, 0.55, 0.55, 0.9)], 1 / 30)
+    smoother.reset()
+    // After reset, a brand new value should pass through verbatim
+    // (seed = first sample), not be blended with the pre-reset state.
+    const out = smoother.smooth([makeLandmark(0, 0.9, 0.9, 0.9)], 0)
+    expect(out[0].x).toBe(0.9)
+    expect(out[0].y).toBe(0.9)
+  })
+
+  it('handles non-monotonic timestamps without crashing', () => {
+    const smoother = createStreamingLandmarkSmoother()
+    smoother.smooth([makeLandmark(0, 0.5, 0.5, 0.9)], 1)
+    // Backwards timestamp: oneEuroStep falls back to FALLBACK_DT
+    // internally; output should still be a finite number.
+    const out = smoother.smooth([makeLandmark(0, 0.55, 0.55, 0.9)], 0.5)
+    expect(Number.isFinite(out[0].x)).toBe(true)
+    expect(Number.isFinite(out[0].y)).toBe(true)
   })
 })

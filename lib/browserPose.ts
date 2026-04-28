@@ -113,12 +113,12 @@ const YOLO_NUM_CLASSES = 80
 const RTMPOSE_INPUT_W = 256
 const RTMPOSE_INPUT_H = 192
 
-// Bbox expansion before RTMPose crop. The Python uses 8% (0.08) but the
-// spec for this phase says ~20% to keep wrist/elbow visible at full
-// extension on tighter YOLO crops in the browser path. Keep this tweakable
-// by future tuning — it's the common knob when keypoint accuracy slips
-// at contact extension.
-const BBOX_EXPAND_PCT = 0.2
+// Bbox expansion before RTMPose crop. Matches the Railway value (8%)
+// after live testing showed the previous 20% padding was wasting input
+// resolution — the player filled less of the 256x192 input, blurring
+// keypoints. /analyze keypoints (server-side at 8%) read as "immaculate"
+// per user; matching the value brings live in line.
+const BBOX_EXPAND_PCT = 0.08
 
 // ImageNet mean/std applied per channel after [0,1] normalization. These
 // are the defaults baked into rtmlib's preprocessing for RTMPose.

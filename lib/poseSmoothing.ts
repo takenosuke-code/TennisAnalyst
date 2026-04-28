@@ -366,6 +366,85 @@ function oneEuroSmooth(
 }
 
 // ---------------------------------------------------------------------------
+// Streaming smoother (Phase 5 follow-up)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-frame causal One Euro smoother for the live render path. The bulk
+ * smoother above (`smoothFrames`) needs the full clip up-front for its
+ * filtfilt pass, which live obviously can't do — but the underlying
+ * `oneEuroStep` is causal, so we can run it incrementally and feed the
+ * result to `renderPose` to get the same buttery skeleton that /analyze
+ * shows post-hoc, at the cost of one frame of phase lag.
+ *
+ * Defaults match the bulk smoother's One Euro params. State is per-
+ * landmark-id so a brief tracking dropout doesn't reset the whole pose.
+ */
+export interface StreamingLandmarkSmoother {
+  /**
+   * Smooth one frame's worth of landmarks against the running state.
+   * `tsSec` is the wall-clock time of the frame in seconds — pass the
+   * same monotonic clock you used for the previous call. Visibility is
+   * passed through unsmoothed (it's a confidence, not a position).
+   */
+  smooth(landmarks: Landmark[], tsSec: number): Landmark[]
+  /** Drop all state — call between sessions. */
+  reset(): void
+}
+
+export interface StreamingSmootherOptions {
+  /** One Euro Filter minimum cutoff frequency (Hz). Default 1.0. */
+  minCutoff?: number
+  /** One Euro Filter speed coefficient. Default 0.007. */
+  beta?: number
+  /** One Euro Filter derivative cutoff (Hz). Default 1.0. */
+  dcutoff?: number
+}
+
+export function createStreamingLandmarkSmoother(
+  opts: StreamingSmootherOptions = {},
+): StreamingLandmarkSmoother {
+  const params: OneEuroParams = {
+    minCutoff: opts.minCutoff ?? DEFAULT_MIN_CUTOFF,
+    beta: opts.beta ?? DEFAULT_BETA,
+    dcutoff: opts.dcutoff ?? DEFAULT_DCUTOFF,
+  }
+
+  let states = new Map<number, OneEuroLandmarkState>()
+
+  return {
+    smooth(landmarks, tsSec) {
+      const out: Landmark[] = new Array(landmarks.length)
+      for (let i = 0; i < landmarks.length; i++) {
+        const lm = landmarks[i]
+        let state = states.get(lm.id)
+        if (!state) {
+          // First time seeing this landmark: seed the filter with the raw
+          // value so the first output equals the input (no phase lag on
+          // the first sample) and subsequent calls have a prevTsSec.
+          state = {
+            x: { initialized: true, prevValue: lm.x, prevDeriv: 0, prevTsSec: tsSec },
+            y: { initialized: true, prevValue: lm.y, prevDeriv: 0, prevTsSec: tsSec },
+            z: { initialized: true, prevValue: lm.z, prevDeriv: 0, prevTsSec: tsSec },
+          }
+          states.set(lm.id, state)
+          out[i] = { ...lm }
+          continue
+        }
+        const sx = oneEuroStep(state.x, lm.x, tsSec, params)
+        const sy = oneEuroStep(state.y, lm.y, tsSec, params)
+        const sz = oneEuroStep(state.z, lm.z, tsSec, params)
+        out[i] = { ...lm, x: sx, y: sy, z: sz }
+      }
+      return out
+    },
+    reset() {
+      states = new Map()
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
