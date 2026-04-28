@@ -293,14 +293,20 @@ def _detect_racket_for_frame(
     processed_index: int,
     timestamp_ms: float | None = None,
     racket_tracker=None,
+    skip_yolo: bool = False,
 ):
     """Shared racket-head detection. Picks the higher-visibility wrist as the
     dominant hand and feeds the racket detector. Routes the result through a
     Kalman `racket_tracker` (when provided) to smooth YOLO jitter and coast
     short motion-blur gaps. Returns None on any failure (logged but never
-    raised)."""
+    raised).
+
+    `skip_yolo=True` bypasses the YOLO call entirely and only feeds None
+    to the tracker (which coasts on its previous estimate). Use when the
+    wrist hasn't moved much between frames — running YOLO on a static
+    arm is wasted compute."""
     yolo_point = None
-    if detect_racket is not None:
+    if detect_racket is not None and not skip_yolo:
         h, w = frame_bgr.shape[:2]
         lw = landmarks[15] if len(landmarks) > 15 else None
         rw = landmarks[16] if len(landmarks) > 16 else None
@@ -331,6 +337,36 @@ def _detect_racket_for_frame(
     if racket_tracker is not None and timestamp_ms is not None:
         return racket_tracker.update(yolo_point, timestamp_ms=timestamp_ms)
     return yolo_point
+
+
+# Below this threshold (in normalized [0,1] frame coords) the dominant
+# wrist is considered "stationary" and we skip the racket-detector
+# YOLO call. 0.005 ≈ 0.5% of frame width; on a 320-wide clip that's
+# ~1.6px of wrist drift per sampled frame, which is well below any
+# real swing motion (a forehand swing moves the wrist ~0.05-0.1 norm
+# per frame at 30fps). The Kalman tracker coasts through skipped
+# frames so the racket trail stays continuous.
+RACKET_MOTION_GATE_NORM = 0.005
+
+
+def _dominant_wrist_norm(landmarks: list[dict]) -> tuple[float, float] | None:
+    """Pick the higher-visibility wrist from a 33-entry landmark list and
+    return its normalized (x, y) coords, or None if neither wrist is
+    visible. Mirrors _detect_racket_for_frame's dominant-hand pick so
+    the motion gate uses the same wrist the racket detector would."""
+    if len(landmarks) <= 16:
+        return None
+    lw = landmarks[15]
+    rw = landmarks[16]
+    if not lw and not rw:
+        return None
+    if lw and rw:
+        dominant = rw if rw["visibility"] >= lw["visibility"] else lw
+    else:
+        dominant = lw or rw
+    if dominant is None or dominant.get("visibility", 0) < 0.1:
+        return None
+    return (dominant["x"], dominant["y"])
 
 
 def _extract_with_rtmpose(
@@ -398,6 +434,15 @@ def _extract_with_rtmpose(
     # first chunk.
     _ensure_rtmpose()
 
+    # Previous-frame dominant wrist position (normalized). Used by the
+    # motion gate to skip the racket-detector YOLO call on frames where
+    # the wrist has barely moved (player setting up / between shots).
+    # Persists across chunk boundaries so the first frame of chunk N+1
+    # compares against the last frame of chunk N rather than blindly
+    # running YOLO on it.
+    prev_wrist_norm: tuple[float, float] | None = None
+    racket_yolo_skipped = 0  # debug telemetry only
+
     # 16-frame chunks bound peak buffered memory (~16 * 1080p ≈ 100MB
     # worst case) while keeping the inference pool busy enough to
     # amortize submit/collect overhead.
@@ -411,7 +456,7 @@ def _extract_with_rtmpose(
         chunk: list[tuple[int, int, np.ndarray]],
         pool: ThreadPoolExecutor,
     ) -> None:
-        nonlocal processed_index
+        nonlocal processed_index, prev_wrist_norm, racket_yolo_skipped
 
         # Stage 1: parallel YOLO across the chunk's frames.
         yolo_futures = [
@@ -464,10 +509,26 @@ def _extract_with_rtmpose(
             joint_angles = compute_joint_angles_from_dicts(
                 landmarks, min_visibility=0.1
             )
+
+            # Motion gate: if the dominant wrist hasn't moved much
+            # since the previous processed frame, skip the racket
+            # YOLO call. The Kalman tracker coasts through.
+            cur_wrist_norm = _dominant_wrist_norm(landmarks)
+            skip_yolo = False
+            if cur_wrist_norm is not None and prev_wrist_norm is not None:
+                dx = cur_wrist_norm[0] - prev_wrist_norm[0]
+                dy = cur_wrist_norm[1] - prev_wrist_norm[1]
+                motion = (dx * dx + dy * dy) ** 0.5
+                if motion < RACKET_MOTION_GATE_NORM:
+                    skip_yolo = True
+                    racket_yolo_skipped += 1
+            prev_wrist_norm = cur_wrist_norm
+
             racket_head = _detect_racket_for_frame(
                 detect_racket, fb, landmarks, processed_index,
                 timestamp_ms=ts,
                 racket_tracker=racket_tracker,
+                skip_yolo=skip_yolo,
             )
             frames.append({
                 "frame_index": processed_index,
