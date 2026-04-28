@@ -97,6 +97,11 @@ export default function VideoCanvas({
 }: VideoCanvasProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  // Tracks the most recent syncedTime so the secondary can detect
+  // primary-video loops (syncedTime drops sharply backward) and force
+  // a hard re-sync rather than relying on the gradual playbackRate
+  // correction loop, which can leave several seconds of visible drift.
+  const prevSyncedTimeRef = useRef<number | null>(null)
   const rafRef = useRef<number>(0)
   const rvfcHandleRef = useRef<number>(0)
   // Once sized for the current videoWidth/Height, avoid re-scaling the ctx
@@ -278,6 +283,7 @@ export default function VideoCanvas({
     if (isSecondary && proStartDelay > 0 && syncedTime < proStartDelay) {
       video.currentTime = 0
       video.pause()
+      prevSyncedTimeRef.current = syncedTime
       return
     }
 
@@ -286,6 +292,31 @@ export default function VideoCanvas({
     let targetTime = syncedTime
     if (isSecondary && timeMapping) {
       targetTime = timeMapping(syncedTime * 1000) / 1000
+    }
+
+    // Loop / replay detection: when syncedTime drops sharply backward,
+    // the primary video has either looped or been scrubbed back to an
+    // earlier point. Snap the secondary to the new mapped position
+    // INSTEAD of letting the gradual playbackRate correction try to
+    // catch up — that path leaves several seconds of visible drift on
+    // every replay, which is the bug the user was seeing get worse on
+    // each replay cycle.
+    const prev = prevSyncedTimeRef.current
+    const isLoopOrSeekBack = isSecondary && prev !== null && syncedTime < prev - 0.5
+    prevSyncedTimeRef.current = syncedTime
+    if (isLoopOrSeekBack) {
+      video.currentTime = targetTime
+      tracerRef.current.reset()
+      lastFrameIndexRef.current = -1
+      // If the primary is still playing, the secondary must resume
+      // playback after the seek — when the secondary's `loop` attribute
+      // was just turned off it can land in an `ended` state where
+      // setting currentTime alone doesn't auto-resume.
+      if (!video.paused || syncPlaying) {
+        video.playbackRate = playbackRate
+        void video.play().catch(() => {})
+      }
+      return
     }
 
     // When paused, use precise seeking for scrubbing
@@ -308,6 +339,10 @@ export default function VideoCanvas({
         video.playbackRate = baseRate
         tracerRef.current.reset()
         lastFrameIndexRef.current = -1
+        // Same resume safeguard as the loop-detection branch above.
+        if (video.ended && (!video.paused || syncPlaying)) {
+          void video.play().catch(() => {})
+        }
       } else if (drift > 0.3) {
         video.playbackRate = baseRate * 1.5
       } else if (drift > 0.1) {
@@ -327,7 +362,7 @@ export default function VideoCanvas({
     video.currentTime = targetTime
     tracerRef.current.reset()
     lastFrameIndexRef.current = -1
-  }, [syncedTime, isSecondary, timeMapping, playbackRate, proStartDelay])
+  }, [syncedTime, isSecondary, timeMapping, playbackRate, proStartDelay, syncPlaying])
 
   // Apply playback rate to the video element (primary only; secondary is managed by sync effect)
   useEffect(() => {
@@ -464,7 +499,13 @@ export default function VideoCanvas({
           className="w-full block"
           playsInline
           muted
-          loop
+          // Only the PRIMARY video auto-loops. If the secondary loops on
+          // its own, both videos cycle independently at different
+          // durations and the sync drifts apart on every replay. The
+          // sync effect explicitly drives the secondary's currentTime
+          // each render, including on primary-loop detection (see the
+          // "loop detected" hard-seek below).
+          loop={!isSecondary}
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
           onDurationChange={handleVideoDurationChange}
