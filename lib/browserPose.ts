@@ -133,9 +133,13 @@ const YOLO_PERSON_CONF_THRESHOLD = 0.15
 const YOLO_NMS_IOU_THRESHOLD = 0.45
 const YOLO_NUM_CLASSES = 80
 
-// RTMPose-m body7 256×192 — the (W=256, H=192) crop fed to the model.
-const RTMPOSE_INPUT_W = 256
-const RTMPOSE_INPUT_H = 192
+// RTMPose-m body7 256x192 — MMPose's "256x192" filename convention is
+// HxW, so H=256, W=192 (a tall portrait crop). Worker B initially coded
+// these swapped; the resulting tensor was interpreted by the model with
+// reversed layout, producing zero keypoint confidence on real input
+// (live test: Y:1-2 KP:0 — diagnosed via the on-screen ONNX pill).
+const RTMPOSE_INPUT_W = 192
+const RTMPOSE_INPUT_H = 256
 
 // Bbox expansion before RTMPose crop. Matches the Railway value (8%)
 // after live testing showed the previous 20% padding was wasting input
