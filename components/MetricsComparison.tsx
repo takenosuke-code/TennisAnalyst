@@ -350,6 +350,8 @@ export default function MetricsComparison({
               proTimings={proTimingsRel}
               swingDurationMs={userSwingDurationMs}
               proSwingDurationMs={proSwingDurationMs}
+              userLabel={userLabel}
+              proLabel={proLabel}
             />
           </div>
         )}

@@ -20,6 +20,11 @@ interface KineticChainTimingBarProps {
    * swingDurationMs when not provided (assumes both bars share a duration).
    */
   proSwingDurationMs?: number
+  // Row labels. Defaulted to "You" / "Pro" for legacy callers; the
+  // baseline-compare path overrides to "Baseline" / "Today" since pro
+  // pose data was retired.
+  userLabel?: string
+  proLabel?: string
 }
 
 const GREEN_WINDOW_MS = 20
@@ -99,6 +104,8 @@ export default function KineticChainTimingBar({
   proTimings,
   swingDurationMs,
   proSwingDurationMs,
+  userLabel = 'You',
+  proLabel = 'Pro',
 }: KineticChainTimingBarProps) {
   const userDur = swingDurationMs > 0 ? swingDurationMs : 1
   const proDur =
@@ -122,7 +129,7 @@ export default function KineticChainTimingBar({
       <div>
         <div className="flex items-center justify-between mb-1">
           <span className="text-xs font-semibold text-white/70 uppercase tracking-wider">
-            You
+            {userLabel}
           </span>
           <span className="text-[10px] text-white/40 tabular-nums">
             {Math.round(userDur)} ms
@@ -138,7 +145,7 @@ export default function KineticChainTimingBar({
       <div>
         <div className="flex items-center justify-between mb-1">
           <span className="text-xs font-semibold text-white/70 uppercase tracking-wider">
-            Pro
+            {proLabel}
           </span>
           <span className="text-[10px] text-white/40 tabular-nums">
             {Math.round(proDur)} ms
