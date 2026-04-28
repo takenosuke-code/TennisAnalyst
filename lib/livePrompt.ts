@@ -8,14 +8,46 @@ import type { SkillTier, UserProfile } from './profile'
 
 export const LIVE_SYSTEM_PROMPT = `You are a tennis coach yelling one short cue across the net between points. The player hears this through earbuds while hitting. They cannot stop to read anything.
 
-STRICT RULES (non-negotiable):
-- Respond with exactly ONE sentence.
+OUTPUT RULES (non-negotiable):
+- Respond with exactly ONE sentence, OR with an empty response if the swings already look clean and you have nothing concrete to say.
 - At most 25 words.
-- No markdown. No lists. No numbers. No headings. No degrees or measurement units.
+- No markdown. No lists. No numbers. No headings. No degree symbols or measurement units, EXCEPT a single short observed detail in parentheses (see EVIDENCE rules below) is allowed.
 - Feel-based and external-focus. Talk like a coach giving a quick cue, not a writer.
 - Summarize the whole batch as one observation. Never walk through the swings one by one.
 - Never greet. Never sign off. No meta-commentary like "here's your cue".
-- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as connectors or pause markers. Use commas, periods, "and", or "but". Compound-word hyphens inside one word ("feel-based") are fine.`
+- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as connectors or pause markers. Use commas, periods, "and", or "but". Compound-word hyphens inside one word ("feel-based") are fine.
+
+SILENCE IS A FIRST-CLASS RESPONSE:
+- If the swings already look clean, the right answer is silence or a one-line affirmation. Do not invent a refinement just to fill the slot.
+- Valid silence/affirmation responses look like:
+    "Clean — repeat that."
+    "Trust that swing, do it again."
+    "Same swing, again."
+    "That's the one — keep it."
+    "Lock that in."
+- Returning an empty response is also valid; the player will hear nothing and keep swinging.
+
+WHAT YOU CAN COMMENT ON (only these):
+- Joint angles that appear in the angleSummary (elbow, shoulder, knee, hip, trunk).
+- Peak frame timing — early, late, or on time relative to the keyframes shown.
+- Before/after symmetry across the swings in the batch (e.g., "first two were tighter than the last two").
+- Hip rotation magnitude and trunk rotation magnitude, when those numbers are in the summary.
+
+WHAT YOU CANNOT COMMENT ON (zero tolerance — these are not in the data you receive):
+- Grip type or grip changes (Eastern, Semi-Western, Continental, etc.).
+- Wrist pronation, supination, or wrist-lay-back specifics.
+- Footwork direction, split-step, recovery, or stance type.
+- Target, court line, depth, or where the ball lands.
+- The opponent, the score, or anything tactical.
+- Anything you would normally infer from a video — you do not have video, only joint angles.
+
+EVIDENCE (soft preference, not required):
+- When you reference a measurement, it helps to include one short observed detail in parens, e.g. "Hip rotation looked closed (28°). Open up earlier." Keep it to ONE measurement and only if it makes the cue more concrete.
+- Do NOT force a number into every cue. A clean feel-based cue with no number is better than a gimmicky number-stuffed cue.
+
+PRIOR CUES (when provided):
+- If you see "RECENT CUES" below, those are what the player has already heard this session.
+- Do not repeat a recent cue verbatim. Either pivot to a different observable issue, acknowledge persistence ("still seeing the early finish — let the racket pass your hip first"), or stay silent.`
 
 // Short live-mode guidance per tier. Kept separate from TIER_RULES in
 // lib/profile.ts (which shape multi-section markdown output) so the live
@@ -28,7 +60,7 @@ const LIVE_TIER_CUES: Record<SkillTier, string> = {
   competitive:
     'Tier is competitive. Use one execution cue focused on matchplay polish: timing, target, or finish direction.',
   advanced:
-    "Tier is advanced. Default to reinforcing what's clean. Only give a cue if you see a concrete micro-refinement.",
+    "Tier is advanced. Default to silence or a one-line affirmation. Only give a cue if you see a concrete micro-refinement in the angleSummary.",
 }
 
 export interface LivePromptSwing {
@@ -44,6 +76,22 @@ export interface LivePromptContext {
   swings: LivePromptSwing[]
   baselineSummary?: string | null
   baselineLabel?: string | null
+  // Last few cues spoken to the player this session, oldest -> newest.
+  // Used so the model can pivot, acknowledge persistence, or stay silent
+  // instead of repeating itself.
+  recentCues?: string[] | null
+}
+
+export interface LivePromptResult {
+  // The fully assembled user-message text passed to the LLM.
+  prompt: string
+  // True when the prompt explicitly steered the model toward the
+  // silence/affirmation "baseline" path. Currently set when the player's
+  // tier is advanced — they get the same default-to-silence framing the
+  // /analyze advanced template provides. This flag is plumbed straight
+  // into the analysis_events.used_baseline_template telemetry column so
+  // live and post-hoc cohorts can be compared apples-to-apples.
+  usedBaselineTemplate: boolean
 }
 
 function formatMs(ms: number): string {
@@ -61,8 +109,40 @@ function buildPlayerLine(profile: UserProfile): string {
   return `Player is ${hand}, ${backhand}. Stated focus: ${profile.primary_goal}${goalNote}.`
 }
 
-export function buildLiveCoachingPrompt(ctx: LivePromptContext): string {
-  const { profile, skipped, shotType, swings, baselineSummary, baselineLabel } = ctx
+function sanitizeRecentCues(cues: string[] | null | undefined): string[] {
+  if (!Array.isArray(cues)) return []
+  const out: string[] = []
+  for (const raw of cues) {
+    if (typeof raw !== 'string') continue
+    const trimmed = raw.replace(/\s+/g, ' ').trim()
+    if (trimmed.length === 0) continue
+    // Keep them short — three cues * ~200 chars is plenty of memory.
+    out.push(trimmed.slice(0, 200))
+  }
+  // We only show the model the last 3 cues so the prompt doesn't bloat as the
+  // session goes on. Caller can pass more — we slice here as defense in depth.
+  return out.slice(-3)
+}
+
+/**
+ * Build the user-message body for the live coaching call.
+ *
+ * Returns both the prompt text and a `usedBaselineTemplate` flag so the
+ * caller can record truthful telemetry. The flag is true when the prompt
+ * was framed in the silence-by-default ("baseline") shape — currently the
+ * advanced-tier path. Mirrors the /analyze route's used_baseline_template
+ * field so the two cohorts are directly comparable.
+ */
+export function buildLiveCoachingPrompt(ctx: LivePromptContext): LivePromptResult {
+  const {
+    profile,
+    skipped,
+    shotType,
+    swings,
+    baselineSummary,
+    baselineLabel,
+    recentCues,
+  } = ctx
 
   const tier: SkillTier | null = profile?.skill_tier ?? null
   const tierLine = tier
@@ -84,14 +164,31 @@ export function buildLiveCoachingPrompt(ctx: LivePromptContext): string {
 
   const countWord = swings.length === 1 ? shotType : `${shotType}s`
 
+  const sanitizedCues = sanitizeRecentCues(recentCues)
+  const recentCuesBlock =
+    sanitizedCues.length > 0
+      ? `RECENT CUES (already spoken to this player this session, oldest first):\n${sanitizedCues
+          .map((c, i) => `${i + 1}. ${c}`)
+          .join('\n')}`
+      : ''
+
+  const usedBaselineTemplate = tier === 'advanced'
+  const closingDirective = usedBaselineTemplate
+    ? 'If this batch is clean for an advanced player, respond with silence or one short affirmation ("Clean — repeat that.", "Trust that swing, do it again."). Only give a refinement cue if you can name one concrete observable detail from the angleSummary.'
+    : 'Give ONE cue for the next ball, OR stay silent if the batch is already clean. One sentence. Max 25 words.'
+
   const sections = [
     `They just hit ${swings.length} ${countWord} in a row.`,
     tierLine,
     profile ? buildPlayerLine(profile) : null,
     baselineBlock || null,
+    recentCuesBlock || null,
     `LAST ${swings.length} ${swings.length === 1 ? 'SWING' : 'SWINGS'}:\n${swingLines}`,
-    'Give ONE cue for the next ball. One sentence. Max 25 words.',
+    closingDirective,
   ].filter((s): s is string => typeof s === 'string' && s.length > 0)
 
-  return sections.join('\n\n')
+  return {
+    prompt: sections.join('\n\n'),
+    usedBaselineTemplate,
+  }
 }
