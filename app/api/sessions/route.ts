@@ -11,8 +11,11 @@ import { supabaseAdmin } from '@/lib/supabase'
 // 2. Railway-extraction path (new): caller uploaded the blob and wants the
 //    row to exist BEFORE asking Railway to extract. Keypoints come back
 //    later via /api/extract -> Railway -> supabase update. The row is
-//    created with status='pending' and no keypoints_json. The caller polls
-//    /api/sessions/[id] for completion.
+//    created with status='extracting' and no keypoints_json. The caller polls
+//    /api/sessions/[id] for completion. (We use 'extracting' rather than
+//    'pending' because the user_sessions_status_check constraint enforces
+//    the set ('uploaded','extracting','analyzing','complete','error') —
+//    see lib/db/schema.sql:47.)
 export async function POST(request: NextRequest) {
   let body
   try { body = await request.json() }
@@ -24,7 +27,7 @@ export async function POST(request: NextRequest) {
   }
 
   const hasKeypoints = !!keypointsJson
-  const status = hasKeypoints ? 'complete' : 'pending'
+  const status = hasKeypoints ? 'complete' : 'extracting'
 
   // Wrap the whole supabaseAdmin path in a try/catch — accessing the
   // proxied client throws synchronously when the service-role env var

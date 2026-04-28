@@ -24,8 +24,8 @@ class RailwayExtractError extends Error {
 
 export type RailwayExtractOptions = {
   // sessionId of a ROW ALREADY CREATED by /api/sessions with
-  // status='pending'. Railway writes keypoints_json back to this row
-  // when it finishes.
+  // status='extracting'. Railway writes keypoints_json back to this
+  // row (and flips status to 'complete' or 'error') when it finishes.
   sessionId: string
   blobUrl: string
   // Called with 0..100. Since Railway's /extract is fire-and-poll,

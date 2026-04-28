@@ -66,9 +66,9 @@ describe('POST /api/sessions', () => {
     expect(res.status).toBe(400)
   })
 
-  it('creates a pending session when keypointsJson is omitted (Railway path)', async () => {
+  it('creates an in-progress session when keypointsJson is omitted (Railway path)', async () => {
     mockSingle.mockResolvedValueOnce({
-      data: { id: 'pending-id', status: 'pending' },
+      data: { id: 'pending-id', status: 'extracting' },
       error: null,
     })
 
@@ -81,12 +81,13 @@ describe('POST /api/sessions', () => {
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.sessionId).toBe('pending-id')
-    // Upsert must carry status='pending' and must NOT carry keypoints_json
+    // Upsert must carry status='extracting' (one of the valid values per
+    // user_sessions_status_check) and must NOT carry keypoints_json
     // (Railway will fill that in when extraction completes).
     expect(mockUpsert).toHaveBeenCalledWith(
       expect.objectContaining({
         blob_url: 'https://blob.test/v.mp4',
-        status: 'pending',
+        status: 'extracting',
       }),
       { onConflict: 'blob_url' },
     )
