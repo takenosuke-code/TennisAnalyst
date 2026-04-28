@@ -15,6 +15,11 @@ export default function LiveCoachingTranscript() {
   const ttsEnabled = useLiveStore((s) => s.ttsEnabled)
   const setTtsEnabled = useLiveStore((s) => s.setTtsEnabled)
   const ttsAvailable = useLiveStore((s) => s.ttsAvailable)
+  // Inline error banner. Set by useLiveCoach when /api/live-coach actually
+  // failed (network / 5xx). Cleared on the next successful batch and on
+  // deliberate silence — so a clean drill that gets silence-as-cue won't
+  // hold the banner up indefinitely.
+  const coachingError = useLiveStore((s) => s.coachingError)
   const listRef = useRef<HTMLUListElement | null>(null)
 
   useEffect(() => {
@@ -46,6 +51,17 @@ export default function LiveCoachingTranscript() {
           </button>
         ) : null}
       </header>
+
+      {coachingError ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="px-4 py-2 text-xs text-amber-200 bg-amber-500/10 border-b border-amber-500/20 flex items-center gap-2"
+        >
+          <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400" />
+          <span>{coachingError}</span>
+        </div>
+      ) : null}
 
       <ul ref={listRef} className="max-h-72 overflow-y-auto divide-y divide-white/5">
         {transcript.length === 0 ? (

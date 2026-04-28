@@ -39,6 +39,12 @@ interface LiveStore {
   transcript: LiveTranscriptEntry[]
   ttsEnabled: boolean
   ttsAvailable: boolean
+  // Set when the most recent /api/live-coach request failed (network /
+  // server error). Cleared when the next batch succeeds OR the model
+  // deliberately returned silence. Surfaces as a visible inline error in
+  // the transcript header so the player isn't left wondering why nothing
+  // is happening.
+  coachingError: string | null
 
   setStatus: (status: LiveStatus) => void
   setErrorMessage: (msg: string | null) => void
@@ -52,6 +58,7 @@ interface LiveStore {
   clearTranscript: () => void
   setTtsEnabled: (v: boolean) => void
   setTtsAvailable: (v: boolean) => void
+  setCoachingError: (msg: string | null) => void
   resetSession: () => void
 }
 
@@ -68,6 +75,7 @@ const INITIAL: Pick<
   | 'transcript'
   | 'ttsEnabled'
   | 'ttsAvailable'
+  | 'coachingError'
 > = {
   status: 'idle',
   errorMessage: null,
@@ -80,6 +88,7 @@ const INITIAL: Pick<
   transcript: [],
   ttsEnabled: true,
   ttsAvailable: false,
+  coachingError: null,
 }
 
 export const useLiveStore = create<LiveStore>((set) => ({
@@ -97,6 +106,7 @@ export const useLiveStore = create<LiveStore>((set) => ({
   clearTranscript: () => set({ transcript: [] }),
   setTtsEnabled: (ttsEnabled) => set({ ttsEnabled }),
   setTtsAvailable: (ttsAvailable) => set({ ttsAvailable }),
+  setCoachingError: (coachingError) => set({ coachingError }),
   resetSession: () =>
     set({
       status: 'idle',
@@ -105,5 +115,6 @@ export const useLiveStore = create<LiveStore>((set) => ({
       lastBatchAtMs: null,
       sessionStartedAtMs: null,
       transcript: [],
+      coachingError: null,
     }),
 }))

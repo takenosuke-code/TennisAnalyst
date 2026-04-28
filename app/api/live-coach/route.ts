@@ -19,6 +19,11 @@ type LiveShotType = 'forehand' | 'backhand' | 'serve' | 'volley'
 const MAX_SWINGS_PER_BATCH = 6
 const MAX_SUMMARY_CHARS = 2000
 const LIVE_MAX_TOKENS = 120
+// Hard cap on how many recent cues we accept from the client. The prompt
+// builder slices to the last 3 anyway; this is a defense-in-depth limit so
+// a misbehaving client can't blow up the request body.
+const MAX_RECENT_CUES = 8
+const MAX_RECENT_CUE_CHARS = 200
 
 type IncomingSwing = {
   angleSummary?: unknown
@@ -96,6 +101,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'No valid swings after sanitization' }, { status: 400 })
   }
 
+  // Optional recentCues: the last few cues the player has already heard this
+  // session. Sanitized + capped so prompt-injection attempts in a returned
+  // coach response can't escape the next round-trip.
+  const rawRecentCues = Array.isArray(b.recentCues) ? (b.recentCues as unknown[]) : []
+  const recentCues: string[] = []
+  for (const raw of rawRecentCues.slice(-MAX_RECENT_CUES)) {
+    if (typeof raw !== 'string') continue
+    const cleaned = sanitizePromptInput(raw, MAX_RECENT_CUE_CHARS)
+    if (cleaned && cleaned.length > 0) recentCues.push(cleaned)
+  }
+
   // Best-effort baseline lookup. Failures never block coaching.
   let baselineSummary: string | null = null
   let baselineLabel: string | null = null
@@ -118,13 +134,14 @@ export async function POST(request: NextRequest) {
     console.error('live-coach baseline lookup failed:', err)
   }
 
-  const prompt = buildLiveCoachingPrompt({
+  const { prompt, usedBaselineTemplate } = buildLiveCoachingPrompt({
     profile,
     skipped,
     shotType,
     swings,
     baselineSummary,
     baselineLabel,
+    recentCues,
   })
 
   const coachedTier: SkillTier | null = profile?.skill_tier ?? null
@@ -200,14 +217,20 @@ export async function POST(request: NextRequest) {
   if (eventId) {
     const charCount = collapsed.length
     const tokenCount = outputTokens
+    // Tip count is 0 when the model deliberately stayed silent (silence is
+    // now a first-class response), 1 otherwise. used_baseline_template is
+    // sourced from the prompt builder so the telemetry actually reflects
+    // whether we routed this batch through the silence-by-default path.
+    const tipCount = collapsed.length === 0 ? 0 : 1
+    const baselineTemplateFlag = usedBaselineTemplate
     after(async () => {
       const { error } = await supabaseAdmin
         .from('analysis_events')
         .update({
           response_token_count: tokenCount,
           response_char_count: charCount,
-          response_tip_count: 1,
-          used_baseline_template: false,
+          response_tip_count: tipCount,
+          used_baseline_template: baselineTemplateFlag,
           llm_assessed_tier: coachedTier,
         })
         .eq('id', eventId)
@@ -221,6 +244,10 @@ export async function POST(request: NextRequest) {
     'X-Content-Type-Options': 'nosniff',
   }
   if (eventId) headers['X-Analysis-Event-Id'] = eventId
+  // Tell the client the empty body was a deliberate silence, not a dropped
+  // response. This is what lets useLiveCoach distinguish "model chose silence"
+  // (no error UI) from "request failed" (show inline error).
+  if (collapsed.length === 0) headers['X-Live-Coach-Silence'] = '1'
 
   return new NextResponse(collapsed, { headers })
 }
