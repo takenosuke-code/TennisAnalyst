@@ -448,8 +448,30 @@ def _extract_with_rtmpose(
         raise ValueError(f"Cannot open video: {video_path}")
 
     video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    frame_interval = max(1, int(video_fps / sample_fps))
+
+    # Adaptive sampling: long clips at 30fps overflow the 180s extraction
+    # timeout (a 2-min clip = 3600 frames * ~30ms/frame = 108s of
+    # inference alone, before download/decode/serialization). Drop the
+    # effective sample rate for long clips so user-uploaded full match
+    # videos still fit the budget. Mirrors the browser-side adaptive
+    # sampling at lib/poseExtraction.ts:184-198.
+    duration_sec_est = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / video_fps
+    if duration_sec_est > 120:
+        effective_sample_fps = min(sample_fps, 8)
+    elif duration_sec_est > 60:
+        effective_sample_fps = min(sample_fps, 12)
+    elif duration_sec_est > 30:
+        effective_sample_fps = min(sample_fps, 18)
+    else:
+        effective_sample_fps = sample_fps
+
+    frame_interval = max(1, int(video_fps / effective_sample_fps))
     max_frame = int(max_seconds * video_fps) if max_seconds > 0 else 0
+    if effective_sample_fps != sample_fps:
+        print(
+            f"[extract:rtmpose] adaptive sample fps: clip is {duration_sec_est:.1f}s, "
+            f"sampling at {effective_sample_fps}fps (was {sample_fps})"
+        )
     frames: list[dict] = []
     frame_index = 0
     processed_index = 0
@@ -597,7 +619,10 @@ def _extract_with_rtmpose(
     total_duration_ms = (total_frames / video_fps) * 1000
 
     return {
-        "fps_sampled": sample_fps,
+        # Report the EFFECTIVE sample rate so downstream code (joint
+        # angle smoothing, swing detection) knows the actual frame
+        # cadence rather than the requested-but-not-applied rate.
+        "fps_sampled": effective_sample_fps,
         "frame_count": len(frames),
         "frames": frames,
         "video_fps": video_fps,

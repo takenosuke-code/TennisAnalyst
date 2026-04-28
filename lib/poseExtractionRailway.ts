@@ -13,10 +13,11 @@ const POLL_INTERVAL_MS = 1000
 
 // Hard client-side timeout (ms). If Railway doesn't report 'complete'
 // within this window, we give up and the caller falls back to browser
-// MediaPipe. Tuned against IMG_1097.mov: 114s clip took ~75s end-to-end
-// on Railway's default CPU tier, so 180s leaves headroom for longer
-// clips or warm-up.
-const EXTRACTION_TIMEOUT_MS = 180_000
+// MediaPipe. Bumped from 180s to 300s so the adaptive-sampling budget
+// for 2+ minute clips actually fits — a 2-min clip even at 8fps still
+// processes ~960 frames, plus video download (~10s for ~30MB) and
+// decode, easily ~120-180s before the speedup margin.
+const EXTRACTION_TIMEOUT_MS = 300_000
 
 class RailwayExtractError extends Error {
   constructor(message: string, public reason: 'not-configured' | 'queue-failed' | 'timeout' | 'error-status' | 'aborted') {
