@@ -209,7 +209,7 @@ export async function POST(request: NextRequest) {
       : buildTierCoachingBlock(null)
 
   const focusBlock = focus
-    ? `\nTHE PLAYER SPECIFICALLY WANTS FEEDBACK ON: "${focus}"\nWeave a direct answer to this into your response. You can still cover the essentials, but this is their priority.\n`
+    ? `\nTHE PLAYER ASKED: "${focus}"\nThis is the QUESTION you must answer. Open your response by directly addressing this exact question in 1 to 2 sentences before anything else. Do not generalize. Do not pivot to unrelated cues. After answering their question, you can add the standard coaching sections, but the question comes first and gets a real answer grounded in their swing data.\n`
     : ''
 
   let prompt: string

@@ -189,19 +189,47 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
             Anything specific you want feedback on?{' '}
             <span className="text-white/30">(optional)</span>
           </label>
-          <textarea
-            value={userFocus}
-            onChange={(e) => setUserFocus(e.target.value)}
-            placeholder={
-              compareMode === 'baseline' && compareFrames?.length
-                ? `e.g. "did my hip rotation hold up?" or "focus on follow-through"`
-                : compareMode === 'custom' && compareFrames?.length
-                  ? `e.g. "why is my second shot flatter?" or "focus on hip rotation"`
-                  : `e.g. "working on topspin" or "am I rotating my hips enough?"`
-            }
-            rows={2}
-            className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/25 focus:outline-none focus:border-emerald-500/40 resize-none"
-          />
+          <div className="relative">
+            <textarea
+              value={userFocus}
+              onChange={(e) => setUserFocus(e.target.value)}
+              onKeyDown={(e) => {
+                // Enter submits, Shift+Enter inserts a newline. Standard
+                // chat-input behavior. Without this, users typed a
+                // question and saw no obvious way to send it short of
+                // scrolling back up to the Analyze button (the
+                // disconnected affordance was the bug being reported).
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  if (canAnalyze && !loading) runAnalysis()
+                }
+              }}
+              placeholder={
+                compareMode === 'baseline' && compareFrames?.length
+                  ? `e.g. "did my hip rotation hold up?" or "focus on follow-through"`
+                  : compareMode === 'custom' && compareFrames?.length
+                    ? `e.g. "why is my second shot flatter?" or "focus on hip rotation"`
+                    : `e.g. "working on topspin" or "am I rotating my hips enough?"`
+              }
+              rows={2}
+              className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 pr-20 text-sm text-white placeholder:text-white/25 focus:outline-none focus:border-emerald-500/40 resize-none"
+            />
+            <button
+              type="button"
+              onClick={runAnalysis}
+              disabled={!canAnalyze || loading}
+              className={`absolute bottom-2 right-2 px-3 py-1 rounded-md text-xs font-semibold transition-colors ${
+                !canAnalyze || loading
+                  ? 'bg-white/10 text-white/30 cursor-not-allowed'
+                  : 'bg-emerald-500 hover:bg-emerald-400 text-white'
+              }`}
+            >
+              Send ↵
+            </button>
+          </div>
+          <p className="text-[11px] text-white/40 mt-1.5">
+            Press Enter to analyze. Shift+Enter for a newline.
+          </p>
         </div>
       )}
 
