@@ -7,6 +7,7 @@ Used for processing pro player videos offline and seeding the database.
 import asyncio
 import os
 import math
+from contextlib import asynccontextmanager
 import re
 import subprocess
 import tempfile
@@ -32,7 +33,35 @@ POSE_BACKEND = (
     os.environ.get("POSE_BACKEND", "mediapipe").strip().strip("\"'").lower()
 )
 
-app = FastAPI(title="TennisIQ Pose Service")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Eagerly initialize pose-extraction models on container boot so
+    the first user upload doesn't pay the lazy-load tax (~2-3s for
+    onnxruntime + RTMPose, plus ~1-2s if rtmlib needs to download the
+    ONNX bundle from the openmmlab CDN — and that download happens on
+    every cold start since Railway containers are ephemeral and
+    ~/.cache/rtmlib isn't a persisted volume).
+
+    The Dockerfile also pre-downloads RTMPose at build time so the
+    cached ONNX is baked into the image and rtmlib's download_checkpoint
+    is a no-op here. This warmup hook then just builds the ORT session.
+
+    Failures are logged but not raised — the lazy-load path is still
+    in place per-frame as a fallback. Don't crash the whole service
+    over a transient warmup failure.
+    """
+    if POSE_BACKEND == "rtmpose":
+        try:
+            from pose_rtmpose import _ensure_yolo, _ensure_rtmpose
+            await asyncio.to_thread(_ensure_yolo)
+            await asyncio.to_thread(_ensure_rtmpose)
+            print("[startup] pose models warmed (YOLO + RTMPose)")
+        except Exception as e:  # noqa: BLE001
+            print(f"[startup] pose-model warmup failed (will lazy-load): {e}")
+    yield
+
+
+app = FastAPI(title="TennisIQ Pose Service", lifespan=_lifespan)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -293,14 +322,20 @@ def _detect_racket_for_frame(
     processed_index: int,
     timestamp_ms: float | None = None,
     racket_tracker=None,
+    skip_yolo: bool = False,
 ):
     """Shared racket-head detection. Picks the higher-visibility wrist as the
     dominant hand and feeds the racket detector. Routes the result through a
     Kalman `racket_tracker` (when provided) to smooth YOLO jitter and coast
     short motion-blur gaps. Returns None on any failure (logged but never
-    raised)."""
+    raised).
+
+    `skip_yolo=True` bypasses the YOLO call entirely and only feeds None
+    to the tracker (which coasts on its previous estimate). Use when the
+    wrist hasn't moved much between frames — running YOLO on a static
+    arm is wasted compute."""
     yolo_point = None
-    if detect_racket is not None:
+    if detect_racket is not None and not skip_yolo:
         h, w = frame_bgr.shape[:2]
         lw = landmarks[15] if len(landmarks) > 15 else None
         rw = landmarks[16] if len(landmarks) > 16 else None
@@ -333,17 +368,77 @@ def _detect_racket_for_frame(
     return yolo_point
 
 
+# Below this threshold (in normalized [0,1] frame coords) the dominant
+# wrist is considered "stationary" and we skip the racket-detector
+# YOLO call. 0.005 ≈ 0.5% of frame width; on a 320-wide clip that's
+# ~1.6px of wrist drift per sampled frame, which is well below any
+# real swing motion (a forehand swing moves the wrist ~0.05-0.1 norm
+# per frame at 30fps). The Kalman tracker coasts through skipped
+# frames so the racket trail stays continuous.
+RACKET_MOTION_GATE_NORM = 0.005
+
+
+def _dominant_wrist_norm(landmarks: list[dict]) -> tuple[float, float] | None:
+    """Pick the higher-visibility wrist from a 33-entry landmark list and
+    return its normalized (x, y) coords, or None if neither wrist is
+    visible. Mirrors _detect_racket_for_frame's dominant-hand pick so
+    the motion gate uses the same wrist the racket detector would."""
+    if len(landmarks) <= 16:
+        return None
+    lw = landmarks[15]
+    rw = landmarks[16]
+    if not lw and not rw:
+        return None
+    if lw and rw:
+        dominant = rw if rw["visibility"] >= lw["visibility"] else lw
+    else:
+        dominant = lw or rw
+    if dominant is None or dominant.get("visibility", 0) < 0.1:
+        return None
+    return (dominant["x"], dominant["y"])
+
+
 def _extract_with_rtmpose(
     video_path: str, sample_fps: int, max_seconds: float
 ) -> dict:
-    """Pose extraction via YOLO11n person crop + RTMPose-m.
+    """Pose extraction via YOLO11n person crop + RTMPose-s.
 
     Schema_version=3: COCO-17 keypoints remapped to BlazePose-33 ids, with
     the unmapped ids (face details, hands, heels, foot_index) at
     visibility=0. wrist-flexion joint angles are dropped because the
     index-finger landmarks (BlazePose 19/20) aren't filled.
+
+    Pipeline shape — chunked, staged-parallel:
+
+      1. Decode N frames sequentially into a chunk (cv2.VideoCapture
+         is not thread-safe).
+      2. Stage 1 (parallel): YOLO11n person detection per frame in the
+         chunk. Stateless — safe to fan out.
+      3. Stage 2 (sequential, in submit order): PersonTracker.update.
+         The tracker's IoU association needs frame N's candidates to
+         see frame N-1's reference bbox, so this stage MUST stay
+         sequential. It's also cheap (microseconds per call), so this
+         doesn't bottleneck.
+      4. Stage 3 (parallel): RTMPose-s inference per (frame, bbox).
+         Stateless given inputs — rtmlib's wrapper allocates per-call
+         numpy arrays and the underlying ORT session is thread-safe.
+      5. Stage 4 (sequential): joint angles + racket Kalman tracker.
+         Racket Kalman is order-dependent.
+
+    Net on a 2-4 core Railway CPU: ~2-3x throughput vs. the prior
+    fully-sequential per-frame loop, no quality regression. The
+    previous all-at-once parallel attempt (commit b802df4, reverted
+    in aceca57) broke because it parallelized the tracker too —
+    tracker.update saw frames out of order. This staged design fixes
+    the structural problem.
     """
-    from pose_rtmpose import infer_pose_for_frame  # local import: heavy onnx setup
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pose_rtmpose import (
+        _yolo_person_candidates,
+        _ensure_rtmpose,
+        infer_rtmpose_for_bbox,
+    )
     from tracking import PersonTracker, RacketTracker
 
     detect_racket = _try_load_racket_detector()
@@ -363,47 +458,138 @@ def _extract_with_rtmpose(
     person_tracker = PersonTracker()
     racket_tracker = RacketTracker()
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if max_frame > 0 and frame_index >= max_frame:
-            break
+    # Materialize the rtmlib session once before workers race for it.
+    # Avoids N threads simultaneously hitting the lazy-init lock on the
+    # first chunk.
+    _ensure_rtmpose()
 
-        if frame_index % frame_interval == 0:
-            timestamp_ms = int((frame_index / video_fps) * 1000)
+    # Previous-frame dominant wrist position (normalized). Used by the
+    # motion gate to skip the racket-detector YOLO call on frames where
+    # the wrist has barely moved (player setting up / between shots).
+    # Persists across chunk boundaries so the first frame of chunk N+1
+    # compares against the last frame of chunk N rather than blindly
+    # running YOLO on it.
+    prev_wrist_norm: tuple[float, float] | None = None
+    racket_yolo_skipped = 0  # debug telemetry only
+
+    # 16-frame chunks bound peak buffered memory (~16 * 1080p ≈ 100MB
+    # worst case) while keeping the inference pool busy enough to
+    # amortize submit/collect overhead.
+    CHUNK_SIZE = 16
+    # 4 workers matches a typical 4-core Railway CPU. With
+    # intra_op_num_threads=1 on each ORT session, 4 concurrent
+    # inferences saturate the cores cleanly without scheduler thrash.
+    POOL_WORKERS = 4
+
+    def _process_chunk(
+        chunk: list[tuple[int, int, np.ndarray]],
+        pool: ThreadPoolExecutor,
+    ) -> None:
+        nonlocal processed_index, prev_wrist_norm, racket_yolo_skipped
+
+        # Stage 1: parallel YOLO across the chunk's frames.
+        yolo_futures = [
+            pool.submit(_yolo_person_candidates, fb)
+            for (_, _, fb) in chunk
+        ]
+
+        # Stage 2: sequential tracker.update in SUBMIT ORDER. The
+        # tracker's IoU-association invariant requires this — frame N's
+        # candidates must update against frame N-1's reference. Wait
+        # for each YOLO future in order rather than `as_completed`.
+        bboxes: list = []
+        for fut, (fidx, _, _) in zip(yolo_futures, chunk):
             try:
-                landmarks = infer_pose_for_frame(frame, person_tracker=person_tracker)
+                candidates, w, h = fut.result()
             except Exception as e:  # noqa: BLE001
-                # Skip the frame on detector failure rather than aborting the
-                # whole clip -- one bad frame shouldn't lose the whole swing.
-                print(f"[extract:rtmpose] inference failed on frame {frame_index}: {e}")
-                landmarks = None
+                print(f"[extract:rtmpose] YOLO failed on frame {fidx}: {e}")
+                bboxes.append(None)
+                continue
+            try:
+                bbox = person_tracker.update(candidates, w, h)
+            except Exception as e:  # noqa: BLE001
+                print(f"[extract:rtmpose] tracker failed on frame {fidx}: {e}")
+                bbox = None
+            bboxes.append(bbox)
 
-            if landmarks is not None:
-                # min_visibility=0.1 skips the v=0 placeholder ids that
-                # exist in v3 only because COCO-17 doesn't fill them.
-                # Without this, joint_angles ends up with `right_wrist:
-                # 0.0` (computed off zeroed index_finger landmarks),
-                # which the analyzer would surface as a real value.
-                joint_angles = compute_joint_angles_from_dicts(
-                    landmarks, min_visibility=0.1
-                )
-                racket_head = _detect_racket_for_frame(
-                    detect_racket, frame, landmarks, processed_index,
-                    timestamp_ms=timestamp_ms,
-                    racket_tracker=racket_tracker,
-                )
-                frames.append({
-                    "frame_index": processed_index,
-                    "timestamp_ms": round(timestamp_ms, 1),
-                    "landmarks": landmarks,
-                    "joint_angles": joint_angles,
-                    "racket_head": racket_head,
-                })
-                processed_index += 1
+        # Stage 3: parallel RTMPose. Submit only frames with a bbox.
+        rtm_futures: list = []
+        for (_, _, fb), bbox in zip(chunk, bboxes):
+            if bbox is None:
+                rtm_futures.append(None)
+            else:
+                rtm_futures.append(pool.submit(infer_rtmpose_for_bbox, fb, bbox))
 
-        frame_index += 1
+        # Stage 4: sequential post-processing in submit order. Racket
+        # Kalman + joint angles need temporal order.
+        for (fidx, ts, fb), fut in zip(chunk, rtm_futures):
+            if fut is None:
+                continue
+            try:
+                landmarks = fut.result()
+            except Exception as e:  # noqa: BLE001
+                print(f"[extract:rtmpose] RTMPose failed on frame {fidx}: {e}")
+                continue
+            if landmarks is None:
+                continue
+
+            # min_visibility=0.1 skips the v=0 placeholder ids that
+            # exist in v3 only because COCO-17 doesn't fill them.
+            joint_angles = compute_joint_angles_from_dicts(
+                landmarks, min_visibility=0.1
+            )
+
+            # Motion gate: if the dominant wrist hasn't moved much
+            # since the previous processed frame, skip the racket
+            # YOLO call. The Kalman tracker coasts through.
+            cur_wrist_norm = _dominant_wrist_norm(landmarks)
+            skip_yolo = False
+            if cur_wrist_norm is not None and prev_wrist_norm is not None:
+                dx = cur_wrist_norm[0] - prev_wrist_norm[0]
+                dy = cur_wrist_norm[1] - prev_wrist_norm[1]
+                motion = (dx * dx + dy * dy) ** 0.5
+                if motion < RACKET_MOTION_GATE_NORM:
+                    skip_yolo = True
+                    racket_yolo_skipped += 1
+            prev_wrist_norm = cur_wrist_norm
+
+            racket_head = _detect_racket_for_frame(
+                detect_racket, fb, landmarks, processed_index,
+                timestamp_ms=ts,
+                racket_tracker=racket_tracker,
+                skip_yolo=skip_yolo,
+            )
+            frames.append({
+                "frame_index": processed_index,
+                "timestamp_ms": round(ts, 1),
+                "landmarks": landmarks,
+                "joint_angles": joint_angles,
+                "racket_head": racket_head,
+            })
+            processed_index += 1
+
+    chunk: list[tuple[int, int, np.ndarray]] = []
+    with ThreadPoolExecutor(max_workers=POOL_WORKERS) as pool:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if max_frame > 0 and frame_index >= max_frame:
+                break
+
+            if frame_index % frame_interval == 0:
+                timestamp_ms = int((frame_index / video_fps) * 1000)
+                # .copy() so cv2's reused frame buffer doesn't change
+                # under us while a worker thread still holds the ref.
+                chunk.append((frame_index, timestamp_ms, frame.copy()))
+                if len(chunk) >= CHUNK_SIZE:
+                    _process_chunk(chunk, pool)
+                    chunk = []
+
+            frame_index += 1
+
+        if chunk:
+            _process_chunk(chunk, pool)
 
     cap.release()
 

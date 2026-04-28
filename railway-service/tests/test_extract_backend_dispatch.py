@@ -117,9 +117,16 @@ class TestRtmposeExtractWithStubs:
         import main
         import pose_rtmpose
 
-        # Stub pose inference: every frame returns a synthetic 33-landmark
-        # dict with shoulders / elbows visible.
-        def fake_infer(_frame, person_tracker=None):
+        # The staged-parallel loop in _extract_with_rtmpose calls the
+        # lower-level seams directly (so YOLO and RTMPose can be staged
+        # separately for parallelism). Stub both.
+        def fake_yolo_candidates(_frame):
+            # One person candidate covering most of the frame.
+            return [(10.0, 10.0, 90.0, 90.0, 0.9)], 100, 100
+
+        def fake_rtmpose_for_bbox(_frame, bbox):
+            if bbox is None:
+                return None
             return [
                 {
                     "id": i,
@@ -132,7 +139,11 @@ class TestRtmposeExtractWithStubs:
                 for i in range(33)
             ]
 
-        monkeypatch.setattr(pose_rtmpose, "infer_pose_for_frame", fake_infer)
+        monkeypatch.setattr(pose_rtmpose, "_yolo_person_candidates", fake_yolo_candidates)
+        monkeypatch.setattr(pose_rtmpose, "infer_rtmpose_for_bbox", fake_rtmpose_for_bbox)
+        # _ensure_rtmpose is called once before the chunk loop; stub it
+        # so we don't try to lazy-load real ONNX in tests.
+        monkeypatch.setattr(pose_rtmpose, "_ensure_rtmpose", lambda: None)
 
         # Stub OpenCV VideoCapture so we don't need a real file.
         fake_cap = MagicMock()

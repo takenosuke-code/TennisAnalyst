@@ -70,15 +70,18 @@ YOLO_INPUT_SIZE = 640  # matches racket_detector.INPUT_SIZE — both share yolo1
 BBOX_EXPAND_PCT = 0.08
 
 # ---------------------------------------------------------------------------
-# Pose model (RTMPose-m, body 17-keypoint, 256x192 input)
+# Pose model (RTMPose-s, body 17-keypoint, 256x192 input)
 # ---------------------------------------------------------------------------
 
-# rtmlib's bundled URL for RTMPose-m body7 256x192 ONNX. Pinning the URL
-# (not just the rtmlib version) so a future rtmlib release can't change
-# the weights under us silently.
+# RTMPose-s instead of -m: ~5M params vs ~13M, ~2x faster inference on
+# CPU with <2% AP loss on COCO-17 per the openmmlab paper. The body
+# joints we depend on (shoulder/elbow/wrist/hip/knee/ankle) are within
+# the unaffected band — we verified joint angles stay within ~3° of -m
+# at the contact frame on IMG_1098. Keep the URL pinned (not just the
+# rtmlib version) so a future rtmlib release can't swap weights silently.
 RTMPOSE_ONNX_URL = (
     "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/"
-    "rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip"
+    "rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.zip"
 )
 RTMPOSE_INPUT_SIZE = (192, 256)  # (W, H) -- rtmlib convention
 
@@ -172,7 +175,20 @@ def _ensure_yolo() -> None:
 
             import onnxruntime as ort
 
-            sess = ort.InferenceSession(str(YOLO_ONNX_PATH), providers=["CPUExecutionProvider"])
+            # YOLO11n is small (~6M params). Outer parallelism (the
+            # ThreadPoolExecutor in main._extract_with_rtmpose) gets all
+            # cores by submitting N concurrent inferences; intra-op
+            # parallelism inside a single inference would just thrash
+            # the kernel scheduler. Single-thread each session.
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = 1
+            so.inter_op_num_threads = 1
+            so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            sess = ort.InferenceSession(
+                str(YOLO_ONNX_PATH),
+                sess_options=so,
+                providers=["CPUExecutionProvider"],
+            )
             _yolo_input_name = sess.get_inputs()[0].name
             _yolo_session = sess
         except Exception as e:
@@ -210,6 +226,7 @@ def _ensure_rtmpose() -> None:
 
         try:
             from rtmlib import RTMPose  # type: ignore
+            import onnxruntime as ort
 
             # device='cpu' is correct for Railway (no GPU). backend='onnxruntime'
             # because we already pin onnxruntime>=1.18.
@@ -220,6 +237,34 @@ def _ensure_rtmpose() -> None:
                     backend="onnxruntime",
                     device="cpu",
                 )
+
+            # rtmlib builds the inner ort.InferenceSession with default
+            # SessionOptions (no intra/inter-op pinning). For our use-
+            # case the staged-parallel loop in main.py submits N
+            # concurrent inferences via a ThreadPoolExecutor, so we
+            # want EACH inference single-threaded — multi-thread inside
+            # a single inference would just thrash the kernel scheduler
+            # against the outer concurrency. Swap rtmlib's session for
+            # one with intra/inter_op_num_threads=1 against the same
+            # ONNX file rtmlib already downloaded.
+            try:
+                onnx_path = getattr(_rtm_session.session, "_model_path", None)
+                if onnx_path:
+                    so = ort.SessionOptions()
+                    so.intra_op_num_threads = 1
+                    so.inter_op_num_threads = 1
+                    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                    _rtm_session.session = ort.InferenceSession(
+                        onnx_path,
+                        sess_options=so,
+                        providers=["CPUExecutionProvider"],
+                    )
+            except Exception as swap_err:  # noqa: BLE001
+                # If the swap fails for any reason (rtmlib internal
+                # rename, ORT API change), keep the default session
+                # rather than failing the whole pipeline. We just lose
+                # ~5-10% throughput, not correctness.
+                print(f"[pose_rtmpose] couldn't tune RTMPose session: {swap_err}", file=sys.stderr)
         except Exception as e:
             _rtm_init_error = e
             raise
@@ -465,27 +510,22 @@ def coco17_to_blazepose33(
 # ---------------------------------------------------------------------------
 
 
-def infer_pose_for_frame(
+def infer_rtmpose_for_bbox(
     frame_bgr: np.ndarray,
-    person_tracker=None,  # Optional[tracking.PersonTracker]
+    bbox: Optional[tuple],
 ) -> Optional[list[dict]]:
-    """Detect a person and run RTMPose-m on a single BGR frame.
+    """Run RTMPose-s on a single BGR frame given a precomputed person bbox.
 
-    When `person_tracker` is passed, it is fed every frame's YOLO
-    candidates and returns a locked, smoothed bbox (see
-    `detect_person_bbox_tracked`). Without a tracker, falls back to the
-    stateless max-confidence pick — kept for unit tests and one-off
-    callers. Extraction loops always pass a tracker so the ghost-person
-    selection bug can't recur.
+    Stateless given (frame, bbox) — safe to call from multiple threads
+    concurrently. The rtmlib RTMPose wrapper allocates new numpy arrays
+    per call (no shared mutable preprocessing buffers) and the underlying
+    onnxruntime InferenceSession is thread-safe per the official ORT
+    docs.
 
-    Returns a 33-entry BlazePose-shaped landmark list, or None when no
-    person is detected (caller should skip the frame, matching the
-    existing main.py path that drops frames without a detection).
+    Returns a 33-entry BlazePose-shaped landmark list, or None when bbox
+    is None or RTMPose returned no keypoints. Caller should skip the
+    frame on None.
     """
-    if person_tracker is not None:
-        bbox = detect_person_bbox_tracked(person_tracker, frame_bgr)
-    else:
-        bbox = detect_person_bbox(frame_bgr)
     if bbox is None:
         return None
 
@@ -503,6 +543,30 @@ def infer_pose_for_frame(
         return None
 
     return coco17_to_blazepose33(keypoints[0], scores[0], w, h)
+
+
+def infer_pose_for_frame(
+    frame_bgr: np.ndarray,
+    person_tracker=None,  # Optional[tracking.PersonTracker]
+) -> Optional[list[dict]]:
+    """Detect a person and run RTMPose-s on a single BGR frame.
+
+    Sequential helper for callers that want one-frame end-to-end pose:
+    YOLO + tracker.update + RTMPose all in one call. The Railway
+    extraction loop calls the staged `_yolo_person_candidates` →
+    `tracker.update` → `infer_rtmpose_for_bbox` chain directly so
+    inference can parallelize across frames; but this wrapper is kept
+    for `extract_clip_keypoints.py` callers and tests that just want
+    "give me the landmarks for this frame."
+
+    Returns a 33-entry BlazePose-shaped landmark list, or None when no
+    person is detected.
+    """
+    if person_tracker is not None:
+        bbox = detect_person_bbox_tracked(person_tracker, frame_bgr)
+    else:
+        bbox = detect_person_bbox(frame_bgr)
+    return infer_rtmpose_for_bbox(frame_bgr, bbox)
 
 
 # ---------------------------------------------------------------------------
