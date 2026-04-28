@@ -84,7 +84,15 @@ export interface UseLiveCaptureOptions {
 export interface UseLiveCaptureReturn {
   start: (
     videoEl: HTMLVideoElement,
-    opts?: { facingMode?: 'user' | 'environment' },
+    opts?: {
+      facingMode?: 'user' | 'environment'
+      // Camera aspect orientation. 'portrait' requests 720x1280 to match
+      // a phone held vertically; 'landscape' requests 1280x720. Pick this
+      // at the panel layer based on viewport orientation — getting a
+      // portrait stream into a landscape container (or vice versa) makes
+      // object-cover crop half the player away.
+      aspect?: 'portrait' | 'landscape'
+    },
   ) => Promise<void>
   stop: () => Promise<LiveSessionResult | null>
   abort: () => void
@@ -238,9 +246,18 @@ export function useLiveCapture(
 
   const start = useCallback(async (
     videoEl: HTMLVideoElement,
-    opts: { facingMode?: 'user' | 'environment' } = {},
+    opts: {
+      facingMode?: 'user' | 'environment'
+      aspect?: 'portrait' | 'landscape'
+    } = {},
   ) => {
     const requestedFacingMode = opts.facingMode ?? 'environment'
+    const requestedAspect = opts.aspect ?? 'landscape'
+    // Phone in portrait wants 720w x 1280h; laptop / phone-in-landscape
+    // wants 1280w x 720h. Browsers honor this as a hint, not a hard
+    // constraint — they pick the closest supported camera mode.
+    const requestedWidth = requestedAspect === 'portrait' ? 720 : 1280
+    const requestedHeight = requestedAspect === 'portrait' ? 1280 : 720
     const generation = ++generationRef.current
     setError(null)
     framesRef.current = []
@@ -257,7 +274,11 @@ export function useLiveCapture(
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: requestedFacingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: {
+          facingMode: { ideal: requestedFacingMode },
+          width: { ideal: requestedWidth },
+          height: { ideal: requestedHeight },
+        },
         audio: true,
       })
     } catch (err) {

@@ -163,6 +163,34 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   // the feature on a phone often want selfie mode to see themselves;
   // the toggle below the video flips this before Start.
   const [selectedFacingMode, setSelectedFacingMode] = useState<'user' | 'environment'>('environment')
+  // Camera + container aspect orientation. Defaults to landscape, but
+  // phones held portrait want a 9:16 stream into a 9:16 container —
+  // otherwise object-cover crops the top and bottom of the source so
+  // walking away from the camera shows only your legs (real bug
+  // surfaced in user testing). We detect once at mount via matchMedia;
+  // changing orientation mid-session would require re-getting the
+  // stream which is out of scope here.
+  const [aspect, setAspect] = useState<'portrait' | 'landscape'>('landscape')
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const mq = window.matchMedia('(orientation: portrait)')
+    setAspect(mq.matches ? 'portrait' : 'landscape')
+    const handler = (e: MediaQueryListEvent) => {
+      // Only update before recording starts. Mid-session orientation
+      // changes are intentionally ignored — the recording was made
+      // with one orientation and shouldn't reframe halfway through.
+      if (!isRecordingRef.current) {
+        setAspect(e.matches ? 'portrait' : 'landscape')
+      }
+    }
+    mq.addEventListener?.('change', handler)
+    return () => mq.removeEventListener?.('change', handler)
+  }, [])
+  // isRecording is referenced inside the matchMedia handler above. We
+  // mirror it into a ref so the handler doesn't need to be in the
+  // useEffect dep list (which would re-bind on every recording flip
+  // and miss orientation changes).
+  const isRecordingRef = useRef(false)
   const [summary, setSummary] = useState<{ swings: number; durationMs: number } | null>(null)
   const [uploadStatus, setUploadStatus] = useState<string | null>(null)
   // The recorded session, held until the user picks Save / Discard / Re-record.
@@ -447,8 +475,15 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     const startedAt = Date.now()
     setSessionStartedAtMs(startedAt)
     coach.markSessionStart(startedAt)
-    await start(videoEl, { facingMode: selectedFacingMode })
-  }, [coach, selectedFacingMode, setErrorMessage, setSessionStartedAtMs, setStatus, setSwingCount, start])
+    await start(videoEl, { facingMode: selectedFacingMode, aspect })
+  }, [coach, aspect, selectedFacingMode, setErrorMessage, setSessionStartedAtMs, setStatus, setSwingCount, start])
+
+  // Mirror the live `isRecording` state into a ref the orientation
+  // matchMedia handler reads — keeps that handler effect stable while
+  // still seeing the latest recording status.
+  useEffect(() => {
+    isRecordingRef.current = isRecording
+  }, [isRecording])
 
   // Run the upload + save pipeline against an already-finalized recording.
   // Pulled out of handleStop so the Retry button (after a failure) and the
@@ -712,8 +747,15 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         </button>
       </div>
 
-      {/* Preview / idle card */}
-      <div className="relative rounded-2xl border border-white/10 bg-black overflow-hidden aspect-video">
+      {/* Preview / idle card. Aspect matches the camera stream's
+          orientation so object-cover doesn't crop the player vertically:
+          landscape (16:9) for laptops + phones held sideways, portrait
+          (9:16) for the canonical phone-propped-vertical tennis setup. */}
+      <div
+        className={`relative rounded-2xl border border-white/10 bg-black overflow-hidden mx-auto ${
+          aspect === 'portrait' ? 'aspect-[9/16] max-w-sm' : 'aspect-video'
+        }`}
+      >
         {/*
           Mirror only the front (selfie) camera. The back camera films
           AWAY from the user — mirroring that flips the world in a
