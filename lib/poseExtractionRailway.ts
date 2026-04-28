@@ -52,8 +52,15 @@ function buildExtractResultFromKeypoints(
   // don't recognize falls back to mediapipe-railway (the historical
   // default) so old keypoints_json rows written before this field
   // existed don't break.
+  //
+  // The Modal-GPU path stamps `pose_backend: "rtmpose-modal-<device>"`
+  // in railway-service/modal_inference.py so the chip can distinguish
+  // "Modal GPU is firing" from "Railway CPU is firing" at a glance.
   let extractorBackend: ExtractorBackend = 'mediapipe-railway'
-  if (keypointsJson.pose_backend === 'rtmpose') {
+  const backend = keypointsJson.pose_backend ?? ''
+  if (backend.startsWith('rtmpose-modal')) {
+    extractorBackend = 'rtmpose-modal'
+  } else if (backend === 'rtmpose') {
     extractorBackend = 'rtmpose-railway'
   }
   return {

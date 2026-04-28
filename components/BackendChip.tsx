@@ -12,6 +12,10 @@ const LABELS: Record<ExtractorBackend, { text: string; classes: string }> = {
     text: 'RTMPose · Railway',
     classes: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
   },
+  'rtmpose-modal': {
+    text: 'RTMPose · Modal GPU',
+    classes: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
+  },
   'mediapipe-railway': {
     text: 'MediaPipe · Railway',
     classes: 'bg-amber-500/15 text-amber-300 border-amber-500/30',

@@ -17,6 +17,7 @@ import type { PoseFrame, Landmark } from '@/lib/supabase'
 // "live keypoints look wrong" is observable in 10s without DevTools.
 export type ExtractorBackend =
   | 'rtmpose-railway'
+  | 'rtmpose-modal'
   | 'mediapipe-railway'
   | 'rtmpose-browser'
   | 'rtmpose-browser-fallback'
