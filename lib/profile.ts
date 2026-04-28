@@ -489,19 +489,16 @@ export function renderCoachingToolInputToMarkdown(
   }
 
   if (input.cues.length > 0) {
+    // Long-form section: coach-voice paragraph + court-runnable drills.
+    // Bullet summaries are deliberately NOT inlined here — they live in
+    // their own "Quick Read" section below so a skimmer can scroll past
+    // the paragraphs entirely and still get the actionable takeaways.
     parts.push('')
     parts.push('## Your Coaching Cues')
     input.cues.forEach((cue, idx) => {
       parts.push('')
       parts.push(`**${idx + 1}. ${cue.title}**`)
       parts.push(cue.body)
-      if (cue.keyPoints && cue.keyPoints.length > 0) {
-        parts.push('')
-        parts.push('*Quick read:*')
-        for (const kp of cue.keyPoints) {
-          parts.push(`- ${kp}`)
-        }
-      }
       if (cue.exercises && cue.exercises.length > 0) {
         parts.push('')
         parts.push('*Try this:*')
@@ -510,6 +507,27 @@ export function renderCoachingToolInputToMarkdown(
         }
       }
     })
+
+    // Quick Read section: all bullet summaries grouped together at the
+    // end, with each cue's bullets nested under its title so the
+    // skimmer still knows which point each bullet belongs to. Only
+    // emitted when at least one cue has keyPoints — older persisted
+    // rows without keyPoints just get the long section.
+    const hasAnyKeyPoints = input.cues.some(
+      (c) => c.keyPoints && c.keyPoints.length > 0,
+    )
+    if (hasAnyKeyPoints) {
+      parts.push('')
+      parts.push('## Quick Read')
+      input.cues.forEach((cue, idx) => {
+        if (!cue.keyPoints || cue.keyPoints.length === 0) return
+        parts.push('')
+        parts.push(`**${idx + 1}. ${cue.title}**`)
+        for (const kp of cue.keyPoints) {
+          parts.push(`- ${kp}`)
+        }
+      })
+    }
   }
 
   parts.push('')
