@@ -60,6 +60,15 @@ PERSON_CLASS_ID = 0
 PERSON_CONFIDENCE_THRESHOLD = 0.3
 YOLO_INPUT_SIZE = 640  # matches racket_detector.INPUT_SIZE — both share yolo11n.onnx
 
+# POSE_DEVICE selects between CPU and GPU inference. "cpu" is the
+# Railway default (no GPU). "cuda" is set when this module is imported
+# from inside a Modal GPU container — see railway-service/modal_inference.py.
+# When "cuda", pose_rtmpose adds CUDAExecutionProvider to YOLO's ORT
+# providers list and passes device='cuda' to rtmlib's RTMPose so it
+# routes its inner session to GPU too.
+POSE_DEVICE = os.environ.get("POSE_DEVICE", "cpu").strip().lower()
+_USE_GPU = POSE_DEVICE in ("cuda", "gpu")
+
 # Bbox padding around the YOLO detection before we pass it to RTMPose.
 # RTMPose's preprocessing already adds a 1.25 padding factor on the
 # input bbox to crop a square-ish region around the person, but it
@@ -184,10 +193,19 @@ def _ensure_yolo() -> None:
             so.intra_op_num_threads = 1
             so.inter_op_num_threads = 1
             so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            # POSE_DEVICE=cuda → prefer CUDAExecutionProvider, fall back
+            # to CPU if CUDA isn't available (e.g. driver missing on a
+            # cold Modal container). Order matters: ORT picks the first
+            # available provider.
+            providers = (
+                ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                if _USE_GPU
+                else ["CPUExecutionProvider"]
+            )
             sess = ort.InferenceSession(
                 str(YOLO_ONNX_PATH),
                 sess_options=so,
-                providers=["CPUExecutionProvider"],
+                providers=providers,
             )
             _yolo_input_name = sess.get_inputs()[0].name
             _yolo_session = sess
@@ -228,14 +246,16 @@ def _ensure_rtmpose() -> None:
             from rtmlib import RTMPose  # type: ignore
             import onnxruntime as ort
 
-            # device='cpu' is correct for Railway (no GPU). backend='onnxruntime'
-            # because we already pin onnxruntime>=1.18.
+            # device='cpu' on Railway (no GPU); 'cuda' on Modal where
+            # POSE_DEVICE=cuda is set in the function container. rtmlib
+            # internally maps device='cuda' to CUDAExecutionProvider.
+            rtm_device = "cuda" if _USE_GPU else "cpu"
             with redirect_stdout(sys.stderr):
                 _rtm_session = RTMPose(
                     onnx_model=RTMPOSE_ONNX_URL,
                     model_input_size=RTMPOSE_INPUT_SIZE,
                     backend="onnxruntime",
-                    device="cpu",
+                    device=rtm_device,
                 )
 
             # rtmlib builds the inner ort.InferenceSession with default
@@ -254,10 +274,15 @@ def _ensure_rtmpose() -> None:
                     so.intra_op_num_threads = 1
                     so.inter_op_num_threads = 1
                     so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                    rtm_providers = (
+                        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                        if _USE_GPU
+                        else ["CPUExecutionProvider"]
+                    )
                     _rtm_session.session = ort.InferenceSession(
                         onnx_path,
                         sess_options=so,
-                        providers=["CPUExecutionProvider"],
+                        providers=rtm_providers,
                     )
             except Exception as swap_err:  # noqa: BLE001
                 # If the swap fails for any reason (rtmlib internal

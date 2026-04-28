@@ -692,24 +692,71 @@ async def extract_pose(
     return {"status": "queued", "session_id": req.session_id}
 
 
+MODAL_INFERENCE_URL = os.environ.get("MODAL_INFERENCE_URL", "").strip()
+MODAL_INFERENCE_KEY = os.environ.get("MODAL_INFERENCE_KEY", "").strip()
+
+
+async def _extract_via_modal(video_url: str, sample_fps: int = 30) -> dict:
+    """Forward the video URL to a Modal GPU endpoint and return its
+    keypoints_json response. Same shape as extract_keypoints_from_video
+    so the rest of _run_extraction is agnostic to which path ran.
+
+    Raises on transport failure or non-2xx so the outer try/except in
+    _run_extraction can mark the session as errored just like for the
+    inline path.
+    """
+    async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(
+            MODAL_INFERENCE_URL,
+            json={"video_url": video_url, "sample_fps": sample_fps},
+            headers={"Authorization": f"Bearer {MODAL_INFERENCE_KEY}"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def _run_extraction(req: ExtractRequest):
     try:
-        # Download video to temp file
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-            tmp_path = tmp.name
+        # Modal-proxy fast path: when MODAL_INFERENCE_URL is configured,
+        # forward the blob URL to the Modal GPU endpoint instead of
+        # running ONNX locally on the Railway CPU. Modal downloads the
+        # blob itself (so we skip the Railway-side download) and runs
+        # the same extract_keypoints_from_video pipeline on T4. Falls
+        # through to local extraction on any Modal failure so a Modal
+        # outage doesn't break uploads.
+        if MODAL_INFERENCE_URL and MODAL_INFERENCE_KEY:
+            try:
+                keypoints_json = await _extract_via_modal(req.video_url)
+                tmp_path = None  # skipped; Modal owns the temp file
+            except Exception as modal_err:  # noqa: BLE001
+                print(f"[extract] Modal path failed, falling back to local: {modal_err}")
+                keypoints_json = None
+                tmp_path = None
+        else:
+            keypoints_json = None
+            tmp_path = None
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            response = await client.get(req.video_url)
-            response.raise_for_status()
-            with open(tmp_path, "wb") as f:
-                f.write(response.content)
+        if keypoints_json is None:
+            # Local fallback (or default when MODAL_* env not set):
+            # download the video to Railway, run extraction inline.
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                tmp_path = tmp.name
 
-        # Run blocking CPU/IO work in a thread pool so the event loop stays free
-        try:
-            keypoints_json = await asyncio.to_thread(extract_keypoints_from_video, tmp_path)
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+            try:
+                async with httpx.AsyncClient(timeout=300) as client:
+                    response = await client.get(req.video_url)
+                    response.raise_for_status()
+                    with open(tmp_path, "wb") as f:
+                        f.write(response.content)
+
+                # Run blocking CPU/IO work in a thread pool so the event
+                # loop stays free.
+                keypoints_json = await asyncio.to_thread(
+                    extract_keypoints_from_video, tmp_path
+                )
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
 
         # Update the appropriate DB record
         if req.pro_swing_id:
