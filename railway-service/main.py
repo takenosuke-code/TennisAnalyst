@@ -21,9 +21,16 @@ from pydantic import BaseModel
 from supabase import create_client, Client
 import httpx
 
-# POSE_BACKEND selects the pose estimator. `mediapipe` is the only supported
-# value today; `rtmpose` is a deliberate seam for a future swap.
-POSE_BACKEND = os.environ.get("POSE_BACKEND", "mediapipe").lower()
+# POSE_BACKEND selects the pose estimator. Two valid values:
+#   "mediapipe" — BlazePose Heavy (default; older path)
+#   "rtmpose"   — YOLO11n + RTMPose-m (better tracing on small subjects)
+# Strip whitespace and surrounding quotes defensively. Railway dashboards
+# sometimes preserve copy-pasted quotes, and trailing newlines from shell
+# `echo` exports are easy to miss — without these, the dispatch raises
+# "Unknown POSE_BACKEND: rtmpose" even when the value LOOKS right.
+POSE_BACKEND = (
+    os.environ.get("POSE_BACKEND", "mediapipe").strip().strip("\"'").lower()
+)
 
 app = FastAPI(title="TennisIQ Pose Service")
 
@@ -432,7 +439,9 @@ def extract_keypoints_from_video(video_path: str, sample_fps: int = 30, max_seco
         return _extract_with_rtmpose(video_path, sample_fps, max_seconds)
     if POSE_BACKEND == "mediapipe":
         return _extract_with_mediapipe(video_path, sample_fps, max_seconds)
-    raise ValueError(f"Unknown POSE_BACKEND: {POSE_BACKEND}")
+    # repr() so trailing whitespace, quotes, or unicode surprises in the
+    # parsed value are visible in the error message.
+    raise ValueError(f"Unknown POSE_BACKEND: {POSE_BACKEND!r}")
 
 
 class ExtractRequest(BaseModel):

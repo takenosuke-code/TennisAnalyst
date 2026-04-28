@@ -15,9 +15,15 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-# POSE_BACKEND selects the pose estimator. `mediapipe` is the only supported
-# value today; `rtmpose` is a deliberate seam for a future swap.
-POSE_BACKEND = os.environ.get("POSE_BACKEND", "mediapipe").lower()
+# POSE_BACKEND selects the pose estimator. Two valid values:
+#   "mediapipe" — BlazePose Heavy (default; older path)
+#   "rtmpose"   — YOLO11n + RTMPose-m (better tracing on small subjects)
+# Strip whitespace and surrounding quotes defensively. See main.py for
+# the rationale (Railway dashboards / shell exports leak surrounding
+# whitespace + quotes that silently break the match).
+POSE_BACKEND = (
+    os.environ.get("POSE_BACKEND", "mediapipe").strip().strip("\"'").lower()
+)
 
 LANDMARK_NAMES = [
     "nose", "left_eye_inner", "left_eye", "left_eye_outer",
@@ -492,7 +498,8 @@ def extract_keypoints(video_path, sample_fps=30):
         return _extract_rtmpose(video_path, sample_fps)
     if POSE_BACKEND == "mediapipe":
         return _extract_mediapipe(video_path, sample_fps)
-    raise ValueError(f"Unknown POSE_BACKEND: {POSE_BACKEND}")
+    # repr() so trailing whitespace / quotes are visible in the message.
+    raise ValueError(f"Unknown POSE_BACKEND: {POSE_BACKEND!r}")
 
 
 def main():
