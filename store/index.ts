@@ -35,6 +35,10 @@ interface PoseStore {
   // diagnostic chip so we can tell at a glance which path the user is
   // on when tracing looks wrong. Null until the first extraction lands.
   extractorBackend: ExtractorBackend | null
+  // When extractorBackend === 'mediapipe-browser-fallback', this carries
+  // *why* Railway failed (queue-failed / not-configured / timeout / etc).
+  // Surfaced in the chip tooltip so we can debug without DevTools.
+  fallbackReason: string | null
   setFramesData: (frames: PoseFrame[]) => void
   setBlobUrl: (url: string | null) => void
   setLocalVideoUrl: (url: string | null) => void
@@ -43,6 +47,7 @@ interface PoseStore {
   setProcessing: (v: boolean) => void
   setProgress: (p: number) => void
   setExtractorBackend: (backend: ExtractorBackend | null) => void
+  setFallbackReason: (reason: string | null) => void
   reset: () => void
 }
 
@@ -55,6 +60,7 @@ export const usePoseStore = create<PoseStore>((set, get) => ({
   isProcessing: false,
   progress: 0,
   extractorBackend: null,
+  fallbackReason: null,
   setFramesData: (framesData) => set({ framesData }),
   setBlobUrl: (blobUrl) => set({ blobUrl }),
   setLocalVideoUrl: (url) => {
@@ -67,6 +73,7 @@ export const usePoseStore = create<PoseStore>((set, get) => ({
   setProcessing: (isProcessing) => set({ isProcessing }),
   setProgress: (progress) => set({ progress }),
   setExtractorBackend: (extractorBackend) => set({ extractorBackend }),
+  setFallbackReason: (fallbackReason) => set({ fallbackReason }),
   reset: () => {
     const prev = get().localVideoUrl
     if (prev) URL.revokeObjectURL(prev)
@@ -79,6 +86,7 @@ export const usePoseStore = create<PoseStore>((set, get) => ({
       isProcessing: false,
       progress: 0,
       extractorBackend: null,
+      fallbackReason: null,
     })
   },
 }))

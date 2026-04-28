@@ -24,8 +24,15 @@ const VideoCanvas = dynamic(() => import('@/components/VideoCanvas'), { ssr: fal
 const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), { ssr: false })
 
 export default function AnalyzePage() {
-  const { framesData, blobUrl, localVideoUrl, sessionId, shotType, extractorBackend } =
-    usePoseStore()
+  const {
+    framesData,
+    blobUrl,
+    localVideoUrl,
+    sessionId,
+    shotType,
+    extractorBackend,
+    fallbackReason,
+  } = usePoseStore()
   const { visible, showSkeleton, showRacket, showAngles } = useJointStore()
   const [done, setDone] = useState(false)
   const [allFrames, setAllFrames] = useState<PoseFrame[]>([])
@@ -299,7 +306,7 @@ export default function AnalyzePage() {
                 <div className="p-3 border-b border-white/5 flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-white">Your Swing</span>
-                    <BackendChip backend={extractorBackend} />
+                    <BackendChip backend={extractorBackend} reason={fallbackReason} />
                   </div>
                   <button
                     onClick={() => setDone(false)}

@@ -56,6 +56,7 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     isProcessing,
     setShotType: persistShotType,
     setExtractorBackend,
+    setFallbackReason,
   } = usePoseStore()
 
   const { extract, progress: extractProgress, error: extractError, isProcessing: extracting, abort } = usePoseExtractor()
@@ -128,6 +129,7 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     let result: ExtractResult | null = null
     let usedRailway = false
     let pendingSessionId: string | null = null
+    let railwayFailReason: string | null = null
 
     // Railway path: create the session row FIRST (so Railway has something
     // to write back to), then ask Railway to extract, then poll. On any
@@ -161,8 +163,10 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         // during staging) from 'Railway errored out' (needs attention).
         if (err instanceof RailwayExtractError) {
           console.info('[UploadZone] Railway path unavailable, falling back to browser:', err.reason)
+          railwayFailReason = err.reason
         } else {
           console.error('[UploadZone] Railway path errored, falling back to browser:', err)
+          railwayFailReason = err instanceof Error ? err.message : 'unknown'
         }
         result = null
       }
@@ -252,6 +256,9 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     setLocalVideoUrl(playbackUrl)
     setFramesData(result.frames)
     setExtractorBackend(result.extractorBackend)
+    setFallbackReason(
+      result.extractorBackend === 'mediapipe-browser-fallback' ? railwayFailReason : null,
+    )
     persistShotType(shotType)
     setOverallProgress(100)
     setStatusMsg(

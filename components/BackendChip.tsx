@@ -26,21 +26,41 @@ const LABELS: Record<ExtractorBackend, { text: string; classes: string }> = {
   },
 }
 
+// Human-readable explanation of why Railway fell back. Shown next to
+// the red fallback chip so we can debug without opening DevTools.
+const REASON_HINTS: Record<string, string> = {
+  'not-configured': 'Vercel env missing RAILWAY_SERVICE_URL or EXTRACT_API_KEY',
+  'queue-failed': 'Railway rejected the job (auth or bad request)',
+  'error-status': 'Railway crashed mid-extract',
+  timeout: 'Railway took >180s (cold start? OOM? slow model load?)',
+  aborted: 'extraction was cancelled',
+}
+
 export default function BackendChip({
   backend,
+  reason,
   className = '',
 }: {
   backend: ExtractorBackend | null
+  reason?: string | null
   className?: string
 }) {
   if (!backend) return null
   const { text, classes } = LABELS[backend]
+  const hint = reason ? REASON_HINTS[reason] ?? reason : null
   return (
     <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border ${classes} ${className}`}
-      title="Which extractor produced these keypoints. Surfaced for debugging when tracing looks off."
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${classes} ${className}`}
+      title={
+        hint
+          ? `${text} — ${hint}`
+          : 'Which extractor produced these keypoints. Surfaced for debugging when tracing looks off.'
+      }
     >
-      {text}
+      <span>{text}</span>
+      {hint && (
+        <span className="opacity-70 normal-case">· {reason}</span>
+      )}
     </span>
   )
 }

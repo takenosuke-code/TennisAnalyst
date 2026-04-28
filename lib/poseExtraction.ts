@@ -90,6 +90,18 @@ export type ExtractorBackend =
   | 'mediapipe-browser'
   | 'mediapipe-browser-fallback'
 
+// When the Railway path silently falls back to browser, this is *why*.
+// Surfaced in the diagnostic chip so the user can read off the failure
+// mode without opening DevTools — the difference between "Vercel env
+// var missing" and "Railway crashed at runtime" is decisive for what to
+// fix next.
+export type FallbackReason =
+  | 'not-configured'   // /api/extract returned 503 — Vercel env missing
+  | 'queue-failed'     // Railway rejected the job (e.g. auth 401, bad URL)
+  | 'error-status'     // Railway started the job, then errored mid-extract
+  | 'timeout'          // Railway took > 180s (OOM? model load? cold start?)
+  | 'aborted'          // user navigated away
+
 export type ExtractResult = {
   frames: PoseFrame[]
   fps: number

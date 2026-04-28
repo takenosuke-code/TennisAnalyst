@@ -50,6 +50,9 @@ export default function BaselineComparePage() {
   // chip can render. Null until the first upload completes.
   const [todayExtractorBackend, setTodayExtractorBackend] =
     useState<ExtractorBackend | null>(null)
+  // When backend is the red 'mediapipe-browser-fallback', this carries
+  // the failure reason for the chip tooltip + inline label.
+  const [todayFallbackReason, setTodayFallbackReason] = useState<string | null>(null)
   const [dragging, setDragging] = useState(false)
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null)
   // Index (1-based) of the swing within today's clip the user wants to
@@ -114,6 +117,7 @@ export default function BaselineComparePage() {
 
     let frames: PoseFrame[] | null = null
     let railwayBackend: ExtractorBackend | null = null
+    let railwayFailReason: string | null = null
 
     // Railway path: upload the file to Vercel Blob first (Railway pulls
     // from a URL, not a multipart body), then create a pending session
@@ -145,8 +149,10 @@ export default function BaselineComparePage() {
       } catch (err) {
         if (err instanceof RailwayExtractError) {
           console.info('[baseline/compare] Railway path unavailable, falling back to browser:', err.reason)
+          railwayFailReason = err.reason
         } else {
           console.error('[baseline/compare] Railway path errored, falling back to browser:', err)
+          railwayFailReason = err instanceof Error ? err.message : 'unknown'
         }
         frames = null
       }
@@ -168,10 +174,13 @@ export default function BaselineComparePage() {
     // when the flag is on, else plain 'mediapipe-browser'.
     if (frames && railwayBackend) {
       setTodayExtractorBackend(railwayBackend)
+      setTodayFallbackReason(null)
     } else if (USE_RAILWAY_EXTRACT) {
       setTodayExtractorBackend('mediapipe-browser-fallback')
+      setTodayFallbackReason(railwayFailReason)
     } else {
       setTodayExtractorBackend(localResult.extractorBackend)
+      setTodayFallbackReason(null)
     }
 
     // Reset the per-swing selection on a new upload so the previous
@@ -320,7 +329,10 @@ export default function BaselineComparePage() {
                     <span className="text-white/30"> vs </span>
                     <span className="text-white">Today</span>
                   </p>
-                  <BackendChip backend={todayExtractorBackend} />
+                  <BackendChip
+                    backend={todayExtractorBackend}
+                    reason={todayFallbackReason}
+                  />
                 </div>
                 <button
                   onClick={() => {
@@ -328,6 +340,7 @@ export default function BaselineComparePage() {
                     setTodayObjectUrl(null)
                     setTodayFrames([])
                     setTodayExtractorBackend(null)
+                    setTodayFallbackReason(null)
                   }}
                   className="text-xs text-white/40 hover:text-white"
                 >
