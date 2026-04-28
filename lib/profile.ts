@@ -197,7 +197,7 @@ function describeGoal(profile: UserProfile): string {
 // nowhere near enough signal to override what the player said about themselves.
 // New contract: coach to the self-report, full stop. If pose numbers look
 // inconsistent with the stated tier, assume camera geometry or a bad take.
-const RECONCILE_RULE = `RECONCILE RULE: The self-reported tier is a CONTRACT. Coach to it. Do NOT downgrade the player mid-response because the pose data looks rougher than the stated tier. Single-camera pose estimates are noisy — a weird elbow angle or scattered hip rotation is almost always camera geometry, occlusion, or a single off-take, NOT evidence that the player misreported their level. Trust the self-report. If the numbers surprise you, assume the camera is at fault, pick the cleanest frames to anchor on, and coach them at the tier they told you they're at. Never imply they overestimated themselves. Never phrase feedback like "let's lock in the basics first" unless their tier is beginner. Meet them exactly where they said they are.`
+const RECONCILE_RULE = `RECONCILE RULE: The self-reported tier is a CONTRACT. Coach to it. Do NOT downgrade the player mid-response because the pose data looks rougher than the stated tier. Single-camera pose estimates are noisy. A weird elbow angle or scattered hip rotation is almost always camera geometry, occlusion, or a single off-take, NOT evidence that the player misreported their level. Trust the self-report. If the numbers surprise you, assume the camera is at fault, pick the cleanest frames to anchor on, and coach them at the tier they told you they're at. Never imply they overestimated themselves. Never phrase feedback like "let's lock in the basics first" unless their tier is beginner. Meet them exactly where they said they are.`
 
 // Rewritten 2026-04 after Park et al. (2024) DPO verbosity bias + MIT/CVPR 2025
 // negation-handling work. Rules:
@@ -210,17 +210,17 @@ const RECONCILE_RULE = `RECONCILE RULE: The self-reported tier is a CONTRACT. Co
 //   5. Beginner cues are EXTERNAL-focus (Wulf 2013): "push through the contact",
 //      "let the racket swing out low to high", NOT internal joint references.
 export const TIER_RULES: Record<SkillTier, string> = {
-  beginner: `TIER: Beginner. Lead with ONE sentence about a strength you see in their swing. Then give 2 or 3 external-focus coaching cues (what to feel, where to direct the racket, where to send the ball) — things like "push the ball toward the far fence" or "finish with your racket up by your ear". Keep cues physical and feel-based. Stay under 120 words total. End on an encouraging one-liner about what to focus on next time.`,
+  beginner: `TIER: Beginner. Lead with ONE sentence about a strength you see in their swing. Then give 2 or 3 external-focus coaching cues (what to feel, where to direct the racket, where to send the ball), things like "push the ball toward the far fence" or "finish with your racket up by your ear". Keep cues physical and feel-based. Stay under 120 words total. End on an encouraging one-liner about what to focus on next time.`,
   intermediate: `TIER: Intermediate. Give 2 or 3 coaching cues that mix a foundation tune-up with a refinement. Lead with what's working, then hand them the cues as numbered feel-based tips. Stay under 180 words total. Close with a one-line practice focus.`,
   competitive: `TIER: Competitive match player. Give exactly 3 execution cues focused on polish and matchplay. Lead with what's working, then give the 3 cues as numbered tips, each one actionable on the next ball. Stay under 220 words total. Close with a one-line takeaway.`,
-  advanced: `TIER: Advanced. Their mechanics are refined. Default to reinforcing the swing: emit the single sentence "This is clean — save it as your baseline." If, and only if, you see a concrete micro-refinement worth one cue, add ONE short positive tip after that sentence. Stay under 60 words total. Keep the frame positive throughout.`,
+  advanced: `TIER: Advanced. Their mechanics are refined. Default to reinforcing the swing: emit the single sentence "This is clean. Save it as your baseline." If, and only if, you see a concrete micro-refinement worth one cue, add ONE short positive tip after that sentence. Stay under 60 words total. Keep the frame positive throughout.`,
 }
 
 // Literal string the advanced tier defaults to. When the tool_use output
 // emits this exact sentence (and nothing else substantive), we flag the
 // telemetry row with used_baseline_template=true. Exported so both the
 // metrics extractor and integration tests reference one source of truth.
-export const ADVANCED_BASELINE_TEMPLATE = 'This is clean — save it as your baseline.'
+export const ADVANCED_BASELINE_TEMPLATE = 'This is clean. Save it as your baseline.'
 
 // Per-tier token ceiling passed to Anthropic's max_tokens. Roughly 4x the
 // word cap to give the model headroom without letting verbosity-bias run.
@@ -633,10 +633,10 @@ export function buildInferredTierCoachingBlock(): string {
 - beginner: wild inconsistency across frames, arming the ball with little trunk rotation, phase timing scattered, no clear kinetic chain.
 - intermediate: rallies consistently, recognizable stroke shape, but timing and rotation still need work.
 - competitive: solid fundamentals, clean kinetic chain, mostly about execution polish and matchplay refinements.
-- advanced: clean mechanics end to end, only micro-refinements left — groove the baseline rather than rebuild anything.
+- advanced: clean mechanics end to end, only micro-refinements left, groove the baseline rather than rebuild anything.
 
 NAME YOUR INFERRED TIER: At the very top of your response, on its own line, emit the tier you picked in italic parentheses. Keep it short and non-intrusive, for example:
-*(coaching you as intermediate — set your profile to recalibrate)*
+*(coaching you as intermediate, set your profile to recalibrate)*
 Do this once, then move straight into the normal coaching sections.
 
 TIER RULES (use the one matching the tier you picked):

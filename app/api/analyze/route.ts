@@ -166,11 +166,17 @@ export async function POST(request: NextRequest) {
       : 'all'
 
   // Shared prompt blocks injected into BOTH the solo and compare branches.
+  // When shot type IS specified we lock the prompt to that shot. When it
+  // is NOT specified we just stay silent about it. The previous "name
+  // which shot you think this is" instruction made the model open every
+  // response with "Looks like a forehand to me", which read as low-confidence
+  // and was a user-flagged regression. Better to skip the meta-statement
+  // entirely and let the coaching focus on what to actually fix.
   const shotIntroBlock = resolvedShotType
-    ? `\nSHOT TYPE: You are analyzing a ${resolvedShotType} swing. Tailor every cue and reference angle to this specific shot. Do NOT generalize across shot types.\n`
-    : `\nSHOT TYPE: Not specified. Infer from the pose and open your response by naming which shot you think this is (forehand / backhand / serve / volley) so the player can confirm.\n`
+    ? `\nSHOT TYPE: You are analyzing a ${resolvedShotType} swing. Tailor every cue and reference angle to this specific shot. Do NOT generalize across shot types. Do NOT open by naming the shot type.\n`
+    : ''
   const detectedIssuesBlock = detectedMistakes.length > 0
-    ? `\nAUTO-DETECTED ISSUES (system-flagged for this swing — weave coaching around these, don't just list them):\n${detectedMistakes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n`
+    ? `\nAUTO-DETECTED ISSUES (system-flagged for this swing, weave coaching around these, do not just list them):\n${detectedMistakes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n`
     : ''
 
   // Optional second-take keypoints for self-compare mode. Validated the same
@@ -218,11 +224,11 @@ export async function POST(request: NextRequest) {
     const soloRef = getBiomechanicsReference(refShotType)
 
     const framingParagraph = isBaselineCompare
-      ? `You are a tennis coach helping a player compare today's swing against their best-day baseline ("${baselineTag}"). Your job is progress tracking — show them what's held up since that peak, what's drifted, and how to lock the good stuff back in.`
-      : `You are a tennis coach watching the same player hit two different swings back to back. Your job is consistency — help them spot what's staying the same and what's drifting between takes.`
+      ? `You are a tennis coach helping a player compare today's swing against their best-day baseline ("${baselineTag}"). Your job is progress tracking. Show them what's held up since that peak, what's drifted, and how to lock the good stuff back in.`
+      : `You are a tennis coach watching the same player hit two different swings back to back. Your job is consistency. Help them spot what's staying the same and what's drifting between takes.`
 
     const anchorRule = isBaselineCompare
-      ? `- Do NOT suggest rebuilds. The baseline IS the anchor — anywhere today's swing drifts from "${baselineTag}", coach them back toward how they moved on their best day.`
+      ? `- Do NOT suggest rebuilds. The baseline IS the anchor. Anywhere today's swing drifts from "${baselineTag}", coach them back toward how they moved on their best day.`
       : `- Do NOT suggest rebuilds. Both swings come from the same player, so pick the cleaner take as the anchor and talk about matching to it.`
 
     const specificExample = isBaselineCompare
@@ -255,7 +261,7 @@ ${focusBlock}${detectedIssuesBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Describe everything in feel and body language.
 - NEVER rate or score the player. No X/100, no percentages, no grades.
-- NEVER use em dashes. Use commas or periods.
+- ABSOLUTELY NEVER use em dashes (—) in your output. Not for emphasis, not for parenthetical asides, not anywhere. Use commas, periods, or colons instead. This rule is non-negotiable.
 ${anchorRule}
 ${specificExample}
 
@@ -305,7 +311,7 @@ ${advancedTrim}${focusBlock}${detectedIssuesBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Not even once. Describe everything in feel and body language.
 - NEVER rate or score the player (no X/100, no percentages, no grades). Just give advice.
-- NEVER use em dashes. Use commas or periods.
+- ABSOLUTELY NEVER use em dashes (—) in your output. Not for emphasis, not for parenthetical asides, not anywhere. Use commas, periods, or colons instead. This rule is non-negotiable.
 - Talk like a real person. Short sentences. "You" and "your" constantly.
 - If the swing is already clean, SAY THAT and give fine-tuning cues. Don't fabricate problems.
 
@@ -344,9 +350,9 @@ Keep it under 350 words. Sound like a coach who believes in this player.`
 
 VOICE RULES (follow these strictly):
 - Write like you TALK. Short sentences. Casual tone. "Your hips are way ahead of your arm here" not "The hip rotation precedes the arm extension."
-- Do not use em dashes in your cue bodies. The only exception is the literal baseline template for the advanced tier, which you may output verbatim.
+- ABSOLUTELY NEVER use em dashes (—) anywhere in your cue bodies. Use commas, periods, or colons instead. This rule is non-negotiable.
 - NEVER list raw degree numbers on their own. Wrong: "elbow: 170°, ideal: 110°". Right: "your arm is almost locked straight when you want a nice relaxed bend."
-- You CAN mention a number to back up a point, but always in a natural sentence: "you're only getting about 20 degrees of hip turn when the pros are closer to 45."
+- You CAN mention a number to back up a point, but always in a natural sentence: "you're only getting about 20 degrees of hip turn when ideal range is around 45."
 - Use coaching cues a player can FEEL: "load your weight into your back leg", "let the racket drop behind you like a pendulum", "snap your hips like you're throwing a punch."
 - Keep it practical. Every piece of advice should be something they can try on the very next ball.
 - Sound encouraging, not critical. You're helping, not grading.
@@ -360,9 +366,9 @@ VOICE RULES (follow these strictly):
 
 VOICE RULES (follow these strictly):
 - Write like you TALK. Short sentences. Casual tone. "Your hips are way ahead of your arm here" not "The hip rotation precedes the arm extension."
-- Do not use em dashes in your cue bodies. The only exception is the literal baseline template for the advanced tier, which you may output verbatim.
+- ABSOLUTELY NEVER use em dashes (—) anywhere in your cue bodies. Use commas, periods, or colons instead. This rule is non-negotiable.
 - NEVER list raw degree numbers on their own. Wrong: "elbow: 170°, ideal: 110°". Right: "your arm is almost locked straight when you want a nice relaxed bend."
-- You CAN mention a number to back up a point, but always in a natural sentence: "you're only getting about 20 degrees of hip turn when the pros are closer to 45."
+- You CAN mention a number to back up a point, but always in a natural sentence: "you're only getting about 20 degrees of hip turn when ideal range is around 45."
 - Use coaching cues a player can FEEL: "load your weight into your back leg", "let the racket drop behind you like a pendulum", "snap your hips like you're throwing a punch."
 - Keep it practical. Every piece of advice should be something they can try on the very next ball.
 - Sound encouraging, not critical. You're helping, not grading.
