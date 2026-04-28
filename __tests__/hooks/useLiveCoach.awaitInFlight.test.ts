@@ -72,34 +72,47 @@ describe('useLiveCoach.awaitInFlight', () => {
     })
     globalThis.fetch = vi.fn(() => fetchPromise) as unknown as typeof globalThis.fetch
 
-    const { result } = renderHook(() => useLiveCoach())
+    vi.useFakeTimers()
+    try {
+      const { result } = renderHook(() => useLiveCoach())
 
-    // Fire a batch by pushing 4 swings — the hook fetches synchronously
-    // inside fireBatch but the request hangs on our promise.
-    await act(async () => {
-      pushBatch(result.current.pushSwing)
-    })
-    expect(result.current.isRequestInFlight()).toBe(true)
+      // Push 4 swings — Phase 2 added a post-swing grace window
+      // (default 3s since last swing) so the batch is scheduled, not
+      // fired immediately.
+      await act(async () => {
+        pushBatch(result.current.pushSwing)
+      })
 
-    // Start awaiting before the request settles.
-    let resolved = false
-    const awaitPromise = act(async () => {
-      await result.current.awaitInFlight(5_000)
-      resolved = true
-    })
+      // Advance past the grace window so the scheduled fire actually
+      // issues the fetch and the in-flight flag flips on.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_500)
+      })
+      expect(result.current.isRequestInFlight()).toBe(true)
 
-    // Sanity: not resolved yet.
-    await Promise.resolve()
-    expect(resolved).toBe(false)
+      // Start awaiting before the request settles.
+      let resolved = false
+      const awaitPromise = result.current.awaitInFlight(5_000).then(() => {
+        resolved = true
+      })
 
-    // Now settle the in-flight request — awaitInFlight should resolve.
-    await act(async () => {
-      resolveFetch(new Response('coaching cue text', { status: 200 }))
-    })
-    await awaitPromise
+      // Sanity: not resolved yet.
+      await Promise.resolve()
+      expect(resolved).toBe(false)
 
-    expect(resolved).toBe(true)
-    expect(result.current.isRequestInFlight()).toBe(false)
+      // Now settle the in-flight request — awaitInFlight should resolve.
+      await act(async () => {
+        resolveFetch(new Response('coaching cue text', { status: 200 }))
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      await awaitPromise
+
+      expect(resolved).toBe(true)
+      expect(result.current.isRequestInFlight()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('resolves on timeout if a batch hangs longer than timeoutMs', async () => {
@@ -114,6 +127,11 @@ describe('useLiveCoach.awaitInFlight', () => {
 
       await act(async () => {
         pushBatch(result.current.pushSwing)
+      })
+      // Phase 2 grace window: advance past it so the batch fires and
+      // the in-flight flag flips on.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_500)
       })
       expect(result.current.isRequestInFlight()).toBe(true)
 
