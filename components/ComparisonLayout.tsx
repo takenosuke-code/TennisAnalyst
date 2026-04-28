@@ -28,6 +28,10 @@ interface ComparisonLayoutProps {
   proFrames: PoseFrame[]
   proVideoUrl: string
   proName?: string
+  // Caption for the LEFT video. Defaulted to "You" so legacy callers
+  // keep the original behavior; the baseline-compare page passes
+  // "Baseline" since the left video IS the saved baseline.
+  userName?: string
 }
 
 export default function ComparisonLayout({
@@ -36,6 +40,7 @@ export default function ComparisonLayout({
   proFrames,
   proVideoUrl,
   proName = 'Pro',
+  userName = 'You',
 }: ComparisonLayoutProps) {
   const { visible, showSkeleton, showTrail, showRacket } = useJointStore()
   const { mode, setMode } = useComparisonStore()
@@ -164,7 +169,7 @@ export default function ComparisonLayout({
             onTimeUpdate={handleTimeUpdate}
             onPlayPause={handlePlayPause}
             isPrimary
-            label="You"
+            label={userName}
           />
           <div className="relative">
             <VideoCanvas

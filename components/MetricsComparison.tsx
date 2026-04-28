@@ -20,7 +20,12 @@ import KineticChainTimingBar from './KineticChainTimingBar'
 // Props
 // ---------------------------------------------------------------------------
 
+// User-facing column labels. Defaulted to the legacy "You" / "Pro" so any
+// existing caller keeps working, but the baseline-compare page overrides
+// them to "Baseline" / "Today" since pro pose data was retired.
 interface MetricsComparisonProps {
+  userLabel?: string
+  proLabel?: string
   userFrames: PoseFrame[]
   proFrames: PoseFrame[]
   shotType?: string | null
@@ -161,6 +166,8 @@ export default function MetricsComparison({
   userFrames,
   proFrames,
   shotType,
+  userLabel = 'You',
+  proLabel = 'Pro',
 }: MetricsComparisonProps) {
   const config = useMemo(() => getShotTypeConfig(shotType), [shotType])
 
@@ -361,8 +368,8 @@ export default function MetricsComparison({
               <tr className="text-white/40">
                 <th className="text-left font-medium py-1">Phase</th>
                 <th className="text-left font-medium py-1">Angle</th>
-                <th className="text-right font-medium py-1">You</th>
-                <th className="text-right font-medium py-1">Pro</th>
+                <th className="text-right font-medium py-1">{userLabel}</th>
+                <th className="text-right font-medium py-1">{proLabel}</th>
                 <th className="text-right font-medium py-1">Δ</th>
               </tr>
             </thead>

@@ -261,7 +261,7 @@ ${focusBlock}${detectedIssuesBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Describe everything in feel and body language.
 - NEVER rate or score the player. No X/100, no percentages, no grades.
-- ABSOLUTELY NEVER use em dashes (—) in your output. Not for emphasis, not for parenthetical asides, not anywhere. Use commas, periods, or colons instead. This rule is non-negotiable.
+- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as a way to chain ideas or replace punctuation. Do not use them for emphasis, parenthetical asides, or to glue two clauses together. If you would have used a dash, write a full sentence with a period, OR connect the clauses with a comma, "and", "but", or a colon. Compound-word hyphens inside a single word like "feel-based" or "external-focus" are fine.
 ${anchorRule}
 ${specificExample}
 
@@ -311,7 +311,7 @@ ${advancedTrim}${focusBlock}${detectedIssuesBlock}
 STRICT RULES:
 - NEVER mention degrees, angles, or numbers of any kind. Not even once. Describe everything in feel and body language.
 - NEVER rate or score the player (no X/100, no percentages, no grades). Just give advice.
-- ABSOLUTELY NEVER use em dashes (—) in your output. Not for emphasis, not for parenthetical asides, not anywhere. Use commas, periods, or colons instead. This rule is non-negotiable.
+- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as a way to chain ideas or replace punctuation. Do not use them for emphasis, parenthetical asides, or to glue two clauses together. If you would have used a dash, write a full sentence with a period, OR connect the clauses with a comma, "and", "but", or a colon. Compound-word hyphens inside a single word like "feel-based" or "external-focus" are fine.
 - Talk like a real person. Short sentences. "You" and "your" constantly.
 - If the swing is already clean, SAY THAT and give fine-tuning cues. Don't fabricate problems.
 
@@ -350,7 +350,7 @@ Keep it under 350 words. Sound like a coach who believes in this player.`
 
 VOICE RULES (follow these strictly):
 - Write like you TALK. Short sentences. Casual tone. "Your hips are way ahead of your arm here" not "The hip rotation precedes the arm extension."
-- ABSOLUTELY NEVER use em dashes (—) anywhere in your cue bodies. Use commas, periods, or colons instead. This rule is non-negotiable.
+- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as a way to chain ideas or replace punctuation. Do not use them for emphasis, parenthetical asides, or to glue two clauses together. If you would have used a dash, write a full sentence with a period, OR connect the clauses with a comma, "and", "but", or a colon. Compound-word hyphens inside a single word like "feel-based" or "external-focus" are fine.
 - NEVER list raw degree numbers on their own. Wrong: "elbow: 170°, ideal: 110°". Right: "your arm is almost locked straight when you want a nice relaxed bend."
 - You CAN mention a number to back up a point, but always in a natural sentence: "you're only getting about 20 degrees of hip turn when ideal range is around 45."
 - Use coaching cues a player can FEEL: "load your weight into your back leg", "let the racket drop behind you like a pendulum", "snap your hips like you're throwing a punch."
@@ -366,7 +366,7 @@ VOICE RULES (follow these strictly):
 
 VOICE RULES (follow these strictly):
 - Write like you TALK. Short sentences. Casual tone. "Your hips are way ahead of your arm here" not "The hip rotation precedes the arm extension."
-- ABSOLUTELY NEVER use em dashes (—) anywhere in your cue bodies. Use commas, periods, or colons instead. This rule is non-negotiable.
+- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as a way to chain ideas or replace punctuation. Do not use them for emphasis, parenthetical asides, or to glue two clauses together. If you would have used a dash, write a full sentence with a period, OR connect the clauses with a comma, "and", "but", or a colon. Compound-word hyphens inside a single word like "feel-based" or "external-focus" are fine.
 - NEVER list raw degree numbers on their own. Wrong: "elbow: 170°, ideal: 110°". Right: "your arm is almost locked straight when you want a nice relaxed bend."
 - You CAN mention a number to back up a point, but always in a natural sentence: "you're only getting about 20 degrees of hip turn when ideal range is around 45."
 - Use coaching cues a player can FEEL: "load your weight into your back leg", "let the racket drop behind you like a pendulum", "snap your hips like you're throwing a punch."

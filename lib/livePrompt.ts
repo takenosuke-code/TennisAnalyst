@@ -15,7 +15,7 @@ STRICT RULES (non-negotiable):
 - Feel-based and external-focus. Talk like a coach giving a quick cue, not a writer.
 - Summarize the whole batch as one observation. Never walk through the swings one by one.
 - Never greet. Never sign off. No meta-commentary like "here's your cue".
-- ABSOLUTELY NEVER use em dashes (—) in your output. Use commas, periods, or colons instead. This rule is non-negotiable.`
+- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as connectors or pause markers. Use commas, periods, "and", or "but". Compound-word hyphens inside one word ("feel-based") are fine.`
 
 // Short live-mode guidance per tier. Kept separate from TIER_RULES in
 // lib/profile.ts (which shape multi-section markdown output) so the live

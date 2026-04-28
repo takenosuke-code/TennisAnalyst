@@ -210,6 +210,7 @@ export default function BaselineComparePage() {
                   userFrames={baselineFrames}
                   proFrames={todayFrames}
                   proVideoUrl={todayObjectUrl ?? ''}
+                  userName="Baseline"
                   proName="Today"
                 />
               </div>
@@ -221,6 +222,8 @@ export default function BaselineComparePage() {
               userFrames={baselineFrames}
               proFrames={todayFrames}
               shotType={selectedBaseline?.shot_type ?? null}
+              userLabel="Baseline"
+              proLabel="Today"
             />
           )}
 
