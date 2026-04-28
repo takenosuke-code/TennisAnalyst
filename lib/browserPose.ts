@@ -43,6 +43,20 @@ import { loadModel, type LoadModelOptions } from '@/lib/modelLoader'
 import { coco17ToBlazepose33 } from '@/lib/cocoToBlazepose'
 import type { Landmark } from '@/lib/supabase'
 
+// Silence onnxruntime-web's "some nodes fell back to CPU" warning. It's
+// informational (the session is fine), but Next.js's dev overlay shows
+// any console.warn from libs as a top-level error which spooks the user.
+// 'error' lets real failures through but suppresses normal init noise.
+// Defensive: vitest mocks of onnxruntime-web may not define `env`.
+if (typeof window !== 'undefined') {
+  try {
+    if (ort.env) ort.env.logLevel = 'error'
+  } catch {
+    // If `env` isn't on the runtime (mocks, future API change), skip
+    // — the warning is cosmetic, not load-bearing.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
