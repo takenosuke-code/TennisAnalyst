@@ -52,34 +52,63 @@ describe('classifyCameraAngle', () => {
     expect(classifyCameraAngle([])).toBe('unknown')
   })
 
-  it('returns "unknown" when one shoulder is missing', () => {
-    // Only left shoulder + both hips — no right shoulder at all.
+  it('returns "unknown" only when neither shoulder is detectable', () => {
+    // Both shoulders missing entirely — the only case where we genuinely
+    // can't read camera angle. Hips alone don't help.
     const landmarks = [
-      makeLandmark(LANDMARK_INDICES.LEFT_SHOULDER, 0.45, 0.25, 0.95),
       makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.47, 0.65, 0.95),
       makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.53, 0.65, 0.95),
     ]
     expect(classifyCameraAngle(landmarks)).toBe('unknown')
   })
 
-  it('returns "unknown" when one shoulder visibility is below 0.5', () => {
+  it('returns "unknown" when both shoulders are below the visibility floor', () => {
     const landmarks = makeShouldersAndHips({
       lShoulderX: 0.4,
-      lShoulderVis: 0.3, // below VIS_FLOOR
+      lShoulderVis: 0.2,
       rShoulderX: 0.6,
-      rShoulderVis: 0.95,
+      rShoulderVis: 0.3,
     })
     expect(classifyCameraAngle(landmarks)).toBe('unknown')
   })
 
-  it('returns "unknown" when one hip visibility is below 0.5', () => {
+  it('returns "side-on" when only one shoulder is missing entirely', () => {
+    // The camera sees the player's near side; the far shoulder is fully
+    // behind the body so MediaPipe doesn't report it. This is the
+    // canonical side-on signal — must NOT be treated as unknown.
+    const landmarks = [
+      makeLandmark(LANDMARK_INDICES.LEFT_SHOULDER, 0.5, 0.25, 0.95),
+      makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.5, 0.65, 0.95),
+      makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.52, 0.65, 0.6),
+    ]
+    expect(classifyCameraAngle(landmarks)).toBe('side-on')
+  })
+
+  it('returns "side-on" when one shoulder is below the visibility floor (occluded by body)', () => {
+    // Same case as above but the far shoulder is reported with a low
+    // visibility instead of being missing. This is what MediaPipe
+    // typically does for an occluded landmark.
     const landmarks = makeShouldersAndHips({
-      lShoulderX: 0.4,
-      rShoulderX: 0.6,
-      lHipVis: 0.95,
-      rHipVis: 0.2, // below VIS_FLOOR
+      lShoulderX: 0.5,
+      lShoulderVis: 0.95,
+      rShoulderX: 0.52,
+      rShoulderVis: 0.2, // below VIS_FLOOR — occluded
     })
-    expect(classifyCameraAngle(landmarks)).toBe('unknown')
+    expect(classifyCameraAngle(landmarks)).toBe('side-on')
+  })
+
+  it('does not require hip visibility for classification', () => {
+    // Hips occluded but shoulders are workable — angle is still readable
+    // from shoulder geometry alone.
+    const landmarks = makeShouldersAndHips({
+      lShoulderX: 0.35,
+      lShoulderVis: 0.95,
+      rShoulderX: 0.65,
+      rShoulderVis: 0.95,
+      lHipVis: 0.1,
+      rHipVis: 0.1,
+    })
+    expect(classifyCameraAngle(landmarks)).toBe('front-on')
   })
 
   it('returns "side-on" when one shoulder occludes the other (asymmetric visibility)', () => {

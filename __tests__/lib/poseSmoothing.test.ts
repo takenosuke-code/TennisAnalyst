@@ -190,6 +190,27 @@ describe('isBodyVisible', () => {
     expect(isBodyVisible(landmarks)).toBe(true)
   })
 
+  it('returns true for side-on filming (one shoulder + one hip occluded by body)', () => {
+    // The intended setup: phone propped to the player's side. The far
+    // shoulder and far hip are hidden behind the body, so MediaPipe
+    // reports them at low visibility. Vertical extent of the visible
+    // side is still ~0.40 (shoulder 0.25 -> wrist 0.55 -> hip 0.65),
+    // well above the 0.35 default. Old gate rejected this — new one
+    // must accept it.
+    const landmarks = makeFullBodyLandmarks().map((lm) => {
+      // Hide the far side (right side from camera POV).
+      if (
+        lm.id === LANDMARK_INDICES.RIGHT_SHOULDER ||
+        lm.id === LANDMARK_INDICES.RIGHT_HIP ||
+        lm.id === LANDMARK_INDICES.RIGHT_WRIST
+      ) {
+        return { ...lm, visibility: 0.15 }
+      }
+      return lm
+    })
+    expect(isBodyVisible(landmarks)).toBe(true)
+  })
+
   it('returns false when vertical extent of required landmarks < 0.35', () => {
     // Subject is too small / too cropped: shoulders, hips, and wrist all
     // crammed into a ~0.2-tall band near the top of the frame. Visibility

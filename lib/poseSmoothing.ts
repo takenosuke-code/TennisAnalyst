@@ -119,10 +119,19 @@ export interface BodyVisibilityOptions {
 }
 
 /**
- * Strict body-presence gate. Returns true only when both shoulders, both
- * hips, AND at least one wrist are visible at >= visibilityFloor AND the
- * vertical extent across those required landmarks is at least
- * minVerticalExtent.
+ * Body-presence gate. Returns true when the player's torso is in frame
+ * with enough vertical span to coach off — specifically:
+ *   - at least ONE shoulder visible at >= visibilityFloor
+ *   - at least ONE hip visible at >= visibilityFloor
+ *   - at least ONE wrist visible at >= visibilityFloor
+ *   - vertical extent across the visible (>= visibilityFloor) landmarks
+ *     is at least minVerticalExtent
+ *
+ * The "at least one" is intentional. Side-on filming — the angle we tell
+ * users to use — inherently occludes one shoulder and one hip behind the
+ * body. Requiring both would reject the very setup we want. The single-
+ * landmark requirement still rejects face-only frames (no shoulders/hips/
+ * wrists at high confidence) and head-and-shoulders crops (no hip).
  *
  * Sits next to (not in place of) `isFrameConfident`, which gates on the
  * average visibility of all 33 landmarks. The face has 11 stable points
@@ -151,21 +160,26 @@ export function isBodyVisible(
   const lWrist = byId.get(BODY_LEFT_WRIST)
   const rWrist = byId.get(BODY_RIGHT_WRIST)
 
-  // Both shoulders + both hips required.
-  if (!lShoulder || lShoulder.visibility < visibilityFloor) return false
-  if (!rShoulder || rShoulder.visibility < visibilityFloor) return false
-  if (!lHip || lHip.visibility < visibilityFloor) return false
-  if (!rHip || rHip.visibility < visibilityFloor) return false
-
-  // At least one wrist required.
+  const lShoulderOk = !!lShoulder && lShoulder.visibility >= visibilityFloor
+  const rShoulderOk = !!rShoulder && rShoulder.visibility >= visibilityFloor
+  const lHipOk = !!lHip && lHip.visibility >= visibilityFloor
+  const rHipOk = !!rHip && rHip.visibility >= visibilityFloor
   const lWristOk = !!lWrist && lWrist.visibility >= visibilityFloor
   const rWristOk = !!rWrist && rWrist.visibility >= visibilityFloor
+
+  // At least one of each is required. Side-on hides the off-side
+  // shoulder/hip, so demanding both would reject the intended setup.
+  if (!lShoulderOk && !rShoulderOk) return false
+  if (!lHipOk && !rHipOk) return false
   if (!lWristOk && !rWristOk) return false
 
-  // Vertical extent over the required landmarks. Only count the wrist(s)
-  // that actually cleared the visibility floor — a hidden wrist contributes
-  // no spatial information.
-  const ys: number[] = [lShoulder.y, rShoulder.y, lHip.y, rHip.y]
+  // Vertical extent: only count landmarks that actually cleared the
+  // visibility floor. A hidden side contributes no spatial information.
+  const ys: number[] = []
+  if (lShoulderOk) ys.push(lShoulder!.y)
+  if (rShoulderOk) ys.push(rShoulder!.y)
+  if (lHipOk) ys.push(lHip!.y)
+  if (rHipOk) ys.push(rHip!.y)
   if (lWristOk) ys.push(lWrist!.y)
   if (rWristOk) ys.push(rWrist!.y)
 

@@ -76,23 +76,19 @@ export type CameraAngle = 'side-on' | 'oblique' | 'front-on' | 'unknown'
 /**
  * Classify the camera angle from a single frame's landmarks. Returns:
  *
- * - `'unknown'` if any required landmark (both shoulders, both hips) is
- *   missing or below the visibility floor — we don't have enough signal
- *   to call it.
- * - `'side-on'` if the shoulder x-spread is narrow OR the shoulder
- *   visibility asymmetry is high (one shoulder occluded by the body).
- * - `'front-on'` if the shoulder x-spread is wide AND the shoulder
- *   visibility is symmetric (both clearly tracked).
- * - `'oblique'` otherwise — the in-between zone (three-quarter view).
+ * - `'unknown'` only when we have effectively no shoulder signal at all
+ *   (neither shoulder above the visibility floor). One missing shoulder
+ *   is the *signal* for side-on, not a reason to bail.
+ * - `'side-on'` if only one shoulder is confidently tracked (the body
+ *   blocks the other), OR if both shoulders project to nearly the same x.
+ * - `'front-on'` if both shoulders are confidently tracked, spread wide,
+ *   and roughly equal in visibility (square-on to camera).
+ * - `'oblique'` otherwise — the three-quarter view. Coaching is allowed
+ *   here; the angle is workable.
  *
- * Edge case: a player squarely facing the camera but with arms held
- * directly forward toward the lens (rare — looks unnatural in a tennis
- * context) can produce a small shoulder x-spread and symmetric
- * visibility. That gets classified as `'side-on'`, which is wrong
- * geometrically but harmless for the gating use case (we'd still let
- * coaching fire on a frame where mechanics aren't readable; in practice
- * such a frame doesn't appear in real tennis filming and would be
- * filtered by adjacent gates).
+ * Hips are not required for classification — the shoulder geometry is
+ * what reads camera angle, and many side-on tennis frames have one hip
+ * occluded by the racket arm or shorts/skirt fabric.
  */
 export function classifyCameraAngle(landmarks: Landmark[]): CameraAngle {
   if (landmarks.length === 0) return 'unknown'
@@ -102,19 +98,26 @@ export function classifyCameraAngle(landmarks: Landmark[]): CameraAngle {
 
   const lShoulder = byId.get(LM_LEFT_SHOULDER)
   const rShoulder = byId.get(LM_RIGHT_SHOULDER)
-  const lHip = byId.get(LM_LEFT_HIP)
-  const rHip = byId.get(LM_RIGHT_HIP)
 
-  if (!lShoulder || lShoulder.visibility < VIS_FLOOR) return 'unknown'
-  if (!rShoulder || rShoulder.visibility < VIS_FLOOR) return 'unknown'
-  if (!lHip || lHip.visibility < VIS_FLOOR) return 'unknown'
-  if (!rHip || rHip.visibility < VIS_FLOOR) return 'unknown'
+  const lShoulderOk = !!lShoulder && lShoulder.visibility >= VIS_FLOOR
+  const rShoulderOk = !!rShoulder && rShoulder.visibility >= VIS_FLOOR
 
-  const shoulderSpread = Math.abs(lShoulder.x - rShoulder.x)
-  const visAsymmetry = Math.abs(lShoulder.visibility - rShoulder.visibility)
+  // No shoulder info at all — can't classify. This is the only path that
+  // returns 'unknown'; one occluded shoulder is *expected* in side-on
+  // filming, not a failure mode.
+  if (!lShoulderOk && !rShoulderOk) return 'unknown'
 
-  // Side-on: either the shoulders project to nearly the same x (profile)
-  // or one shoulder is clearly occluded by the body (visibility gap).
+  // Only one shoulder confidently tracked → the other is occluded by the
+  // body, which is exactly what side-on looks like.
+  if (lShoulderOk !== rShoulderOk) return 'side-on'
+
+  // Both shoulders confidently tracked — use spread to discriminate.
+  const shoulderSpread = Math.abs(lShoulder!.x - rShoulder!.x)
+  const visAsymmetry = Math.abs(lShoulder!.visibility - rShoulder!.visibility)
+
+  // Side-on with both shoulders technically visible: shoulders project
+  // to nearly the same x (true profile) OR there's still a clear visibility
+  // gap between them.
   if (
     shoulderSpread < SIDE_ON_MAX_SHOULDER_SPREAD ||
     visAsymmetry > SIDE_ON_MIN_VIS_ASYMMETRY
@@ -122,9 +125,7 @@ export function classifyCameraAngle(landmarks: Landmark[]): CameraAngle {
     return 'side-on'
   }
 
-  // Front-on: wide shoulder separation AND both shoulders confidently
-  // tracked. The visibility check is what distinguishes a true front-on
-  // from a three-quarter view that happens to splay wide.
+  // Front-on: wide separation AND symmetric visibility.
   if (
     shoulderSpread > FRONT_ON_MIN_SHOULDER_SPREAD &&
     visAsymmetry < FRONT_ON_MAX_VIS_ASYMMETRY
@@ -133,6 +134,6 @@ export function classifyCameraAngle(landmarks: Landmark[]): CameraAngle {
   }
 
   // Anything in between — partial profile, three-quarter view. Coaching
-  // can still fire here; the angle is good enough for some signal.
+  // is allowed here; the angle is good enough for some signal.
   return 'oblique'
 }
