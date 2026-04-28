@@ -71,6 +71,13 @@ __MACOSX/
 *.onnx
 *.onnx.data
 *.pt
+# Phase 5: ONNX weights for the browser pose stack are downloaded by
+# scripts/download-models.mjs into public/models/ at install time. The
+# broad *.onnx rule above already covers this, but call it out
+# explicitly so future contributors who tweak the broader rules don't
+# accidentally start tracking the 40-60 MB of weights.
+public/models/*.onnx
+public/models/*.onnx.data
 !railway-service/models/yolo11n.onnx
 !railway-service/models/yolo11n.onnx.data
 !railway-service/models/yolo11n.pt
