@@ -1,42 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  /* Dark mode (default) — original near-black + emerald accents. */
   --background: #0a0a0f;
   --foreground: #f0f0f5;
-  --surface: rgba(255, 255, 255, 0.05);
-  --surface-hover: rgba(255, 255, 255, 0.08);
-  --border: rgba(255, 255, 255, 0.10);
-  --muted: rgba(255, 255, 255, 0.5);
-  --accent: #10b981; /* emerald-500 */
-  --accent-hover: #34d399; /* emerald-400 */
-  --accent-on: #ffffff;
-  --scrollbar-track: rgba(255, 255, 255, 0.05);
-  --scrollbar-thumb: rgba(255, 255, 255, 0.15);
-  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.25);
-}
-
-/*
- * Light mode (Phase 1.4a — gated on ?light=1 query param via useThemeQueryParam).
- * Off-white "court-line" background + dark "court-ink" text + slightly deeper
- * emerald (emerald-700) so the accent doesn't disappear on a light background.
- * AA contrast targets: text on bg ≥4.5:1 at peak iPhone brightness.
- * Phase 1.4b will flip prefers-color-scheme auto-detect after sunny-court
- * dogfooding confirms none of the existing component palettes break.
- */
-[data-theme='light'] {
-  --background: #f4f1ea;
-  --foreground: #0e1116;
-  --surface: rgba(14, 17, 22, 0.04);
-  --surface-hover: rgba(14, 17, 22, 0.07);
-  --border: rgba(14, 17, 22, 0.12);
-  --muted: rgba(14, 17, 22, 0.55);
-  --accent: #047857; /* emerald-700 — preserves green identity, holds 4.5:1 */
-  --accent-hover: #065f46; /* emerald-800 */
-  --accent-on: #ffffff;
-  --scrollbar-track: rgba(14, 17, 22, 0.05);
-  --scrollbar-thumb: rgba(14, 17, 22, 0.20);
-  --scrollbar-thumb-hover: rgba(14, 17, 22, 0.35);
 }
 
 body {
@@ -51,14 +17,14 @@ body {
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--scrollbar-track);
+  background: rgba(255, 255, 255, 0.05);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb);
+  background: rgba(255, 255, 255, 0.15);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--scrollbar-thumb-hover);
+  background: rgba(255, 255, 255, 0.25);
 }
 
 input[type='range'] {

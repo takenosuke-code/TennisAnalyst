@@ -230,9 +230,9 @@ const RECONCILE_RULE = `RECONCILE RULE: The self-reported tier is a CONTRACT. Co
 //      intermediate: stroke-name vocabulary; competitive: phase-name
 //      vocabulary).
 export const TIER_RULES: Record<SkillTier, string> = {
-  beginner: `TIER: Beginner (no serious play, returning casual, or kid). Lead with ONE sentence about a strength you see in their swing. Then give 2 or 3 external-focus coaching cues; each cue must reference a body or racket landmark a 12-year-old could find ("racket tip up by your ear", "step toward the far net post", "finish with your strings facing the back fence", "push the ball toward the cone past the service line"). Each cue pairs ONE landmark with ONE measurable check the player can run on the next swing. Use everyday words: turn sideways, racket up, swing low to high like brushing the ball up a window. Cap mechanical detail at ONE thing per cue. Stay under 120 words total. Close with the literal phrase "Next session, one feel:" followed by a single external-focus check at a named landmark — this is the one thing they carry to the court (e.g. "Next session, one feel: finish with your racket tip up by your ear on every swing").`,
-  intermediate: `TIER: Intermediate (NTRP 3.0–4.0; consistent rallies, recognizable stroke shape). Give 2 or 3 coaching cues that mix one foundation tune-up with one refinement. Lead with what's working in two specific sentences (which phase, which landmark), then hand them the cues as numbered feel-based tips. Each cue ties a NAMED swing phase (prep, racket-drop, contact window, follow-through, recovery) to a body or racket landmark AND a measurable check ("contact a foot in front of your front hip; if the ball pulls your shoulder forward, contact was a beat late"). Stroke-name vocabulary is welcome (slice, topspin, open vs closed stance, split step). Stay under 180 words total. Close with the literal phrase "Next session, one feel:" followed by a single external-focus check naming the phase and the landmark (e.g. "Next session, one feel: at the contact window, butt-cap and forearm in one straight line").`,
-  competitive: `TIER: Competitive match player (NTRP 4.5+, regular matchplay). Give exactly 3 execution cues focused on millimeter polish and matchplay leverage. Lead with what's working in two specific sentences naming phase and landmark. Each of the 3 cues must (a) name the specific stroke and the specific phase ("forehand contact window", "second-serve toss release", "backhand recovery step"), (b) state the measurable drift you observed against a clean version of that phase, and (c) tie the fix to a tactical pattern they hit on every match (cross-court angle, inside-out forehand, kick-serve location, return depth). Each cue is actionable on the very next ball. Technical vocabulary is welcome where it's accurate: kinetic chain, racket lag, pronation, racket-head speed, swing path, stance load. Stay under 220 words total. Close with the literal phrase "Next session, one feel:" followed by a single phase-named external-focus check tied to the highest-leverage cue above (e.g. "Next session, one feel: belt buckle facing the side fence at the loading turn before the racket drops").`,
+  beginner: `TIER: Beginner (no serious play, returning casual, or kid). Lead with ONE sentence about a strength you see in their swing. Then give 2 or 3 external-focus coaching cues; each cue must reference a body or racket landmark a 12-year-old could find ("racket tip up by your ear", "step toward the far net post", "finish with your strings facing the back fence", "push the ball toward the cone past the service line"). Each cue pairs ONE landmark with ONE measurable check the player can run on the next swing. Use everyday words: turn sideways, racket up, swing low to high like brushing the ball up a window. Cap mechanical detail at ONE thing per cue. Stay under 120 words total. End on an encouraging one-liner about which landmark to chase next session.`,
+  intermediate: `TIER: Intermediate (NTRP 3.0–4.0; consistent rallies, recognizable stroke shape). Give 2 or 3 coaching cues that mix one foundation tune-up with one refinement. Lead with what's working in two specific sentences (which phase, which landmark), then hand them the cues as numbered feel-based tips. Each cue ties a NAMED swing phase (prep, racket-drop, contact window, follow-through, recovery) to a body or racket landmark AND a measurable check ("contact a foot in front of your front hip; if the ball pulls your shoulder forward, contact was a beat late"). Stroke-name vocabulary is welcome (slice, topspin, open vs closed stance, split step). Stay under 180 words total. Close with a one-line practice focus naming the phase and the check.`,
+  competitive: `TIER: Competitive match player (NTRP 4.5+, regular matchplay). Give exactly 3 execution cues focused on millimeter polish and matchplay leverage. Lead with what's working in two specific sentences naming phase and landmark. Each of the 3 cues must (a) name the specific stroke and the specific phase ("forehand contact window", "second-serve toss release", "backhand recovery step"), (b) state the measurable drift you observed against a clean version of that phase, and (c) tie the fix to a tactical pattern they hit on every match (cross-court angle, inside-out forehand, kick-serve location, return depth). Each cue is actionable on the very next ball. Technical vocabulary is welcome where it's accurate: kinetic chain, racket lag, pronation, racket-head speed, swing path, stance load. Stay under 220 words total. Close with a one-line takeaway naming the single phase to groove this week.`,
   advanced: `TIER: Advanced. Their mechanics are refined. Default to reinforcing the swing: emit the single sentence "This is clean. Save it as your baseline." If, and only if, you see a concrete micro-refinement worth one cue, add ONE short positive tip after that sentence. Stay under 60 words total. Keep the frame positive throughout.`,
 }
 
@@ -276,13 +276,7 @@ export const ANTI_FILLER_RULE = `ANTI-FILLER LIST: Strip these phrases from your
 14. "A little bit more / a touch more X." (unmeasurable)
 15. "Let's lock in the basics first." (condescending, and explicitly banned by the reconcile rule)
 
-Also omit: medical or anatomical claims ("this protects your shoulder"), body-shaming framing ("you're too stiff"), cause-blaming the player ("you're being lazy with your feet"), comparisons to named pros ("swing like Sinner"), and negations as primary cues. Convert every "don't drop the elbow" into a positive "keep the elbow at shoulder height through contact".
-
-SAFETY / SCOPE RAIL — never:
-- Imply injury risk or medical concern ("be careful with that wrist", "you might hurt yourself", "that's hard on the elbow"). You are not a clinician.
-- Compare unfavorably to a named pro ("Federer would never", "Sinner does this better"). Use anonymous "a clean version of the stroke" instead.
-- Infer or comment on age, body type, weight, or physical limitations from a pose video. You can't see those, and guessing damages trust.
-- Promise improvement timelines ("you'll see results in two weeks", "give it ten sessions and this clicks"). Players ground out at different paces; don't anchor expectations.`
+Also omit: medical or anatomical claims ("this protects your shoulder"), body-shaming framing ("you're too stiff"), cause-blaming the player ("you're being lazy with your feet"), comparisons to named pros ("swing like Sinner"), and negations as primary cues. Convert every "don't drop the elbow" into a positive "keep the elbow at shoulder height through contact".`
 
 // Drill-quality contract for the cue.exercises[] field. The structured tool
 // schema requires 1–2 exercises per cue; this rule turns those slots into
@@ -298,14 +292,6 @@ Bad: "Practice forehands until they feel better." (no constraint, no count, no s
 Bad: "Work on your contact point." (no feed, no measurable target)
 
 Beginners start at shadow or hand-feed. Intermediate moves to racket-feed and wall rallies. Competitive uses live ball with a constraint.`
-
-// Cue priority rule. The structured tool schema lets the model emit 2–3 cues,
-// but the synthesis flagged that not ranking them is a missed opportunity:
-// the player only acts on what's at the top, and an unranked list pushes the
-// "highest-leverage fix" into a coin flip with cosmetic refinements. Inject
-// this into every detail-coached tier so cues[0] is always the load-bearing
-// fix.
-export const CUE_PRIORITY_RULE = `CUE PRIORITY: Order cues by leverage, not by where they appear in the swing. cues[0] is the ONE thing the player should focus on first — the highest-leverage fix on this clip, the fix that unlocks the most other improvements. cues[1] and cues[2] (if present) are secondary refinements. The "Next session, one feel:" closing line MUST anchor on cues[0], not on a later cue. Never list cues in chronological swing order if that ordering buries the highest-leverage fix at position 2 or 3.`
 
 // Few-shot benchmark cues. Lifted verbatim from the pedagogy brief Section 6
 // (Gold-standard cue examples). Each is a body-field exemplar that obeys the
@@ -829,7 +815,7 @@ export function buildTierCoachingBlock(profile: UserProfile | null): string {
   const detailBlocks =
     profile.skill_tier === 'advanced'
       ? ''
-      : `\n\n${SPECIFICITY_RULE}\n\n${CUE_PRIORITY_RULE}\n\n${ANTI_FILLER_RULE}\n\n${DRILL_QUALITY_RULE}\n\n${COACHING_EXAMPLES_BLOCK}`
+      : `\n\n${SPECIFICITY_RULE}\n\n${ANTI_FILLER_RULE}\n\n${DRILL_QUALITY_RULE}\n\n${COACHING_EXAMPLES_BLOCK}`
 
   return `${tierRule}
 
@@ -877,8 +863,6 @@ RECONCILE RULE (three-signal override): Because there is no self-report to ancho
 When you pick beginner, intermediate, or competitive, the rules below also apply. When you pick advanced, ignore them and use the baseline-template path described above.
 
 ${SPECIFICITY_RULE}
-
-${CUE_PRIORITY_RULE}
 
 ${ANTI_FILLER_RULE}
 
