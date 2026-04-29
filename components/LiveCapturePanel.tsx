@@ -11,13 +11,14 @@ import { renderPose } from './PoseRenderer'
 import { getFrameAtTime } from './VideoCanvas'
 import { createStreamingLandmarkSmoother } from '@/lib/poseSmoothing'
 import { JOINT_GROUPS, type JointGroup } from '@/lib/jointAngles'
-import type { PoseFrame } from '@/lib/supabase'
+import type { PoseFrame, KeypointsJson } from '@/lib/supabase'
 import {
   clearOrphanedSession,
   getOrphanedSession,
   saveOrphanedSession,
   type OrphanedSession,
 } from '@/lib/liveSessionRecovery'
+import { extractPoseViaRailway, RailwayExtractError } from '@/lib/poseExtractionRailway'
 import LiveSwingCounter from './LiveSwingCounter'
 
 const SHOT_TYPES = ['forehand', 'backhand', 'serve', 'volley'] as const
@@ -211,6 +212,14 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   const [uploadStatus, setUploadStatus] = useState<string | null>(null)
   // The recorded session, held until the user picks Save / Discard / Re-record.
   const [pendingResult, setPendingResult] = useState<LiveSessionResult | null>(null)
+  // Phase 6 — Railway re-extraction progress (0..100) and a flag the
+  // review screen reads to decide whether to overlay the live keypoints
+  // (initial state) or the server keypoints (post-success). The note
+  // below the player ("Using on-device tracking — server extraction
+  // unavailable") is shown only on Railway failure.
+  const [extractProgress, setExtractProgress] = useState<number | null>(null)
+  const [extractedKeypoints, setExtractedKeypoints] = useState<KeypointsJson | null>(null)
+  const [usingFallback, setUsingFallback] = useState(false)
   // Object URL for the inline review player. Created when the user enters
   // review, revoked when they leave it (or on unmount).
   const [reviewVideoUrl, setReviewVideoUrl] = useState<string | null>(null)
@@ -542,9 +551,28 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     return () => window.clearInterval(id)
   }, [isRecording, getLastDetectStats])
 
-  // Run the upload + save pipeline against an already-finalized recording.
-  // Pulled out of handleStop so the Retry button (after a failure) and the
-  // Resume-orphan path can re-fire it without re-recording.
+  // Run the upload + extract + save pipeline against an already-finalized
+  // recording. Pulled out of handleStop so the Retry button (after a
+  // failure) and the Resume-orphan path can re-fire it without
+  // re-recording.
+  //
+  // Phase 6 flow:
+  //   1. Upload blob to Vercel Blob.
+  //   2. POST /api/sessions/live with mode='server-extract' — server creates
+  //      the row in status='extracting' and parks the live keypoints in
+  //      fallback_keypoints_json.
+  //   3. extractPoseViaRailway({ sessionId, blobUrl, onProgress }) — Modal
+  //      runs RTMPose on the GPU and writes the result back into
+  //      keypoints_json on the row. Polling is internal to the helper.
+  //   4. On success: POST /api/sessions/live/finalize with
+  //      outcome='server-ok' to flip status to 'complete', then hydrate
+  //      usePoseStore with the server frames.
+  //   5. On any RailwayExtractError (not-configured, timeout, error-status,
+  //      aborted, queue-failed): POST /api/sessions/live/finalize with
+  //      outcome='server-failed' so the server copies the live fallback
+  //      into keypoints_json. Hydrate the store with the LIVE frames so
+  //      /analyze still works (chunkier tracers, but functional). The
+  //      fallback note is surfaced inline in the review screen.
   const runSaveFlow = useCallback(async (
     result: LiveSessionResult,
     saveShotType: string,
@@ -552,7 +580,11 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     setReviewPhase('uploading')
     setStatus('uploading')
     setErrorMessage(null)
+    setExtractProgress(null)
+    setExtractedKeypoints(null)
+    setUsingFallback(false)
 
+    // 1. Upload the blob.
     let blobUrl: string
     try {
       setUploadStatus('Uploading video…')
@@ -578,6 +610,8 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       .map((e) => e.eventId)
       .filter((id): id is string => typeof id === 'string' && id.length > 0)
 
+    // 2. Create the session row in 'server-extract' mode.
+    let sessionId: string
     try {
       setUploadStatus('Saving session…')
       const res = await fetch('/api/sessions/live', {
@@ -586,6 +620,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         body: JSON.stringify({
           blobUrl,
           shotType: saveShotType,
+          mode: 'server-extract',
           keypointsJson: result.keypoints,
           swings: result.swings.map((s) => ({
             startFrame: s.startFrameIndex,
@@ -605,31 +640,104 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         setReviewPhase('error')
         return
       }
-      const { sessionId } = (await res.json()) as { sessionId: string }
-
-      // Success — clear any prior orphan (this session is safely persisted).
-      void clearOrphanedSession()
-
-      // Hydrate usePoseStore so /analyze picks this session up identically to
-      // an uploaded clip.
-      const objectUrl = URL.createObjectURL(result.blob)
-      poseSetFramesData(result.keypoints.frames)
-      poseSetBlobUrl(blobUrl)
-      poseSetLocalVideoUrl(objectUrl)
-      poseSetSessionId(sessionId)
-      poseSetShotType(saveShotType)
-
-      setUploadStatus(null)
-      setStatus('complete')
-      setReviewPhase('done')
-      router.replace('/analyze')
+      const body = (await res.json()) as { sessionId: string }
+      sessionId = body.sessionId
     } catch (err) {
       void saveOrphanedSession(result.blob, result.keypoints, result.swings, saveShotType)
       setErrorMessage(err instanceof Error ? err.message : 'Save failed')
       setUploadStatus(null)
       setStatus('error')
       setReviewPhase('error')
+      return
     }
+
+    // 3. Re-extract via Railway/Modal. extractPoseViaRailway throws a
+    // RailwayExtractError on any terminal failure; we catch and finalize
+    // with outcome='server-failed' so the row still ends in
+    // status='complete' (with the live keypoints copied into
+    // keypoints_json by the server).
+    setUploadStatus('Extracting…')
+    setExtractProgress(25)
+    let extractedFrames: PoseFrame[] | null = null
+    let extractFailureReason: string | null = null
+    try {
+      const extractResult = await extractPoseViaRailway({
+        sessionId,
+        blobUrl,
+        onProgress: (pct) => setExtractProgress(pct),
+      })
+      extractedFrames = extractResult.frames
+      // Hold the server keypoints so the review-screen overlay can
+      // swap in once they land. We mirror the live-keypoints shape so
+      // the existing render code paths just work.
+      setExtractedKeypoints({
+        ...result.keypoints,
+        frames: extractResult.frames,
+        fps_sampled: extractResult.fps,
+      })
+    } catch (err) {
+      if (err instanceof RailwayExtractError) {
+        extractFailureReason = err.reason
+      } else {
+        extractFailureReason = 'unknown'
+      }
+    }
+
+    // 4/5. Finalize the row. We don't surface a finalize-side network
+    // failure as a user-facing error: the row may still settle correctly,
+    // and the worst case is /analyze sees status='extracting' on a row
+    // we can heal later. Logged for observability.
+    const finalizeOutcome = extractedFrames ? 'server-ok' : 'server-failed'
+    try {
+      const finalizeRes = await fetch('/api/sessions/live/finalize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, outcome: finalizeOutcome }),
+      })
+      if (!finalizeRes.ok) {
+        // Non-fatal — log and continue. The user-facing flow has
+        // already succeeded (or has a fallback in hand); the row
+        // just hasn't been told yet.
+        console.warn(
+          'sessions/live/finalize returned',
+          finalizeRes.status,
+          'outcome=', finalizeOutcome,
+        )
+      }
+    } catch (err) {
+      console.warn('sessions/live/finalize threw', err)
+    }
+
+    // Success — clear any prior orphan (this session is safely persisted).
+    void clearOrphanedSession()
+
+    // Decide which frames hydrate /analyze: server-extracted if Railway
+    // succeeded; live fallback otherwise. usePoseStore is shape-agnostic
+    // — it just stores PoseFrame[].
+    const handoffFrames = extractedFrames ?? result.keypoints.frames
+    if (!extractedFrames) {
+      setUsingFallback(true)
+      // Keep the failure reason in the error message but DON'T flip
+      // reviewPhase to 'error': the session still saved, /analyze will
+      // still open. We just want the user to know they're seeing the
+      // chunkier tracers.
+      console.info('Live save: Railway extraction unavailable, using fallback', extractFailureReason)
+    }
+
+    // Hydrate usePoseStore so /analyze picks this session up identically to
+    // an uploaded clip.
+    const objectUrl = URL.createObjectURL(result.blob)
+    poseSetFramesData(handoffFrames)
+    poseSetBlobUrl(blobUrl)
+    poseSetLocalVideoUrl(objectUrl)
+    poseSetSessionId(sessionId)
+    poseSetShotType(saveShotType)
+
+    setUploadStatus(null)
+    setExtractProgress(null)
+    setStatus('complete')
+    setReviewPhase('done')
+    router.replace('/analyze')
   }, [
     poseSetBlobUrl,
     poseSetFramesData,
@@ -675,17 +783,27 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   // Whatever the live overlay was showing, the review screen replays it
   // by syncing each captured PoseFrame to the recorded video's playback
   // time. Lets the user verify the session was actually tracked AFTER
-  // they stop, instead of seeing a blank video and wondering. Only
-  // active during the review phase; rebinds when pendingResult changes.
+  // they stop, instead of seeing a blank video and wondering.
+  //
+  // Phase 6 — keep the overlay live during the 'uploading' phase too,
+  // so the review video isn't blank while Railway is extracting. Render
+  // server keypoints if they've landed (extractedKeypoints), otherwise
+  // fall back to the live ones. A single state transition swaps them in
+  // (no double-rAF, no canvas remount). The dependency on
+  // extractedKeypoints below is what triggers the swap.
   useEffect(() => {
-    if (!pendingResult || reviewPhase !== 'review') return
+    if (!pendingResult) return
+    if (reviewPhase !== 'review' && reviewPhase !== 'uploading') return
     const canvas = reviewCanvasRef.current
     const video = reviewVideoRef.current
     if (!canvas || !video) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    const frames = pendingResult.keypoints.frames
+    const frames =
+      extractedKeypoints?.frames && extractedKeypoints.frames.length > 0
+        ? extractedKeypoints.frames
+        : pendingResult.keypoints.frames
     if (frames.length === 0) return
 
     let cancelled = false
@@ -750,7 +868,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         try { video.cancelVideoFrameCallback(rvfcHandle) } catch { /* ignore */ }
       }
     }
-  }, [pendingResult, reviewPhase, reviewVideoUrl])
+  }, [pendingResult, reviewPhase, reviewVideoUrl, extractedKeypoints])
 
   // Aggregate session-quality summary used for the review-screen pill.
   // Computed once per pendingResult — averages the keypoint visibility
@@ -830,6 +948,9 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     setErrorMessage(null)
     setReviewPhase('review')
     setStatus('idle')
+    setExtractProgress(null)
+    setExtractedKeypoints(null)
+    setUsingFallback(false)
     swingCountRef.current = 0
     setSwingCount(0)
   }, [setErrorMessage, setStatus, setSwingCount])
@@ -1141,10 +1262,16 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
 
       {/* Pre-upload review screen. The user just hit Stop; before we burn
           the upload roundtrip + Vercel Blob storage we let them inspect
-          the recording and pick Save / Discard / Re-record. */}
-      {pendingResult && reviewPhase === 'review' ? (
+          the recording and pick Save / Discard / Re-record.
+          Phase 6: stays visible during the 'uploading' phase too so the
+          tracked-skeleton overlay continues to render while Railway is
+          extracting (the review video isn't blank during the wait). */}
+      {pendingResult && (reviewPhase === 'review' || reviewPhase === 'uploading') ? (
         <div
           data-testid="review-screen"
+          data-review-phase={reviewPhase}
+          data-using-server-keypoints={extractedKeypoints ? 'true' : 'false'}
+          data-using-fallback={usingFallback ? 'true' : 'false'}
           className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 space-y-4"
         >
           <p className="text-white font-semibold text-base">Review your session</p>
@@ -1187,6 +1314,22 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
                   </span>
                 </div>
               ) : null}
+              {/*
+                Phase 6 fallback note. Surfaced only when Railway
+                extraction finished as a failure and we're handing off
+                to /analyze with the live keypoints. Corner-of-the-review
+                placement keeps it ambient — the player doesn't need to
+                act on it, just to know why the tracers will look
+                chunkier than usual.
+              */}
+              {usingFallback ? (
+                <div
+                  data-testid="fallback-note"
+                  className="absolute bottom-3 right-3 inline-flex items-center gap-1.5 rounded-full bg-black/60 backdrop-blur px-2.5 py-1 text-[11px] text-white/70"
+                >
+                  Using on-device tracking — server extraction unavailable
+                </div>
+              ) : null}
             </div>
           ) : null}
           <div className="flex flex-wrap gap-4 text-sm text-white/70">
@@ -1198,26 +1341,54 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
               <span className="text-white font-semibold">{displaySeconds}s</span> duration
             </span>
           </div>
-          <div className="flex flex-col sm:flex-row gap-2">
-            <button
-              onClick={handleSavePending}
-              className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl px-4 py-3 transition-all"
-            >
-              Save
-            </button>
-            <button
-              onClick={handleDiscardPending}
-              className="flex-1 bg-white/10 hover:bg-white/20 text-white font-medium rounded-xl px-4 py-3 transition-all"
-            >
-              Discard
-            </button>
-            <button
-              onClick={handleRerecordPending}
-              className="flex-1 bg-white/10 hover:bg-white/20 text-white font-medium rounded-xl px-4 py-3 transition-all"
-            >
-              Re-record
-            </button>
-          </div>
+          {reviewPhase === 'review' ? (
+            <div className="flex flex-col sm:flex-row gap-2">
+              <button
+                onClick={handleSavePending}
+                className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl px-4 py-3 transition-all"
+              >
+                Save
+              </button>
+              <button
+                onClick={handleDiscardPending}
+                className="flex-1 bg-white/10 hover:bg-white/20 text-white font-medium rounded-xl px-4 py-3 transition-all"
+              >
+                Discard
+              </button>
+              <button
+                onClick={handleRerecordPending}
+                className="flex-1 bg-white/10 hover:bg-white/20 text-white font-medium rounded-xl px-4 py-3 transition-all"
+              >
+                Re-record
+              </button>
+            </div>
+          ) : (
+            // Phase 6 — Extracting… progress bar replaces the action
+            // buttons during the uploading/extracting window. The bar
+            // is driven by extractPoseViaRailway's onProgress callback
+            // (advances through 25 → ~90, then jumps to 100 on
+            // completion). On Railway-down or pre-extract failures
+            // setExtractProgress is null and the bar stays at 0; that's
+            // a visible-but-non-shouty indicator that the extract step
+            // never started.
+            <div data-testid="extract-progress" className="space-y-2">
+              <p className="text-white/80 text-sm">Extracting…</p>
+              <div
+                data-testid="extract-progress-bar"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={extractProgress ?? 0}
+                className="h-2 w-full rounded-full bg-white/10 overflow-hidden"
+              >
+                <div
+                  data-testid="extract-progress-fill"
+                  className="h-full bg-emerald-500 transition-all"
+                  style={{ width: `${Math.min(100, Math.max(0, extractProgress ?? 0))}%` }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       ) : null}
 

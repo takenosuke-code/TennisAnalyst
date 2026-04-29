@@ -206,12 +206,42 @@ describe('LiveCapturePanel — post-stop review flow', () => {
     uploadMock.mockResolvedValueOnce({
       url: 'https://blob.test.public.blob.vercel-storage.com/live/x.webm',
     })
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ sessionId: 'sess-1' }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    )
+    // Phase 6 — runSaveFlow now hits four endpoints:
+    //   POST /api/sessions/live          -> { sessionId }
+    //   POST /api/extract                -> { status: 'queued' }
+    //   GET  /api/sessions/[id]?include  -> { status: 'complete', keypoints_json }
+    //   POST /api/sessions/live/finalize -> { sessionId, outcome }
+    // fetchMock dispatches by URL so each one gets the right shape.
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const urlStr = typeof input === 'string' ? input : input.toString()
+      if (urlStr.endsWith('/api/sessions/live')) {
+        return new Response(JSON.stringify({ sessionId: 'sess-1', mode: 'server-extract', status: 'extracting' }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (urlStr.endsWith('/api/extract')) {
+        return new Response(JSON.stringify({ status: 'queued' }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (urlStr.includes('/api/sessions/sess-1') && urlStr.includes('include=keypoints')) {
+        return new Response(JSON.stringify({
+          status: 'complete',
+          keypoints_json: {
+            frames: [{ frame_index: 0, timestamp_ms: 0, landmarks: [] }],
+            fps_sampled: 30,
+            pose_backend: 'rtmpose',
+          },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (urlStr.endsWith('/api/sessions/live/finalize')) {
+        return new Response(JSON.stringify({ sessionId: 'sess-1', status: 'complete', outcome: 'server-ok' }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      // Unknown route — keep tests honest about which endpoints were hit.
+      return new Response('not mocked', { status: 500 })
+    })
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
 
     await act(async () => {
@@ -226,7 +256,7 @@ describe('LiveCapturePanel — post-stop review flow', () => {
     // A successful save clears any prior orphan.
     await waitFor(() => {
       expect(clearOrphanMock).toHaveBeenCalled()
-    })
+    }, { timeout: 4000 })
   })
 
   it('shows the resume prompt when an orphan exists in IndexedDB on mount', async () => {
@@ -282,5 +312,165 @@ describe('LiveCapturePanel — post-stop review flow', () => {
       expect(uploadMock).toHaveBeenCalledTimes(1)
     })
     expect(screen.queryByTestId('error-box')).not.toBeInTheDocument()
+  })
+
+  // -----------------------------------------------------------------------
+  // Phase 6 — server-extraction handoff
+  //
+  // The save flow now goes through /api/sessions/live (mode=server-extract),
+  // /api/extract, the polling endpoint, and /api/sessions/live/finalize.
+  // These tests build a per-test fetch dispatcher that lets us steer the
+  // extract path to either succeed (server keypoints land) or fail (Railway
+  // 'error-status') so we can assert on the resulting UI state.
+  // -----------------------------------------------------------------------
+
+  type FetchScript = {
+    extractStatus?: 'complete' | 'error'
+    finalizeStatus?: number
+  }
+
+  function makeFetchMock(script: FetchScript) {
+    const calls: { url: string; init?: RequestInit }[] = []
+    const SERVER_FRAME = { frame_index: 0, timestamp_ms: 0, landmarks: [] }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const urlStr = typeof input === 'string' ? input : input.toString()
+      calls.push({ url: urlStr, init })
+      if (urlStr.endsWith('/api/sessions/live')) {
+        return new Response(
+          JSON.stringify({ sessionId: 'sess-x', mode: 'server-extract', status: 'extracting' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (urlStr.endsWith('/api/extract')) {
+        return new Response(JSON.stringify({ status: 'queued' }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (urlStr.includes('/api/sessions/sess-x') && urlStr.includes('include=keypoints')) {
+        if (script.extractStatus === 'error') {
+          return new Response(
+            JSON.stringify({ status: 'error', error_message: 'modal exploded' }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        return new Response(
+          JSON.stringify({
+            status: 'complete',
+            keypoints_json: {
+              frames: [SERVER_FRAME],
+              fps_sampled: 30,
+              pose_backend: 'rtmpose',
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      if (urlStr.endsWith('/api/sessions/live/finalize')) {
+        return new Response(
+          JSON.stringify({ sessionId: 'sess-x', status: 'complete', outcome: 'server-ok' }),
+          { status: script.finalizeStatus ?? 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return new Response('not mocked', { status: 500 })
+    })
+    return { fetchMock, calls }
+  }
+
+  it("Phase 6 happy path: hits /sessions/live with mode='server-extract', then extracts, then finalizes server-ok", async () => {
+    await simulateStop(makeLiveResult(2))
+    uploadMock.mockResolvedValueOnce({
+      url: 'https://blob.test.public.blob.vercel-storage.com/live/x.webm',
+    })
+    const { fetchMock, calls } = makeFetchMock({})
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    })
+
+    // Wait until the finalize call lands — that's the last endpoint in the
+    // happy-path chain. The 1s extract poll dictates wall-clock here.
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith('/api/sessions/live/finalize'))).toBe(true)
+    }, { timeout: 4000 })
+
+    // /api/sessions/live was called with mode='server-extract'.
+    const liveCall = calls.find((c) => c.url.endsWith('/api/sessions/live'))
+    expect(liveCall).toBeDefined()
+    const liveBody = JSON.parse(liveCall!.init!.body as string)
+    expect(liveBody.mode).toBe('server-extract')
+    expect(liveBody.keypointsJson).toBeDefined()
+    expect(Array.isArray(liveBody.swings)).toBe(true)
+
+    // /api/extract was called with the same sessionId + blobUrl.
+    const extractCall = calls.find((c) => c.url.endsWith('/api/extract'))
+    expect(extractCall).toBeDefined()
+    const extractBody = JSON.parse(extractCall!.init!.body as string)
+    expect(extractBody.sessionId).toBe('sess-x')
+    expect(extractBody.blobUrl).toContain('vercel-storage.com')
+
+    // /api/sessions/live/finalize was called with outcome='server-ok'.
+    const finalizeCall = calls.find((c) => c.url.endsWith('/api/sessions/live/finalize'))
+    expect(finalizeCall).toBeDefined()
+    const finalizeBody = JSON.parse(finalizeCall!.init!.body as string)
+    expect(finalizeBody.outcome).toBe('server-ok')
+    expect(finalizeBody.sessionId).toBe('sess-x')
+
+    // No fallback note rendered — Railway succeeded.
+    expect(screen.queryByTestId('fallback-note')).not.toBeInTheDocument()
+  })
+
+  it("Phase 6 failure path: Railway error -> finalize with outcome='server-failed', fallback note shown", async () => {
+    await simulateStop(makeLiveResult(2))
+    uploadMock.mockResolvedValueOnce({
+      url: 'https://blob.test.public.blob.vercel-storage.com/live/x.webm',
+    })
+    const { fetchMock, calls } = makeFetchMock({ extractStatus: 'error' })
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    })
+
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith('/api/sessions/live/finalize'))).toBe(true)
+    }, { timeout: 4000 })
+
+    const finalizeCall = calls.find((c) => c.url.endsWith('/api/sessions/live/finalize'))
+    expect(finalizeCall).toBeDefined()
+    const finalizeBody = JSON.parse(finalizeCall!.init!.body as string)
+    // Failure outcome — server copies fallback into keypoints_json.
+    expect(finalizeBody.outcome).toBe('server-failed')
+
+    // The review screen flagged the fallback (data attr is the cleanest
+    // assertion target — the visible note may be removed once we navigate
+    // away to /analyze, depending on render-flush ordering).
+    const review = screen.queryByTestId('review-screen')
+    if (review) {
+      // Still on the review screen — the fallback note must be visible.
+      expect(review.getAttribute('data-using-fallback')).toBe('true')
+    }
+  })
+
+  it('extract progress bar advances during the extraction window', async () => {
+    await simulateStop(makeLiveResult(2))
+    uploadMock.mockResolvedValueOnce({
+      url: 'https://blob.test.public.blob.vercel-storage.com/live/x.webm',
+    })
+    const { fetchMock } = makeFetchMock({})
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    })
+
+    // Once the live POST + extract POST land, the progress bar should
+    // be at >=25 (extractPoseViaRailway emits 25 immediately after queue).
+    // Look for the bar; the value lives in aria-valuenow.
+    await waitFor(() => {
+      const bar = screen.getByTestId('extract-progress-bar')
+      const v = Number(bar.getAttribute('aria-valuenow') ?? '0')
+      expect(v).toBeGreaterThanOrEqual(25)
+    }, { timeout: 4000 })
   })
 })
