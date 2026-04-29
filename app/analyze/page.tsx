@@ -7,6 +7,9 @@ import JointTogglePanel from '@/components/JointTogglePanel'
 import SwingSelector from '@/components/SwingSelector'
 import SegmentPickerGrid from '@/components/SegmentPickerGrid'
 import BestShotPanel from '@/components/BestShotPanel'
+import TierOverrideChip from '@/components/TierOverrideChip'
+import SendToCoachButton from '@/components/SendToCoachButton'
+import { inferTierFromFrames } from '@/lib/tierInference'
 import SwingBaselineGrid, { type SwingBaselineSaveOverride } from '@/components/SwingBaselineGrid'
 import BackendChip from '@/components/BackendChip'
 import type { SegmentCardSaveOverride } from '@/components/SegmentCard'
@@ -41,7 +44,7 @@ export default function AnalyzePage() {
   const [baselineStatus, setBaselineStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [baselineError, setBaselineError] = useState<string | null>(null)
   const { user, loading: authLoading } = useUser()
-  const { profile, skipped, loading: profileLoading } = useProfile()
+  const { profile, skipped, loading: profileLoading, updateProfile } = useProfile()
   const isAdvanced = !profileLoading && profile?.skill_tier === 'advanced'
   // Always render both arms. Earlier the forehand view suppressed the
   // off-hand elbow/wrist on the theory that a one-armed shot makes the
@@ -69,6 +72,18 @@ export default function AnalyzePage() {
   // them from smoothed frames at the persisted FPS. Showing one count in
   // live and a different count in /analyze breaks trust; the persisted list
   // is the canonical record of what the player just did.
+  // Phase 1.5 — infer tier once per clip. Returns null if we can't
+  // commit to a confident guess; in that case the override chip is
+  // suppressed and the user keeps whatever tier their profile already
+  // has (defaulting to "intermediate" upstream).
+  const tierInference = useMemo(() => {
+    if (allFrames.length === 0) return null
+    const dominant = profile?.dominant_hand ?? 'right'
+    const result = inferTierFromFrames(allFrames, dominant)
+    if (!result || result.confidence < 0.45) return null
+    return result
+  }, [allFrames, profile?.dominant_hand])
+
   const swings = useMemo<SwingSegment[]>(() => {
     if (segments.length > 0 && allFrames.length > 0) {
       const fromSegments: SwingSegment[] = segments
@@ -365,6 +380,22 @@ export default function AnalyzePage() {
             )
           )}
 
+          {/* Phase 1.5 — Tier inference override chip. Renders only
+              when a confident inference disagrees with the stored tier
+              (or the user has none). Lets them confirm/override here
+              instead of bouncing back to /onboarding. */}
+          {done && tierInference && user && (
+            <TierOverrideChip
+              inferredTier={tierInference.tier}
+              currentTier={profile?.skill_tier ?? null}
+              reasons={tierInference.reasons}
+              confidence={tierInference.confidence}
+              onConfirm={async (t) => {
+                await updateProfile({ skill_tier: t })
+              }}
+            />
+          )}
+
           {/* Swing selector for longer videos */}
           {done && hasMultipleSwings && (
             <SwingSelector
@@ -487,6 +518,29 @@ export default function AnalyzePage() {
           {/* LLM coaching */}
           {done && (
             <LLMCoachingPanel frames={analysisFrames} />
+          )}
+
+          {/* Phase 4.1 — async coach review. Generates a public link
+              the user can text to their coach. The coach watches the
+              clip and taps "looks right" / "add this:". No SaaS account
+              for the coach — this is the wedge consumer rebuttal §4
+              wrote the spec for. */}
+          {done && blobUrl && (
+            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+              <div className="flex-1 min-w-0">
+                <p className="text-white text-sm font-medium">Get a pro to verify this read</p>
+                <p className="text-white/50 text-xs mt-0.5">
+                  Generate a 1-tap review link your coach can open from a text. They watch the clip and reply with one button.
+                </p>
+              </div>
+              <SendToCoachButton
+                sessionId={sessionId ?? null}
+                blobUrl={blobUrl}
+                cueTitle="Quick swing review"
+                cueBody="Mind taking a look at this swing? Tap one of the buttons below — looks right, or add what you'd change."
+                signedIn={!!user}
+              />
+            </div>
           )}
 
           {/* Baseline CTA — the main pivot action. Hidden for advanced-tier
