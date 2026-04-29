@@ -1,6 +1,27 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import type { ExtractorBackend } from '@/lib/poseExtraction'
+
+// Whether to render the diagnostic chip at all. Hidden in production
+// because three independent reviewers (consumer, investor, designer)
+// flagged "RTMPose · Modal GPU" as v0/hackathon energy. Still visible
+// in dev (NODE_ENV !== 'production') and via `?debug=1` query param so
+// we can keep using it for triage when tracing looks off.
+function useChipVisible(): boolean {
+  // Mount gate to avoid hydration mismatches: server renders nothing
+  // (SSR has no window.location), then on the client we re-render with
+  // the real visibility check. Cheaper than wrapping every consumer in
+  // a Suspense boundary.
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- standard SSR mount-gate
+    setMounted(true)
+  }, [])
+  if (!mounted) return false
+  if (process.env.NODE_ENV !== 'production') return true
+  return new URLSearchParams(window.location.search).get('debug') === '1'
+}
 
 // Diagnostic chip surfacing which backend produced the keypoints.
 // When tracing looks bad in the browser the user can immediately see
@@ -56,7 +77,9 @@ export default function BackendChip({
   reason?: string | null
   className?: string
 }) {
+  const visible = useChipVisible()
   if (!backend) return null
+  if (!visible) return null
   const { text, classes } = LABELS[backend]
   const hint = reason ? lookupHint(reason) ?? reason : null
   return (
