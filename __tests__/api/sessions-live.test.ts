@@ -238,6 +238,159 @@ describe('POST /api/sessions/live', () => {
     expect(upsertArg.is_multi_shot).toBe(true)
   })
 
+  it("defaults to mode='live-only' when mode is omitted (status=complete, keypoints_json populated)", async () => {
+    let capturedUpsertArgs: Record<string, unknown> | null = null
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'user_sessions') {
+        return {
+          upsert: (args: Record<string, unknown>) => {
+            capturedUpsertArgs = args
+            return {
+              select: () => ({
+                single: async () => ({
+                  data: { id: 'sess-default' },
+                  error: null,
+                }),
+              }),
+            }
+          },
+        }
+      }
+      if (table === 'video_segments') {
+        return {
+          insert: () => ({
+            select: async () => ({
+              data: [
+                { id: 'seg-1', segment_index: 1 },
+                { id: 'seg-2', segment_index: 2 },
+                { id: 'seg-3', segment_index: 3 },
+              ],
+              error: null,
+            }),
+          }),
+        }
+      }
+      return {}
+    })
+
+    const { POST } = await import('@/app/api/sessions/live/route')
+    const res = await POST(makeRequest(baseValidBody))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.mode).toBe('live-only')
+    expect(body.status).toBe('complete')
+    expect(capturedUpsertArgs).not.toBeNull()
+    const u = capturedUpsertArgs as unknown as Record<string, unknown>
+    expect(u.status).toBe('complete')
+    expect(u.keypoints_json).toBeTruthy()
+    // No fallback column set in live-only mode.
+    expect(u.fallback_keypoints_json).toBeUndefined()
+  })
+
+  it("server-extract mode: parks live keypoints in fallback_keypoints_json, leaves keypoints_json null, sets status='extracting'", async () => {
+    let capturedUpsertArgs: Record<string, unknown> | null = null
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'user_sessions') {
+        return {
+          upsert: (args: Record<string, unknown>) => {
+            capturedUpsertArgs = args
+            return {
+              select: () => ({
+                single: async () => ({
+                  data: { id: 'sess-extracting' },
+                  error: null,
+                }),
+              }),
+            }
+          },
+        }
+      }
+      if (table === 'video_segments') {
+        return {
+          insert: () => ({
+            select: async () => ({
+              data: [
+                { id: 'seg-1', segment_index: 1 },
+                { id: 'seg-2', segment_index: 2 },
+                { id: 'seg-3', segment_index: 3 },
+              ],
+              error: null,
+            }),
+          }),
+        }
+      }
+      return {}
+    })
+
+    const { POST } = await import('@/app/api/sessions/live/route')
+    const res = await POST(
+      makeRequest({ ...baseValidBody, mode: 'server-extract' }),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.mode).toBe('server-extract')
+    expect(body.status).toBe('extracting')
+    expect(body.sessionId).toBe('sess-extracting')
+
+    expect(capturedUpsertArgs).not.toBeNull()
+    const u = capturedUpsertArgs as unknown as Record<string, unknown>
+    // status flips to 'extracting' so the poller knows to wait.
+    expect(u.status).toBe('extracting')
+    // keypoints_json deliberately null — Railway is the writer.
+    expect(u.keypoints_json).toBeNull()
+    // Live keypoints land in the fallback column verbatim.
+    expect(u.fallback_keypoints_json).toEqual(baseValidBody.keypointsJson)
+    // session_mode and segment_count behave the same as live-only.
+    expect(u.session_mode).toBe('live')
+    expect(u.segment_count).toBe(3)
+  })
+
+  it("treats an unknown mode value as 'live-only' (back-compat for future-dated clients)", async () => {
+    // The route's mode resolution is intentionally permissive: anything
+    // it doesn't recognise falls through to 'live-only'. This protects
+    // older deployments from clients that ship a new mode value before
+    // the server is updated. Set up a minimal happy-path mock so the
+    // 'live-only' write path runs end-to-end.
+    mockFrom.mockImplementation((table: string) => {
+      if (table === 'user_sessions') {
+        return {
+          upsert: () => ({
+            select: () => ({
+              single: async () => ({
+                data: { id: 'sess-fallback' },
+                error: null,
+              }),
+            }),
+          }),
+        }
+      }
+      if (table === 'video_segments') {
+        return {
+          insert: () => ({
+            select: async () => ({
+              data: [
+                { id: 'seg-1', segment_index: 1 },
+                { id: 'seg-2', segment_index: 2 },
+                { id: 'seg-3', segment_index: 3 },
+              ],
+              error: null,
+            }),
+          }),
+        }
+      }
+      return {}
+    })
+
+    const { POST } = await import('@/app/api/sessions/live/route')
+    const res = await POST(
+      makeRequest({ ...baseValidBody, mode: 'bogus' }),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.mode).toBe('live-only')
+    expect(body.status).toBe('complete')
+  })
+
   it('accepts an empty swings list (zero-swing session)', async () => {
     let videoSegmentInsertCalled = false
     mockFrom.mockImplementation((table: string) => {

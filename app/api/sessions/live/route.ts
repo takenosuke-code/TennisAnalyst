@@ -7,6 +7,20 @@ const ALLOWED_BLOB_HOST_SUFFIX = '.public.blob.vercel-storage.com'
 
 const VALID_SHOT_TYPES = new Set(['forehand', 'backhand', 'serve', 'volley'] as const)
 
+// Two save modes.
+//   'live-only'      — pre-Phase-6 behaviour: live keypoints are
+//                      authoritative, status flips straight to
+//                      'complete'. Default so existing clients/tests
+//                      keep working unchanged.
+//   'server-extract' — Phase 6: Railway will re-extract. Park the live
+//                      keypoints in fallback_keypoints_json, leave
+//                      keypoints_json null for now, set
+//                      status='extracting'. The /api/sessions/live/finalize
+//                      endpoint settles the row once Railway returns
+//                      (or fails).
+const VALID_MODES = new Set(['live-only', 'server-extract'] as const)
+type SaveMode = 'live-only' | 'server-extract'
+
 type IncomingSwing = {
   startFrame?: unknown
   endFrame?: unknown
@@ -71,6 +85,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'keypointsJson.frames is required' }, { status: 400 })
   }
 
+  // Mode resolution. Default 'live-only' preserves the pre-Phase-6
+  // contract for any caller that hasn't been updated. The Phase 6
+  // client (LiveCapturePanel.runSaveFlow) opts in by sending
+  // mode: 'server-extract'.
+  const mode: SaveMode =
+    typeof b.mode === 'string' && (VALID_MODES as Set<string>).has(b.mode)
+      ? (b.mode as SaveMode)
+      : 'live-only'
+
   const rawSwings = Array.isArray(b.swings) ? (b.swings as IncomingSwing[]) : []
   const swings = rawSwings.map((s, i) => ({
     segment_index: i + 1,
@@ -86,21 +109,42 @@ export async function POST(request: NextRequest) {
     ? (b.batchEventIds as unknown[]).filter((x): x is string => typeof x === 'string' && x.length > 0)
     : []
 
-  // 1. Insert user_sessions row
+  // 1. Insert user_sessions row.
+  //
+  // 'live-only' (default): keypoints_json holds the live keypoints,
+  // status='complete'. Same shape the route has always produced.
+  //
+  // 'server-extract': keypoints_json is intentionally left null so the
+  // poll loop in extractPoseViaRailway only flips to 'complete' once
+  // Railway has actually written its (better) result. The live
+  // keypoints are stashed in fallback_keypoints_json so the finalize
+  // endpoint can copy them back if Railway fails or times out.
+  // status='extracting'.
+  const upsertPayload =
+    mode === 'server-extract'
+      ? {
+          blob_url: blobUrl,
+          shot_type: shotType,
+          keypoints_json: null,
+          fallback_keypoints_json: kp,
+          status: 'extracting',
+          session_mode: 'live',
+          is_multi_shot: swings.length > 1,
+          segment_count: swings.length,
+        }
+      : {
+          blob_url: blobUrl,
+          shot_type: shotType,
+          keypoints_json: kp,
+          status: 'complete',
+          session_mode: 'live',
+          is_multi_shot: swings.length > 1,
+          segment_count: swings.length,
+        }
+
   const { data: sessionRow, error: sessionErr } = await supabaseAdmin
     .from('user_sessions')
-    .upsert(
-      {
-        blob_url: blobUrl,
-        shot_type: shotType,
-        keypoints_json: kp,
-        status: 'complete',
-        session_mode: 'live',
-        is_multi_shot: swings.length > 1,
-        segment_count: swings.length,
-      },
-      { onConflict: 'blob_url' },
-    )
+    .upsert(upsertPayload, { onConflict: 'blob_url' })
     .select('id')
     .single()
   if (sessionErr || !sessionRow) {
@@ -160,5 +204,7 @@ export async function POST(request: NextRequest) {
     sessionId,
     segmentCount: swings.length,
     eventsBackfilled: batchEventIds.length,
+    mode,
+    status: mode === 'server-extract' ? 'extracting' : 'complete',
   })
 }

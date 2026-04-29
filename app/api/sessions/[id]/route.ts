@@ -19,8 +19,15 @@ export async function GET(
   const { id } = await params
   const includeKeypoints = request.nextUrl.searchParams.get('include') === 'keypoints'
 
+  // Phase 6: when a live session opted into server-extraction we stash
+  // the live keypoints in fallback_keypoints_json. Surfacing it here as
+  // a sibling field (NOT mapped onto keypoints_json) keeps the client's
+  // logic unambiguous: keypoints_json present => server extraction
+  // succeeded; keypoints_json null + fallback_keypoints_json present =>
+  // extraction is mid-flight or failed and the caller should decide
+  // whether to wait or fall back.
   const columns = includeKeypoints
-    ? 'id, blob_url, shot_type, status, error_message, created_at, keypoints_json'
+    ? 'id, blob_url, shot_type, status, error_message, created_at, keypoints_json, fallback_keypoints_json'
     : 'id, blob_url, shot_type, status, error_message, created_at'
 
   const { data, error } = await supabase
