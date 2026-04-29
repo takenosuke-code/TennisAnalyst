@@ -17,6 +17,15 @@ const ALL_VISIBLE: Record<JointGroup, boolean> = {
   ankles: true,
 }
 
+const ALL_HIDDEN: Record<JointGroup, boolean> = {
+  shoulders: false,
+  elbows: false,
+  wrists: false,
+  hips: false,
+  knees: false,
+  ankles: false,
+}
+
 export default function BaselineWatchPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const { user, loading: authLoading } = useUser()
@@ -116,9 +125,8 @@ export default function BaselineWatchPage({ params }: { params: Promise<{ id: st
           <VideoCanvas
             src={baseline.blob_url}
             framesData={baseline.keypoints_json?.frames ?? []}
-            visible={ALL_VISIBLE}
+            visible={showOverlay ? ALL_VISIBLE : ALL_HIDDEN}
             showSkeleton={showOverlay}
-            showRacket={showOverlay}
             showAngles={showOverlay}
             shotType={baseline.shot_type}
           />
