@@ -69,6 +69,122 @@ YOLO_INPUT_SIZE = 640  # matches racket_detector.INPUT_SIZE — both share yolo1
 POSE_DEVICE = os.environ.get("POSE_DEVICE", "cpu").strip().lower()
 _USE_GPU = POSE_DEVICE in ("cuda", "gpu")
 
+# POSE_DISABLE_TRT is the runtime rollback toggle for TensorRT
+# Execution Provider. Set to "1" / "true" via Modal dashboard env vars
+# to skip TRT and fall back to plain CUDA EP — no redeploy needed.
+# Useful if a TRT engine cache becomes corrupt or a model update
+# breaks engine compatibility.
+_DISABLE_TRT = os.environ.get("POSE_DISABLE_TRT", "").strip().lower() in ("1", "true", "yes")
+
+# Angle MAE tolerance vs FP32 baseline: 2°. Verify any TRT-FP16 deploy
+# against railway-service/tests/ regression harness on IMG_1098 before
+# rolling out. Documented here next to the provider config so the
+# tolerance is visible to anyone touching the providers list.
+
+# Tracks the active provider for the most recently built session so
+# the Modal endpoint can stamp it into the response timing block. Set
+# by the session-build path below.
+_active_provider: Optional[str] = None
+
+
+def _build_gpu_providers() -> list:
+    """Provider list for GPU runs. Order matters: ORT picks the first
+    available provider. TensorRT runs ahead of CUDA when enabled and
+    the runtime supports it. CPU stays at the tail as the safety net.
+
+    The TensorRT EP needs an engine cache directory; we point it at a
+    persistent path that the Modal image-build pre-warm step seeds
+    during `Image.run_function`. If the cache isn't seeded the first
+    request after a cold start pays the engine-compile tax (~10–20s),
+    but subsequent requests in the container reuse the engine.
+    """
+    if _DISABLE_TRT:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    trt_options = {
+        "trt_fp16_enable": True,
+        "trt_engine_cache_enable": True,
+        "trt_engine_cache_path": str(MODEL_DIR / "trt_cache"),
+    }
+    return [
+        ("TensorrtExecutionProvider", trt_options),
+        "CUDAExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+
+
+def _build_session_with_fallback(onnx_path: str, sess_options) -> "object":
+    """Construct an ORT InferenceSession with TRT preferred, CUDA fallback.
+
+    Why a wrapper instead of relying on ORT's provider-order auto-fall:
+    ORT's provider-order behavior covers "provider not registered" but
+    NOT engine-build / engine-load failures, which raise during
+    `InferenceSession.__init__` itself. Wrap the call, catch broad
+    runtime exceptions whose message mentions tensorrt/trt, retry
+    without TRT, log loud.
+
+    Returns the session and stamps `_active_provider` so the Modal
+    endpoint can include it in response timing.
+    """
+    import sys
+    global _active_provider
+
+    import onnxruntime as ort  # type: ignore
+
+    if not _USE_GPU:
+        sess = ort.InferenceSession(
+            onnx_path,
+            sess_options=sess_options,
+            providers=["CPUExecutionProvider"],
+        )
+        _active_provider = "CPU"
+        return sess
+
+    providers = _build_gpu_providers()
+    try:
+        sess = ort.InferenceSession(
+            onnx_path,
+            sess_options=sess_options,
+            providers=providers,
+        )
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc).lower()
+        is_trt_error = (
+            "tensorrt" in msg
+            or "trt" in msg
+            or "engine" in msg
+        ) and not _DISABLE_TRT
+        if not is_trt_error:
+            raise
+        # Retry without TRT.
+        print(
+            f"[pose_rtmpose] TRT session build failed ({type(exc).__name__}: {exc}); "
+            f"falling back to CUDAExecutionProvider",
+            file=sys.stderr,
+        )
+        sess = ort.InferenceSession(
+            onnx_path,
+            sess_options=sess_options,
+            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+
+    # Detect which provider actually loaded.
+    actual_providers = sess.get_providers()
+    if "TensorrtExecutionProvider" in actual_providers:
+        _active_provider = "TRT"
+    elif "CUDAExecutionProvider" in actual_providers:
+        _active_provider = "CUDA"
+    else:
+        _active_provider = "CPU"
+    return sess
+
+
+def get_active_provider() -> Optional[str]:
+    """Returns 'TRT' / 'CUDA' / 'CPU' / None. Used by the Modal endpoint
+    to stamp the timing block with the actual provider that handled the
+    most recently built session."""
+    return _active_provider
+
 # Bbox padding around the YOLO detection before we pass it to RTMPose.
 # RTMPose's preprocessing already adds a 1.25 padding factor on the
 # input bbox to crop a square-ish region around the person, but it
@@ -185,28 +301,20 @@ def _ensure_yolo() -> None:
             import onnxruntime as ort
 
             # YOLO11n is small (~6M params). Outer parallelism (the
-            # ThreadPoolExecutor in main._extract_with_rtmpose) gets all
-            # cores by submitting N concurrent inferences; intra-op
-            # parallelism inside a single inference would just thrash
-            # the kernel scheduler. Single-thread each session.
+            # ThreadPoolExecutor in extraction._extract_with_rtmpose)
+            # gets all cores by submitting N concurrent inferences;
+            # intra-op parallelism inside a single inference would just
+            # thrash the kernel scheduler. Single-thread each session.
             so = ort.SessionOptions()
             so.intra_op_num_threads = 1
             so.inter_op_num_threads = 1
             so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-            # POSE_DEVICE=cuda → prefer CUDAExecutionProvider, fall back
-            # to CPU if CUDA isn't available (e.g. driver missing on a
-            # cold Modal container). Order matters: ORT picks the first
-            # available provider.
-            providers = (
-                ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                if _USE_GPU
-                else ["CPUExecutionProvider"]
-            )
-            sess = ort.InferenceSession(
-                str(YOLO_ONNX_PATH),
-                sess_options=so,
-                providers=providers,
-            )
+            # GPU runs prefer TensorRT FP16 with CUDA fallback (see
+            # _build_gpu_providers). _build_session_with_fallback wraps
+            # ORT session construction so a TRT engine-build failure
+            # falls back to plain CUDA without 500-ing the request.
+            (MODEL_DIR / "trt_cache").mkdir(parents=True, exist_ok=True)
+            sess = _build_session_with_fallback(str(YOLO_ONNX_PATH), so)
             _yolo_input_name = sess.get_inputs()[0].name
             _yolo_session = sess
         except Exception as e:
@@ -274,15 +382,9 @@ def _ensure_rtmpose() -> None:
                     so.intra_op_num_threads = 1
                     so.inter_op_num_threads = 1
                     so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-                    rtm_providers = (
-                        ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                        if _USE_GPU
-                        else ["CPUExecutionProvider"]
-                    )
-                    _rtm_session.session = ort.InferenceSession(
-                        onnx_path,
-                        sess_options=so,
-                        providers=rtm_providers,
+                    # Same TRT-preferred / CUDA-fallback path as YOLO.
+                    _rtm_session.session = _build_session_with_fallback(
+                        onnx_path, so,
                     )
             except Exception as swap_err:  # noqa: BLE001
                 # If the swap fails for any reason (rtmlib internal
@@ -637,5 +739,6 @@ __all__ = [
     "detect_person_bbox",
     "detect_person_bbox_tracked",
     "expand_bbox",
+    "get_active_provider",
     "infer_pose_for_frame",
 ]
