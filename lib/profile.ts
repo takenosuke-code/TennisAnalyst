@@ -200,21 +200,116 @@ function describeGoal(profile: UserProfile): string {
 const RECONCILE_RULE = `RECONCILE RULE: The self-reported tier is a CONTRACT. Coach to it. Do NOT downgrade the player mid-response because the pose data looks rougher than the stated tier. Single-camera pose estimates are noisy. A weird elbow angle or scattered hip rotation is almost always camera geometry, occlusion, or a single off-take, NOT evidence that the player misreported their level. Trust the self-report. If the numbers surprise you, assume the camera is at fault, pick the cleanest frames to anchor on, and coach them at the tier they told you they're at. Never imply they overestimated themselves. Never phrase feedback like "let's lock in the basics first" unless their tier is beginner. Meet them exactly where they said they are.`
 
 // Rewritten 2026-04 after Park et al. (2024) DPO verbosity bias + MIT/CVPR 2025
-// negation-handling work. Rules:
-//   1. No negations. Every directive is a positive "do X" statement.
+// negation-handling work. Then re-tightened 2026-04 against the
+// tennis-coaching pedagogy brief (Wulf 2013 external focus; McNevin 2003 +
+// 2024 distance-effect meta-analysis; Liao & Masters 2001 analogy learning;
+// ITF constraints-led practice). Rules:
+//   1. No negations inside TIER_RULES strings themselves. Every directive
+//      is a positive "do X" statement. The negation-bearing material
+//      (anti-filler list, banned-jargon list) lives in adjacent rule
+//      blocks injected by buildTierCoachingBlock. This split is enforced
+//      by the TIER_RULES phrasing-invariants test.
 //   2. Explicit word cap inside the rule string so the model anchors on it.
 //   3. Beginner leads with a strength so the first thing they read is positive.
 //   4. Advanced has a literal default baseline template (see ADVANCED_BASELINE_TEMPLATE)
 //      — positive-framed, short, and the model copies it verbatim when there
-//      is nothing substantive to refine.
-//   5. Beginner cues are EXTERNAL-focus (Wulf 2013): "push through the contact",
-//      "let the racket swing out low to high", NOT internal joint references.
+//      is nothing substantive to refine. The advanced TIER_RULES string is
+//      deliberately spare — anti-filler / specificity / examples are NOT
+//      injected for the advanced tier (see buildTierCoachingBlock).
+//   5. Cues across all detail-coached tiers are EXTERNAL-focus (Wulf 2013):
+//      attention on the racket, the ball, or a court landmark, not on a
+//      muscle. Beginner uses PROXIMAL external referents (landmarks on the
+//      body or racket — "racket tip up by your ear"). Competitive can use
+//      distal court landmarks ("aim three balls past the opposite service-
+//      line corner") since the 2024 meta-analysis shows distance-effect
+//      benefits scale with skill.
+//   6. Each cue must satisfy at least TWO of: named landmark, named swing
+//      phase, measurable target, external-focus referent. SPECIFICITY_RULE
+//      states this explicitly with examples; the per-tier rules echo it
+//      in tier-appropriate vocabulary (beginner: no biomech jargon;
+//      intermediate: stroke-name vocabulary; competitive: phase-name
+//      vocabulary).
 export const TIER_RULES: Record<SkillTier, string> = {
-  beginner: `TIER: Beginner. Lead with ONE sentence about a strength you see in their swing. Then give 2 or 3 external-focus coaching cues (what to feel, where to direct the racket, where to send the ball), things like "push the ball toward the far fence" or "finish with your racket up by your ear". Keep cues physical and feel-based. Stay under 120 words total. End on an encouraging one-liner about what to focus on next time.`,
-  intermediate: `TIER: Intermediate. Give 2 or 3 coaching cues that mix a foundation tune-up with a refinement. Lead with what's working, then hand them the cues as numbered feel-based tips. Stay under 180 words total. Close with a one-line practice focus.`,
-  competitive: `TIER: Competitive match player. Give exactly 3 execution cues focused on polish and matchplay. Lead with what's working, then give the 3 cues as numbered tips, each one actionable on the next ball. Stay under 220 words total. Close with a one-line takeaway.`,
+  beginner: `TIER: Beginner (no serious play, returning casual, or kid). Lead with ONE sentence about a strength you see in their swing. Then give 2 or 3 external-focus coaching cues; each cue must reference a body or racket landmark a 12-year-old could find ("racket tip up by your ear", "step toward the far net post", "finish with your strings facing the back fence", "push the ball toward the cone past the service line"). Each cue pairs ONE landmark with ONE measurable check the player can run on the next swing. Use everyday words: turn sideways, racket up, swing low to high like brushing the ball up a window. Cap mechanical detail at ONE thing per cue. Stay under 120 words total. End on an encouraging one-liner about which landmark to chase next session.`,
+  intermediate: `TIER: Intermediate (NTRP 3.0–4.0; consistent rallies, recognizable stroke shape). Give 2 or 3 coaching cues that mix one foundation tune-up with one refinement. Lead with what's working in two specific sentences (which phase, which landmark), then hand them the cues as numbered feel-based tips. Each cue ties a NAMED swing phase (prep, racket-drop, contact window, follow-through, recovery) to a body or racket landmark AND a measurable check ("contact a foot in front of your front hip; if the ball pulls your shoulder forward, contact was a beat late"). Stroke-name vocabulary is welcome (slice, topspin, open vs closed stance, split step). Stay under 180 words total. Close with a one-line practice focus naming the phase and the check.`,
+  competitive: `TIER: Competitive match player (NTRP 4.5+, regular matchplay). Give exactly 3 execution cues focused on millimeter polish and matchplay leverage. Lead with what's working in two specific sentences naming phase and landmark. Each of the 3 cues must (a) name the specific stroke and the specific phase ("forehand contact window", "second-serve toss release", "backhand recovery step"), (b) state the measurable drift you observed against a clean version of that phase, and (c) tie the fix to a tactical pattern they hit on every match (cross-court angle, inside-out forehand, kick-serve location, return depth). Each cue is actionable on the very next ball. Technical vocabulary is welcome where it's accurate: kinetic chain, racket lag, pronation, racket-head speed, swing path, stance load. Stay under 220 words total. Close with a one-line takeaway naming the single phase to groove this week.`,
   advanced: `TIER: Advanced. Their mechanics are refined. Default to reinforcing the swing: emit the single sentence "This is clean. Save it as your baseline." If, and only if, you see a concrete micro-refinement worth one cue, add ONE short positive tip after that sentence. Stay under 60 words total. Keep the frame positive throughout.`,
 }
+
+// Specificity contract — every cue body must do at least TWO of these four
+// things. Lifted directly from the pedagogy brief (Wulf 2013; McNevin et al.
+// 2003 + 2024 meta). Lives outside TIER_RULES so it can use whatever framing
+// reads cleanest, including negations, without breaking the per-tier
+// phrasing-invariants test. Injected into the system prompt by
+// buildTierCoachingBlock for every detail-coached tier (skipped for
+// advanced — that path is the baseline-template branch).
+export const SPECIFICITY_RULE = `SPECIFICITY CONTRACT: Every cue body MUST do at least TWO of these four:
+1. Name a body or court LANDMARK ("racket tip up by the ear", "ball lands inside the service-line tape", "contact a foot in front of the front hip", "belt buckle facing the side fence", "butt cap pointing back at the ball you just hit").
+2. Reference a named swing PHASE ("at the loading turn", "as the back foot pushes", "through the contact window", "into the follow-through", "during the recovery step").
+3. Give a MEASURABLE target ("three balls in a row past the service line", "strings still facing the target one full step past contact", "the back foot leaves the ground").
+4. Use an EXTERNAL-focus referent — attention on the racket, the ball, or a court target, never on a muscle. For lower-skill players prefer PROXIMAL external focus (landmarks on the body or racket); for higher-skill players a DISTAL court landmark works better.
+
+Vague mood words ("more fluid", "more explosive", "more dynamic"), abstract exhortations ("really focus", "trust it"), and unmeasurable degrees ("a touch more", "a little bit more") are NOT cues. Replace them with a landmark + a measurable check.
+
+When the same fault has both a "don't" framing and a positive framing, ALWAYS pick the positive: "keep the racket-butt and forearm in one straight line through the contact window" instead of "don't break your wrist".`
+
+// Filler / dead-phrase blacklist. The list is verbatim from the pedagogy
+// brief's Section 2 ("Filler / dead phrases the LLM must NOT emit"). Negations
+// are intentional and live outside TIER_RULES. The phrasing is "if a sentence
+// works without one of these, omit it" so the rule survives prompt rewrites
+// without becoming a list of magic incantations to avoid.
+export const ANTI_FILLER_RULE = `ANTI-FILLER LIST: Strip these phrases from your output. If a sentence works without one of them, omit it; if it doesn't work without one, the sentence itself is filler and should be cut entirely.
+
+1. "As a coach…" / "From a coaching perspective…" (preamble)
+2. "That's a great question / great swing!" (throat-clearing)
+3. "You might want to consider…" / "It could be helpful to…" (hedge)
+4. "Really focus on…" / "Make sure you…" (exhortation, no information)
+5. "Keep working hard, you've got this!" (generic encouragement)
+6. "Now, moving on to the next point…" (redundant transition)
+7. "Try to be more dynamic / fluid / explosive / powerful." (mood word, no referent)
+8. "Don't think about your wrist." (negation; the brain renders the noun anyway)
+9. "Just relax." (no actionable target)
+10. "Feel the flow of the stroke." (vague kinesthetic)
+11. "Use your whole body." (no landmark)
+12. "Get into the zone." (mystical)
+13. "Trust the process." (filler)
+14. "A little bit more / a touch more X." (unmeasurable)
+15. "Let's lock in the basics first." (condescending, and explicitly banned by the reconcile rule)
+
+Also omit: medical or anatomical claims ("this protects your shoulder"), body-shaming framing ("you're too stiff"), cause-blaming the player ("you're being lazy with your feet"), comparisons to named pros ("swing like Sinner"), and negations as primary cues. Convert every "don't drop the elbow" into a positive "keep the elbow at shoulder height through contact".`
+
+// Drill-quality contract for the cue.exercises[] field. The structured tool
+// schema requires 1–2 exercises per cue; this rule turns those slots into
+// court-runnable drills with a constraint, a rep target, a feed type, and a
+// success criterion. Lifted from the pedagogy brief Section 4 (ITF
+// constraints-led practice). Negations OK because this lives outside
+// TIER_RULES. Sized so it fits the 200-char per-exercise schema cap.
+export const DRILL_QUALITY_RULE = `DRILL QUALITY: Every entry in a cue's exercises[] array must include (a) a CONSTRAINT that auto-corrects the fault (smaller target, lowered net, restricted stance, hand-feed only, towel under the back foot, cone at a target landing spot), (b) a specific REP COUNT, (c) a FEED TYPE (shadow swing, hand-feed, racket-feed slow, live ball, wall rally, ball machine), and (d) a SUCCESS CRITERION the player can self-score on court.
+
+Good: "Shadow forehands with a cone at your contact point: 15 reps, swing only counts if the racket tip ends up by your ear and the cone is still standing."
+Good: "Cross-court forehand wall rally, hand-feed start: 20 contacts in a row that land above the wall stripe. Reset to zero if one misses."
+Bad: "Practice forehands until they feel better." (no constraint, no count, no success criterion)
+Bad: "Work on your contact point." (no feed, no measurable target)
+
+Beginners start at shadow or hand-feed. Intermediate moves to racket-feed and wall rallies. Competitive uses live ball with a constraint.`
+
+// Few-shot benchmark cues. Lifted verbatim from the pedagogy brief Section 6
+// (Gold-standard cue examples). Each is a body-field exemplar that obeys the
+// specificity contract: external focus, named landmark, named phase,
+// measurable check, no hedges, no negations, no medical claims. Tier tags
+// in parens so the model picks the right vocabulary register without us
+// needing three copies of this block.
+export const COACHING_EXAMPLES_BLOCK = `EXAMPLES of strong cue bodies (imitate this register, do not copy the words):
+
+1. Wrist breaks at contact (intermediate). "Lock the butt-cap and your forearm into one straight line as the strings meet the ball, and hold that line until the racket clears your front hip. The check: your strings should still be facing the target one full step past contact. If they twist early, the wrist let go."
+
+2. Weak hip rotation on the forehand (competitive). "Start the swing with your belt buckle facing the side fence and finish it with the buckle facing the opposite net post. Push the back hip toward the incoming ball as the racket drops below it. Three reps in a row where the back foot ends up off the ground means the hips, not the arm, drove the ball."
+
+3. Pushy follow-through (intermediate). "Throw the racket head up and over your opposite shoulder so the butt cap finishes pointing back at the ball you just hit. The strings should brush up the back of the ball like wiping a window from low to high. If the racket stops in front of you, the hand decelerated before contact cleared."
+
+4. Late contact point on the forehand (beginner). "Catch the ball out in front of your lead hip, close enough that you could shake hands with it. Finish with the racket tip up by your ear on the opposite side. If the ball pulls your shoulder forward as you hit, you waited a beat too long."
+
+5. Serve toss drifting behind the head (competitive). "Release the toss when your tossing arm is straight up alongside your front ear, and let the ball land a foot inside the baseline and a foot to the right of your front foot. Mark that spot with a cone for the first basket of serves. If the ball lands behind the baseline, the release was late."`
 
 // Literal string the advanced tier defaults to. When the tool_use output
 // emits this exact sentence (and nothing else substantive), we flag the
@@ -694,6 +789,14 @@ ${TIER_ASSESSMENT_TRAILER}`
 // Returns the prompt fragment that tier-specific coaching is built from.
 // Designed to be interpolated into the route prompts — contains the tier
 // rule, reconcile rule, handedness context, and goal weighting.
+//
+// For the three detail-coached tiers (beginner / intermediate / competitive)
+// we also inject the SPECIFICITY_RULE, ANTI_FILLER_RULE, DRILL_QUALITY_RULE,
+// and COACHING_EXAMPLES_BLOCK so the LLM has the concrete contract + few-
+// shot exemplars in front of it. The advanced tier is deliberately spared:
+// its baseline-template path is meant to be terse and drift-focused, and
+// loading three pages of specificity rules into a "save this as your
+// baseline" response would defeat that.
 export function buildTierCoachingBlock(profile: UserProfile | null): string {
   if (!profile) return GENERIC_CALIBRATION
 
@@ -707,6 +810,13 @@ export function buildTierCoachingBlock(profile: UserProfile | null): string {
     profile.backhand_style === 'one_handed' ? 'one-handed backhand' : 'two-handed backhand'
   const goalLabel = describeGoal(profile)
 
+  // Advanced stays minimal. The three detail-coached tiers get the full
+  // specificity / anti-filler / drill-quality / examples scaffolding.
+  const detailBlocks =
+    profile.skill_tier === 'advanced'
+      ? ''
+      : `\n\n${SPECIFICITY_RULE}\n\n${ANTI_FILLER_RULE}\n\n${DRILL_QUALITY_RULE}\n\n${COACHING_EXAMPLES_BLOCK}`
+
   return `${tierRule}
 
 ${RECONCILE_RULE}
@@ -716,7 +826,7 @@ PLAYER CONTEXT:
 - Backhand style: ${backhandLabel}. When discussing the backhand side, tailor cues to this grip.
 
 GOAL WEIGHTING:
-- The player's stated priority is: ${goalLabel}. Prioritize observations that move the needle on this goal and mention it explicitly in at least one cue.
+- The player's stated priority is: ${goalLabel}. Prioritize observations that move the needle on this goal and mention it explicitly in at least one cue.${detailBlocks}
 
 ${TIER_ASSESSMENT_TRAILER}`
 }
@@ -749,6 +859,16 @@ TIER RULES (use the one matching the tier you picked):
 - advanced: ${TIER_RULES.advanced}
 
 RECONCILE RULE (three-signal override): Because there is no self-report to anchor on, you are allowed to shift your inferred tier mid-response if, and only if, at least THREE independent signals agree with the shift. Examples of independent signals: kinetic chain sequencing, trunk rotation magnitude, contact-point consistency across frames, racket-drop depth, phase-timing regularity. One weird number is not a signal. One off-frame is not a signal. If you shift, be explicit: "updating my read to <tier>" and continue from there. If only one or two signals disagree with your first guess, assume noise and stay the course.
+
+When you pick beginner, intermediate, or competitive, the rules below also apply. When you pick advanced, ignore them and use the baseline-template path described above.
+
+${SPECIFICITY_RULE}
+
+${ANTI_FILLER_RULE}
+
+${DRILL_QUALITY_RULE}
+
+${COACHING_EXAMPLES_BLOCK}
 
 ${TIER_ASSESSMENT_TRAILER}`
 }
