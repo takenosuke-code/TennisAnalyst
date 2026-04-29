@@ -156,7 +156,7 @@ describe('renderCoachingToolInputToMarkdown', () => {
     expect(md).toContain("## What You're Doing Well")
     expect(md).toContain('Strong rotation')
     expect(md).toContain('Good racket prep')
-    expect(md).toContain('## Your Coaching Cues')
+    expect(md).toContain('## Detailed Read')
     expect(md).toContain('**1. Alpha**')
     expect(md).toContain('alpha body')
     expect(md).toContain('**2. Bravo**')

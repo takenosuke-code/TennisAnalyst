@@ -456,13 +456,14 @@ function matchesBaselineTemplate(s: string): boolean {
 //   <strengths[0].text>
 //   <strengths[1].text>   (if present)
 //
-//   ## Your Coaching Cues    (omitted when cues.length === 0)
+//   ## Quick Read           (omitted when no cue has keyPoints)
+//   **1. <cues[0].title>**
+//   - <kp> ...
 //
+//   ## Detailed Read        (omitted when cues.length === 0)
 //   **1. <cues[0].title>**
 //   <cues[0].body>
-//
-//   **2. <cues[1].title>**
-//   ...
+//   *Try this:* - <ex>...
 //
 //   ## Practice Focus
 //   <closing>
@@ -489,30 +490,12 @@ export function renderCoachingToolInputToMarkdown(
   }
 
   if (input.cues.length > 0) {
-    // Long-form section: coach-voice paragraph + court-runnable drills.
-    // Bullet summaries are deliberately NOT inlined here — they live in
-    // their own "Quick Read" section below so a skimmer can scroll past
-    // the paragraphs entirely and still get the actionable takeaways.
-    parts.push('')
-    parts.push('## Your Coaching Cues')
-    input.cues.forEach((cue, idx) => {
-      parts.push('')
-      parts.push(`**${idx + 1}. ${cue.title}**`)
-      parts.push(cue.body)
-      if (cue.exercises && cue.exercises.length > 0) {
-        parts.push('')
-        parts.push('*Try this:*')
-        for (const ex of cue.exercises) {
-          parts.push(`- ${ex}`)
-        }
-      }
-    })
-
-    // Quick Read section: all bullet summaries grouped together at the
-    // end, with each cue's bullets nested under its title so the
-    // skimmer still knows which point each bullet belongs to. Only
-    // emitted when at least one cue has keyPoints — older persisted
-    // rows without keyPoints just get the long section.
+    // Quick Read section first: bullet summaries up top so a skimmer
+    // gets the takeaways immediately. Each cue's bullets are nested
+    // under its title so the skimmer still knows which point each
+    // bullet belongs to. Only emitted when at least one cue has
+    // keyPoints — older persisted rows without keyPoints fall through
+    // to the detailed section only.
     const hasAnyKeyPoints = input.cues.some(
       (c) => c.keyPoints && c.keyPoints.length > 0,
     )
@@ -528,6 +511,24 @@ export function renderCoachingToolInputToMarkdown(
         }
       })
     }
+
+    // Detailed Read: coach-voice paragraph + court-runnable drills for
+    // the reader who wants the full reasoning behind each Quick Read
+    // bullet.
+    parts.push('')
+    parts.push('## Detailed Read')
+    input.cues.forEach((cue, idx) => {
+      parts.push('')
+      parts.push(`**${idx + 1}. ${cue.title}**`)
+      parts.push(cue.body)
+      if (cue.exercises && cue.exercises.length > 0) {
+        parts.push('')
+        parts.push('*Try this:*')
+        for (const ex of cue.exercises) {
+          parts.push(`- ${ex}`)
+        }
+      }
+    })
   }
 
   parts.push('')
