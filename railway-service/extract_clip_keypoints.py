@@ -9,35 +9,8 @@ import math
 import sys
 import os
 import json
-from pathlib import Path
 
 import cv2
-import mediapipe as mp
-import numpy as np
-
-# POSE_BACKEND selects the pose estimator. Two valid values:
-#   "mediapipe" — BlazePose Heavy (default; older path)
-#   "rtmpose"   — YOLO11n + RTMPose-m (better tracing on small subjects)
-# Strip whitespace and surrounding quotes defensively. See main.py for
-# the rationale (Railway dashboards / shell exports leak surrounding
-# whitespace + quotes that silently break the match).
-POSE_BACKEND = (
-    os.environ.get("POSE_BACKEND", "mediapipe").strip().strip("\"'").lower()
-)
-
-LANDMARK_NAMES = [
-    "nose", "left_eye_inner", "left_eye", "left_eye_outer",
-    "right_eye_inner", "right_eye", "right_eye_outer",
-    "left_ear", "right_ear", "mouth_left", "mouth_right",
-    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist", "left_pinky", "right_pinky",
-    "left_index", "right_index", "left_thumb", "right_thumb",
-    "left_hip", "right_hip", "left_knee", "right_knee",
-    "left_ankle", "right_ankle", "left_heel", "right_heel",
-    "left_foot_index", "right_foot_index",
-]
-
-MODEL_PATH = str(Path(__file__).parent / "models" / "pose_landmarker_heavy.task")
 
 
 def angle_between(a, b, c):
@@ -309,108 +282,6 @@ def _open_video_autorotated(video_path):
     return cap
 
 
-def _extract_mediapipe(video_path, sample_fps):
-    from tracking import RacketTracker
-
-    detect_racket = _try_load_racket_detector()
-
-    cap = _open_video_autorotated(video_path)
-    if not cap.isOpened():
-        return {"error": f"Cannot open video: {video_path}"}
-
-    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    frame_interval = max(1, int(video_fps / sample_fps))
-    frames = []
-    frame_index = 0
-    processed_index = 0
-
-    # Single RacketTracker instance. Smooths per-frame YOLO jitter and
-    # bridges short motion-blur gaps (e.g. the 2–3 frames around contact
-    # where the racket head blurs out of YOLO's confidence range).
-    racket_tracker = RacketTracker()
-
-    BaseOptions = mp.tasks.BaseOptions
-    PoseLandmarker = mp.tasks.vision.PoseLandmarker
-    PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
-    VisionRunningMode = mp.tasks.vision.RunningMode
-
-    options = PoseLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=MODEL_PATH),
-        running_mode=VisionRunningMode.VIDEO,
-        num_poses=1,
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
-
-    with PoseLandmarker.create_from_options(options) as landmarker:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            if frame_index % frame_interval == 0:
-                timestamp_ms = int((frame_index / video_fps) * 1000)
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-                result = landmarker.detect_for_video(mp_image, timestamp_ms)
-
-                if result.pose_landmarks and len(result.pose_landmarks) > 0:
-                    lm_list = result.pose_landmarks[0]
-                    landmarks = [
-                        {
-                            "id": i,
-                            "name": LANDMARK_NAMES[i] if i < len(LANDMARK_NAMES) else f"landmark_{i}",
-                            "x": round(lm.x, 4),
-                            "y": round(lm.y, 4),
-                            "z": round(lm.z, 4),
-                            "visibility": round(lm.visibility, 3),
-                        }
-                        for i, lm in enumerate(lm_list)
-                    ]
-                    joint_angles = compute_joint_angles(landmarks)
-                    racket_head = _detect_racket_for_frame(
-                        detect_racket, frame, landmarks, processed_index,
-                        timestamp_ms=timestamp_ms,
-                        racket_tracker=racket_tracker,
-                    )
-                    frames.append({
-                        "frame_index": processed_index,
-                        "timestamp_ms": round(timestamp_ms, 1),
-                        "landmarks": landmarks,
-                        "joint_angles": joint_angles,
-                        "racket_head": racket_head,
-                    })
-                    processed_index += 1
-
-            frame_index += 1
-
-    cap.release()
-
-    total_frames = frame_index
-    total_duration_ms = (total_frames / video_fps) * 1000
-
-    # Zero-detection alarm: surfaces the "YOLO model failed to load and we're
-    # silently emitting all-null racket_head" case in Railway logs. detector_loaded
-    # separates "detector disabled" from "detector ran and found nothing."
-    racket_count = sum(1 for f in frames if f.get("racket_head") is not None)
-    if len(frames) > 0 and racket_count == 0:
-        print(
-            f"[extract:mediapipe] racket_detector produced zero detections across"
-            f" {len(frames)} frames (detector_loaded={detect_racket is not None})",
-            file=sys.stderr,
-        )
-
-    return {
-        "fps_sampled": sample_fps,
-        "frame_count": len(frames),
-        "frames": frames,
-        "video_fps": video_fps,
-        "duration_ms": round(total_duration_ms),
-        "schema_version": 2,
-    }
-
-
 def _extract_rtmpose(video_path, sample_fps):
     from pose_rtmpose import infer_pose_for_frame
     from tracking import PersonTracker, RacketTracker
@@ -434,7 +305,9 @@ def _extract_rtmpose(video_path, sample_fps):
     # area×centrality×aspect scoring and locks on via IoU from there.
     person_tracker = PersonTracker()
 
-    # Single RacketTracker — see _extract_mediapipe for rationale.
+    # Single RacketTracker — smooths per-frame YOLO jitter and bridges
+    # short motion-blur gaps (e.g. the 2–3 frames around contact where
+    # the racket head blurs out of YOLO's confidence range).
     racket_tracker = RacketTracker()
 
     while cap.isOpened():
@@ -474,7 +347,10 @@ def _extract_rtmpose(video_path, sample_fps):
     total_frames = frame_index
     total_duration_ms = (total_frames / video_fps) * 1000
 
-    # Zero-detection alarm: see the matching block in _extract_mediapipe above.
+    # Zero-detection alarm: surfaces the "YOLO model failed to load and
+    # we're silently emitting all-null racket_head" case in Railway logs.
+    # detector_loaded separates "detector disabled" from "detector ran
+    # and found nothing."
     racket_count = sum(1 for f in frames if f.get("racket_head") is not None)
     if len(frames) > 0 and racket_count == 0:
         print(
@@ -494,12 +370,8 @@ def _extract_rtmpose(video_path, sample_fps):
 
 
 def extract_keypoints(video_path, sample_fps=30):
-    if POSE_BACKEND == "rtmpose":
-        return _extract_rtmpose(video_path, sample_fps)
-    if POSE_BACKEND == "mediapipe":
-        return _extract_mediapipe(video_path, sample_fps)
-    # repr() so trailing whitespace / quotes are visible in the message.
-    raise ValueError(f"Unknown POSE_BACKEND: {POSE_BACKEND!r}")
+    """Extract pose keypoints from a clip via YOLO11n + RTMPose-s."""
+    return _extract_rtmpose(video_path, sample_fps)
 
 
 def main():

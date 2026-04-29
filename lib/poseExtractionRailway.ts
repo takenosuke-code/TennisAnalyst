@@ -12,12 +12,11 @@ import type { ExtractResult, ExtractorBackend } from '@/lib/poseExtraction'
 const POLL_INTERVAL_MS = 1000
 
 // Hard client-side timeout (ms). If Railway doesn't report 'complete'
-// within this window, we give up and the caller falls back to browser
-// MediaPipe. Bumped from 180s to 300s so the adaptive-sampling budget
-// for 2+ minute clips actually fits — a 2-min clip even at 8fps still
-// processes ~960 frames, plus video download (~10s for ~30MB) and
-// decode, easily ~120-180s before the speedup margin.
-const EXTRACTION_TIMEOUT_MS = 300_000
+// within this window, we give up and the caller falls back to the
+// browser RTMPose path. Bumped 300s → 600s: a 2-min user clip on a
+// cold Modal container can plausibly need 90-120s of inference plus
+// download, leaving zero headroom under the old budget.
+const EXTRACTION_TIMEOUT_MS = 600_000
 
 class RailwayExtractError extends Error {
   constructor(message: string, public reason: 'not-configured' | 'queue-failed' | 'timeout' | 'error-status' | 'aborted') {
@@ -48,15 +47,12 @@ function buildExtractResultFromKeypoints(
   },
   blobUrl: string,
 ): ExtractResult {
-  // Map the Railway-side backend name to the UI label. Anything we
-  // don't recognize falls back to mediapipe-railway (the historical
-  // default) so old keypoints_json rows written before this field
-  // existed don't break.
-  //
-  // The Modal-GPU path stamps `pose_backend: "rtmpose-modal-<device>"`
-  // in railway-service/modal_inference.py so the chip can distinguish
+  // Map the Railway-side backend name to the UI label. The Modal-GPU
+  // path stamps `pose_backend: "rtmpose-modal-<device>"` in
+  // railway-service/modal_inference.py so the chip can distinguish
   // "Modal GPU is firing" from "Railway CPU is firing" at a glance.
-  let extractorBackend: ExtractorBackend = 'mediapipe-railway'
+  // Default for old/unstamped rows: 'rtmpose-railway' (current canonical Railway path).
+  let extractorBackend: ExtractorBackend = 'rtmpose-railway'
   const backend = keypointsJson.pose_backend ?? ''
   if (backend.startsWith('rtmpose-modal')) {
     extractorBackend = 'rtmpose-modal'

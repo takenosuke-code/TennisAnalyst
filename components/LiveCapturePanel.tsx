@@ -46,6 +46,9 @@ const SWING_PULSE_DURATION_MS = 400
 // fires on a cache hit.
 const MODEL_LOAD_VISIBLE_DELAY_MS = 300
 
+// One pose-tick of overlay lag to align with the <video> preview's compositor delay (preview-pipeline lag, not jitter).
+const OVERLAY_FRAME_DELAY = 1
+
 type ModelLoadState = {
   loaded: number
   total: number
@@ -332,7 +335,9 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       beta: 0.7,
       dcutoff: 1.0,
     })
-    let lastRenderedFrameIndex = -1
+    let lastSmoothedFrameIndex = -1
+    const frameBuffer: PoseFrame[] = []
+    const BUFFER_LIMIT = OVERLAY_FRAME_DELAY + 1
 
     const draw = () => {
       if (cancelled) return
@@ -359,23 +364,27 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       const logicalH = (canvas.height || 0) / dpr
       ctx.clearRect(0, 0, logicalW, logicalH)
 
-      const frame = latestFrameRef.current
-      if (frame && logicalW > 0 && logicalH > 0) {
-        // Smooth only when a NEW frame has arrived; rAF runs at ~60Hz
-        // but pose ticks at ~15Hz, so we'd otherwise feed the smoother
-        // the same landmarks 4× per pose tick and falsely zero out its
-        // derivative.
-        const isNewFrame = frame.frame_index !== lastRenderedFrameIndex
-        const renderFrame = isNewFrame
-          ? {
-              ...frame,
-              landmarks: renderSmoother.smooth(
-                frame.landmarks,
-                frame.timestamp_ms / 1000,
-              ),
-            }
-          : frame
-        if (isNewFrame) lastRenderedFrameIndex = frame.frame_index
+      const incoming = latestFrameRef.current
+      // Smooth + buffer only when a NEW frame has arrived; rAF runs at
+      // ~60Hz but pose ticks at ~15Hz, so we'd otherwise feed the
+      // smoother the same landmarks 4× per pose tick and falsely zero
+      // out its derivative.
+      if (incoming && incoming.frame_index !== lastSmoothedFrameIndex) {
+        lastSmoothedFrameIndex = incoming.frame_index
+        const smoothed: PoseFrame = {
+          ...incoming,
+          landmarks: renderSmoother.smooth(
+            incoming.landmarks,
+            incoming.timestamp_ms / 1000,
+          ),
+        }
+        frameBuffer.push(smoothed)
+        if (frameBuffer.length > BUFFER_LIMIT) frameBuffer.shift()
+      }
+
+      // Render the oldest buffered frame (OVERLAY_FRAME_DELAY pose-ticks behind once warm).
+      const renderFrame = frameBuffer.length > 0 ? frameBuffer[0] : null
+      if (renderFrame && logicalW > 0 && logicalH > 0) {
 
         // Swing-detected pulse: dim joint dots from alpha 1.0 → 0.4
         // over SWING_PULSE_DURATION_MS, then snap back to 1.0. We

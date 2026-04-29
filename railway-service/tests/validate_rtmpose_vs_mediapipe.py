@@ -1,4 +1,17 @@
-"""Validate RTMPose-m against MediaPipe Heavy on the three named test clips.
+"""DEAD HARNESS — kept for git history only.
+
+The MediaPipe code path was removed from railway-service in favor of an
+rtmpose-only pipeline; this comparison script can no longer run because
+extract_clip_keypoints.py no longer accepts POSE_BACKEND=mediapipe and
+the pose_landmarker_heavy.task asset has been deleted from the image.
+The file does not match the `test_*.py` glob so pytest skips it
+naturally; if you find yourself reading this header, just delete the
+file.
+
+----------------------------------------------------------------------
+
+Original purpose: Validate RTMPose-m against MediaPipe Heavy on three
+named test clips.
 
 Per docs/pose-research.md §7 the acceptance criteria are observable/
 measurable on existing pro clips. This script runs both backends on the

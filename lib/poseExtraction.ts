@@ -11,14 +11,12 @@ import type { PoseFrame, Landmark } from '@/lib/supabase'
 
 // Which extraction backend produced these frames. Surfaced in the UI as
 // a small diagnostic chip — when tracing looks bad, the chip tells us in
-// 10 seconds which path the user is on. Phase 5 retired the MediaPipe
-// browser backend in favor of the same RTMPose-m ONNX model that runs
-// server-side, but the chip distinguishes them so a regression like
-// "live keypoints look wrong" is observable in 10s without DevTools.
+// 10 seconds which path the user is on. Backend is exclusively RTMPose:
+// Railway CPU or Modal GPU server-side, ONNX RTMPose in the browser when
+// the network path falls back.
 export type ExtractorBackend =
   | 'rtmpose-railway'
   | 'rtmpose-modal'
-  | 'mediapipe-railway'
   | 'rtmpose-browser'
   | 'rtmpose-browser-fallback'
 
@@ -31,7 +29,7 @@ export type FallbackReason =
   | 'not-configured'   // /api/extract returned 503 — Vercel env missing
   | 'queue-failed'     // Railway rejected the job (e.g. auth 401, bad URL)
   | 'error-status'     // Railway started the job, then errored mid-extract
-  | 'timeout'          // Railway took > 180s (OOM? model load? cold start?)
+  | 'timeout'          // Railway exceeded the client budget (cold start? OOM? slow model load?)
   | 'aborted'          // user navigated away
 
 export type ExtractResult = {

@@ -33,6 +33,29 @@ import modal
 
 SERVICE_DIR = Path(__file__).parent
 
+
+def _prewarm_models() -> None:
+    """Build-time hook: download the YOLO + RTMPose ONNX bundles into
+    the image layer so cold-start skips the openmmlab CDN fetch.
+
+    Runs inside Modal's image-build sandbox (no GPU available there,
+    so we force POSE_DEVICE=cpu — the cached ONNX bytes are identical
+    regardless of the runtime provider, only the ORT session creation
+    differs at first use). Without this hook, every cold container
+    pays a ~1-2s download tax for `~/.cache/rtmlib` to populate.
+    """
+    import os
+    import sys
+
+    sys.path.insert(0, "/root/app")
+    os.environ.setdefault("POSE_DEVICE", "cpu")
+    from pose_rtmpose import _ensure_yolo, _ensure_rtmpose
+
+    _ensure_yolo()
+    _ensure_rtmpose()
+    print("[image-build] models cached")
+
+
 # Image: debian slim + opencv runtime libs + our pip deps. Pinning the
 # same versions Railway uses so behavior matches.
 inference_image = (
@@ -49,14 +72,9 @@ inference_image = (
         "onnxruntime-gpu>=1.18.0",
         "rtmlib==0.0.15",
         "fastapi==0.115.0",
-        # Both supabase and mediapipe are imported at module load by
-        # main.py (lines 18-19). We never CALL them on the Modal path
-        # (POSE_BACKEND=rtmpose routes around mediapipe; supabase write
-        # happens back on Railway), but the import has to resolve or
-        # `from main import extract_keypoints_from_video` raises
-        # ModuleNotFoundError before our code runs.
-        "supabase==2.8.1",
-        "mediapipe>=0.10.11",
+        # No supabase / mediapipe here: extraction.py is the lean
+        # import surface used by the Modal path. supabase write-back
+        # happens back on Railway; mediapipe was retired entirely.
     )
     # Mount the whole railway-service directory so we can reuse the
     # exact same `extract_keypoints_from_video` pipeline (including the
@@ -67,12 +85,15 @@ inference_image = (
         SERVICE_DIR,
         remote_path="/root/app",
         ignore=[
-            "models/pose_landmarker_heavy.task",  # mediapipe-only, not used
             "tests/",
             "__pycache__/",
             "*.pyc",
         ],
     )
+    # Bake YOLO + RTMPose ONNX into the image so cold-start skips the
+    # openmmlab CDN download. `Image.run_function` runs the callable
+    # in the image-build sandbox with full pip access.
+    .run_function(_prewarm_models)
 )
 
 
@@ -105,6 +126,16 @@ def _is_url_allowed(url: str) -> bool:
     return any(host == d or host.endswith(f".{d}") for d in _ALLOWED_VIDEO_DOMAINS)
 
 
+# Container-local warm flag. Modal reuses the same Python process for
+# back-to-back invocations until the scaledown window expires; this
+# flag flips True after the first successful call inside a container,
+# so we can stamp `cold_start=True` on the very first request a
+# container ever serves and `cold_start=False` on every subsequent one.
+# A fresh container starts with the module re-imported and the flag at
+# False again, which is exactly what we want.
+_warm = False
+
+
 @app.function(
     image=inference_image,
     # T4 is the cheapest GPU at ~$0.59/hr; sufficient for RTMPose-s
@@ -112,10 +143,12 @@ def _is_url_allowed(url: str) -> bool:
     # faster but for our model sizes the marginal gain isn't worth 2x
     # the credit burn.
     gpu="T4",
-    # Match Railway's client-side EXTRACTION_TIMEOUT_MS (300s) so a
-    # long clip doesn't time out at the Modal layer before Railway
-    # gives up.
-    timeout=300,
+    # Bumped to 600s. Long-form user uploads (a full-point or service-
+    # game tape, ~2 min) on a cold container can plausibly hit
+    # 90-120s after Modal cold start + download + inference. The old
+    # 300s budget left no headroom; 10 min mirrors the Railway-side
+    # client timeout.
+    timeout=600,
     # Scale to zero aggressively. Modal bills GPU for the entire
     # idle window after a request, NOT just the active inference,
     # so a 10-min window means every upload pays for 10 min of T4
@@ -131,11 +164,18 @@ def extract_pose(payload: dict):
 
     Body shape: {"video_url": str, "sample_fps": int = 30}
     Auth: domain allowlist on the URL (no shared secret needed).
-    Returns: same JSON shape as railway/main._extract_with_rtmpose
+    Returns: same JSON shape as railway/extraction._extract_with_rtmpose,
+    plus a `timing` block with `download_ms`, `inference_ms`, and
+    `cold_start` so Railway can log per-stage cost.
     """
     import os
     import sys
     import tempfile
+    import time
+
+    global _warm
+    cold_start = not _warm
+    t_fn_start = time.perf_counter()
 
     video_url = payload.get("video_url")
     sample_fps = int(payload.get("sample_fps", 30))
@@ -149,17 +189,6 @@ def extract_pose(payload: dict):
             detail="video_url must use https and a Vercel Blob / Supabase Storage / GCS host",
         )
 
-    # main.py imports supabase at module load and reads SUPABASE_*
-    # env vars. We don't actually call Supabase from the Modal path
-    # (Railway handles the DB write back), but we need stub values
-    # that pass supabase-py's format check so the import succeeds.
-    # The dummy JWT-ish string passes the "non-empty + reasonable
-    # structure" gate without ever hitting Supabase's API.
-    os.environ.setdefault("SUPABASE_URL", "https://stub.supabase.co")
-    os.environ.setdefault(
-        "SUPABASE_SERVICE_KEY",
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.modal-stub.unused",
-    )
     os.environ.setdefault("POSE_BACKEND", "rtmpose")
     # Switch the inference path from CPU to CUDA. Read by pose_rtmpose
     # to swap onnxruntime providers + rtmlib's `device=` arg.
@@ -169,19 +198,36 @@ def extract_pose(payload: dict):
 
     # Download the video. Same allowlist Railway enforces.
     import httpx
-    with httpx.Client(timeout=300) as client:
+    t_dl = time.perf_counter()
+    with httpx.Client(timeout=600) as client:
         r = client.get(video_url)
         r.raise_for_status()
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp.write(r.content)
         tmp_path = tmp.name
+    download_ms = round((time.perf_counter() - t_dl) * 1000, 1)
 
     try:
-        from main import extract_keypoints_from_video
+        # extraction.py is the lean import surface — no supabase /
+        # mediapipe / fastapi pulled in transitively. Cuts ~3s off the
+        # cold-start import budget vs. importing through main.py.
+        from extraction import extract_keypoints_from_video
+
+        t_inf = time.perf_counter()
         result = extract_keypoints_from_video(tmp_path, sample_fps=sample_fps)
+        inference_ms = round((time.perf_counter() - t_inf) * 1000, 1)
+
         # Stamp the path so the diagnostic chip can show it.
         result["pose_backend"] = f"rtmpose-modal-{os.environ.get('POSE_DEVICE', 'cuda')}"
+        result["timing"] = {
+            "download_ms": download_ms,
+            "inference_ms": inference_ms,
+            "function_ms": round((time.perf_counter() - t_fn_start) * 1000, 1),
+            "cold_start": cold_start,
+        }
+        # Mark this container warm for the next invocation.
+        _warm = True
         return result
     finally:
         if os.path.exists(tmp_path):

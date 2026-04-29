@@ -4,9 +4,10 @@ import type { ExtractorBackend } from '@/lib/poseExtraction'
 
 // Diagnostic chip surfacing which backend produced the keypoints.
 // When tracing looks bad in the browser the user can immediately see
-// whether they're on rtmpose-Railway (the path tested locally), server
-// MediaPipe (a config issue: POSE_BACKEND env not set on Railway), or
-// browser MediaPipe (Railway failed silently and fell back).
+// whether they're on RTMPose · Railway (CPU server), RTMPose · Modal
+// GPU (server GPU path), RTMPose · Browser (in-browser ONNX, the
+// upload-default for some flows), or RTMPose · Browser (fallback)
+// (Railway failed silently and the client took over).
 const LABELS: Record<ExtractorBackend, { text: string; classes: string }> = {
   'rtmpose-railway': {
     text: 'RTMPose · Railway',
@@ -16,16 +17,12 @@ const LABELS: Record<ExtractorBackend, { text: string; classes: string }> = {
     text: 'RTMPose · Modal GPU',
     classes: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
   },
-  'mediapipe-railway': {
-    text: 'MediaPipe · Railway',
-    classes: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-  },
   'rtmpose-browser': {
-    text: 'MediaPipe · Browser',
+    text: 'RTMPose · Browser',
     classes: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
   },
   'rtmpose-browser-fallback': {
-    text: 'MediaPipe · Browser (fallback)',
+    text: 'RTMPose · Browser (fallback)',
     classes: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
   },
 }
@@ -36,7 +33,7 @@ const REASON_HINTS: Record<string, string> = {
   'not-configured': 'Vercel env missing RAILWAY_SERVICE_URL or EXTRACT_API_KEY',
   'queue-failed': 'Railway rejected the job (auth or bad request)',
   'error-status': 'Railway crashed mid-extract',
-  timeout: 'Railway took >180s (cold start? OOM? slow model load?)',
+  timeout: 'Railway exceeded the client budget (cold start? OOM? slow model load?)',
   aborted: 'extraction was cancelled',
 }
 
