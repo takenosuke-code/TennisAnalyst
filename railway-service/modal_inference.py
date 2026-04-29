@@ -81,6 +81,10 @@ inference_image = (
     # staged-parallel inference, motion-gated racket, etc.). Skip large
     # model artifacts that don't need to ship — rtmlib + ultralytics
     # download what they need on first init.
+    # `copy=True` is required so the local dir is baked into the image
+    # *before* `run_function` runs — Modal otherwise mounts local files
+    # only at container startup, and the build-time prewarm needs to
+    # `import pose_rtmpose` from `/root/app`.
     .add_local_dir(
         SERVICE_DIR,
         remote_path="/root/app",
@@ -89,6 +93,7 @@ inference_image = (
             "__pycache__/",
             "*.pyc",
         ],
+        copy=True,
     )
     # Bake YOLO + RTMPose ONNX into the image so cold-start skips the
     # openmmlab CDN download. `Image.run_function` runs the callable
