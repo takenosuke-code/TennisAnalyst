@@ -174,6 +174,14 @@ export function useLiveCapture(
   // smoothing remain unchanged.
   const poseDetectorRef = useRef<PoseDetector | null>(null)
   const startedAtRef = useRef<number>(0)
+  // videoEl.currentTime at the moment recorder.start() returns. Used to
+  // tag PoseFrame.timestamp_ms on the recorded video's timeline, not on
+  // wall-clock. Wall-clock tagging baked compositor lag into the
+  // timestamps — at review time `getFrameAtTime` then returned a skeleton
+  // derived from a frame that didn't match the playing video frame, so
+  // the overlay appeared ahead of the body. mediaTime-based tagging makes
+  // PoseFrame timestamps line up with `<video>.currentTime` directly.
+  const mediaTimeStartSecRef = useRef<number>(0)
   const frameCounterRef = useRef<number>(0)
   const lastDetectAtRef = useRef<number>(0)
   // Track only the last *emitted* quality so we fire onPoseQuality on
@@ -271,6 +279,7 @@ export function useLiveCapture(
     chunksRef.current = []
     frameCounterRef.current = 0
     lastDetectAtRef.current = 0
+    mediaTimeStartSecRef.current = 0
     lastQualityRef.current = null
     lastDetectionAtRef.current = 0
     inflightRef.current = false
@@ -373,6 +382,11 @@ export function useLiveCapture(
     recorder.start(1000) // request a chunk every second so a mid-session crash keeps partial data
     recorderRef.current = recorder
     startedAtRef.current = performance.now()
+    // Snapshot the video element's media-timeline position right when
+    // recording started. PoseFrame timestamps are computed as
+    // (frameMediaTime - mediaTimeStartSec) * 1000 so they align with the
+    // recorded blob's `<video>.currentTime` axis at review time.
+    mediaTimeStartSecRef.current = videoEl.currentTime
 
     const canvas = document.createElement('canvas')
     canvas.width = videoEl.videoWidth || 640
@@ -394,7 +408,13 @@ export function useLiveCapture(
       onPoseQuality?.(q)
     }
 
-    const runOneDetection = async (nowMs: number) => {
+    // `mediaTimeSec` is the video-element timeline position of the frame
+    // we're inferring on (rVFC's metadata.mediaTime, or videoEl.currentTime
+    // for the setInterval fallback). We tag PoseFrame timestamps off this
+    // axis rather than wall-clock so review-time overlays sync to the
+    // recorded video. `nowMs` is still wall-clock — it gates the rate
+    // limiter so a paused tab can't pile up frames once it resumes.
+    const runOneDetection = async (nowMs: number, mediaTimeSec: number) => {
       if (generationRef.current !== generation) return
       if (nowMs - lastDetectAtRef.current < minFrameGapMs) return
       // Drop frames while a previous inference is still running. ONNX
@@ -446,7 +466,15 @@ export function useLiveCapture(
 
         const frame: PoseFrame = {
           frame_index: frameCounterRef.current++,
-          timestamp_ms: Math.round(nowMs - startedAtRef.current),
+          // Tag on the video's media timeline, not wall-clock. This is the
+          // position of the frame in the recorded blob — review-time
+          // `getFrameAtTime(frames, video.currentTime)` then returns the
+          // skeleton derived from the actual visible frame instead of one
+          // shifted by the live preview's compositor lag.
+          timestamp_ms: Math.max(
+            0,
+            Math.round((mediaTimeSec - mediaTimeStartSecRef.current) * 1000),
+          ),
           landmarks,
           joint_angles: computeJointAngles(landmarks),
         }
@@ -501,18 +529,20 @@ export function useLiveCapture(
     if (rvfcSupported) {
       const schedule = () => {
         if (generationRef.current !== generation) return
-        rvfcHandleRef.current = videoEl.requestVideoFrameCallback((now) => {
+        rvfcHandleRef.current = videoEl.requestVideoFrameCallback((now, metadata) => {
           // Fire-and-forget: schedule the next callback immediately so
           // the rVFC cadence isn't gated on inference latency. The
           // inflight guard inside runOneDetection prevents pile-up.
-          void runOneDetection(now)
+          // metadata.mediaTime is the just-presented frame's position on
+          // the video timeline — exactly what we want for review sync.
+          void runOneDetection(now, metadata.mediaTime)
           schedule()
         })
       }
       schedule()
     } else {
       fallbackIntervalRef.current = setInterval(
-        () => { void runOneDetection(performance.now()) },
+        () => { void runOneDetection(performance.now(), videoEl.currentTime) },
         Math.round(minFrameGapMs),
       )
     }
