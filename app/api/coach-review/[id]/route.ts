@@ -14,9 +14,18 @@ import { supabaseAdmin } from '@/lib/supabase'
 
 type RouteCtx = { params: Promise<{ id: string }> }
 
+// Strict uuid v4-shape gate. Rejects malformed ids before they reach
+// the DB driver — without this, postgres returns a "invalid input syntax
+// for type uuid" error string that we'd surface verbatim via
+// `error.message`, leaking driver internals to the public internet.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+function notFound() {
+  return NextResponse.json({ error: 'Review not found' }, { status: 404 })
+}
+
 export async function GET(_request: NextRequest, ctx: RouteCtx) {
   const { id } = await ctx.params
-  if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
+  if (!id || !UUID_RE.test(id)) return notFound()
 
   const { data, error } = await supabaseAdmin
     .from('coach_reviews')
@@ -34,7 +43,7 @@ export async function GET(_request: NextRequest, ctx: RouteCtx) {
 
 export async function POST(request: NextRequest, ctx: RouteCtx) {
   const { id } = await ctx.params
-  if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 })
+  if (!id || !UUID_RE.test(id)) return notFound()
 
   let body
   try {

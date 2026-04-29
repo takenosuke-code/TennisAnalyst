@@ -81,47 +81,50 @@ export async function POST(request: NextRequest) {
   }
 
   const row = rowFrom(body)
-  const key = todayKey()
 
-  // Try to append to today's blob. Vercel Blob doesn't support true
-  // append, so we read-modify-write. With low traffic (< few req/s)
-  // this is fine; if traffic grows we'd swap to a queue or a real DB.
-  try {
-    const blobToken = process.env.BLOB_READ_WRITE_TOKEN
-    if (!blobToken) {
-      // Fallback: log-only. Telemetry still captured in Vercel logs.
-      console.log(`[telemetry] ${row}`)
-      return new NextResponse(null, { status: 204 })
-    }
+  // Default path: log to stdout. Vercel's log drain captures this and
+  // it's race-free (each request gets its own log line). Production
+  // observability sits on top of `[telemetry] ` grep, no I/O contention.
+  console.log(`[telemetry] ${row}`)
 
-    let existing = ''
+  // Optional durable CSV in Vercel Blob, gated behind both an explicit
+  // opt-in flag AND a write token. Disabled by default because Blob
+  // doesn't support true append — read-modify-write loses rows under
+  // any concurrent traffic. Re-enable only after wrapping with a queue
+  // or migrating to a real DB / append-only sink.
+  if (process.env.TELEMETRY_BLOB_ENABLED === '1' && process.env.BLOB_READ_WRITE_TOKEN) {
     try {
-      const items = await list({ prefix: key, token: blobToken })
-      const match = items.blobs.find((b) => b.pathname === key)
-      if (match) {
-        const res = await fetch(match.url, { cache: 'no-store' })
-        if (res.ok) existing = await res.text()
+      const blobToken = process.env.BLOB_READ_WRITE_TOKEN
+      const key = todayKey()
+      let existing = ''
+      try {
+        const items = await list({ prefix: key, token: blobToken })
+        const match = items.blobs.find((b) => b.pathname === key)
+        if (match) {
+          const res = await fetch(match.url, { cache: 'no-store' })
+          if (res.ok) existing = await res.text()
+        }
+      } catch {
+        /* read failure is non-fatal — we'll write a fresh file */
       }
-    } catch {
-      /* read failure is non-fatal — we'll write a fresh file */
+
+      const next = existing
+        ? existing.endsWith('\n')
+          ? existing + row + '\n'
+          : existing + '\n' + row + '\n'
+        : HEADERS.join(',') + '\n' + row + '\n'
+
+      await put(key, next, {
+        access: 'public',
+        token: blobToken,
+        contentType: 'text/csv',
+        addRandomSuffix: false,
+        allowOverwrite: true,
+      })
+    } catch (err) {
+      // Telemetry must never break a user request. Log the error and 204.
+      console.error('[telemetry] blob write failed:', err)
     }
-
-    const next = existing
-      ? existing.endsWith('\n')
-        ? existing + row + '\n'
-        : existing + '\n' + row + '\n'
-      : HEADERS.join(',') + '\n' + row + '\n'
-
-    await put(key, next, {
-      access: 'public',
-      token: blobToken,
-      contentType: 'text/csv',
-      addRandomSuffix: false,
-      allowOverwrite: true,
-    })
-  } catch (err) {
-    // Telemetry must never break a user request. Log the error and 204.
-    console.error('[telemetry] write failed:', err)
   }
 
   return new NextResponse(null, { status: 204 })
