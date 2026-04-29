@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import HeroPoseVisual from '@/components/HeroPoseVisual'
 
 // Inline SVG line icons (24x24, stroke-based). Avoids the lucide-react
 // dependency and keeps the bundle lean. The mapping follows what each
@@ -102,21 +103,13 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* Hero product visual. Placeholder until a real VideoCanvas
-              screenshot is dropped in (see Phase 1.2 of the ship plan).
-              Aspect 9:16 to match phone tennis clips, ~440px wide on
-              desktop. */}
-          <div
-            className="mx-auto w-full max-w-[340px] aspect-[9/16] rounded-2xl border border-dashed border-white/15 bg-white/[0.03] flex items-center justify-center text-center p-6"
-            aria-label="Product preview placeholder"
-          >
-            {/* TODO Phase 1.2: replace with screenshot of /baseline/<id> render
-                (skeleton overlay + angle badges + clean background). */}
-            <p className="text-white/40 text-sm leading-relaxed">
-              Skeleton overlay + joint angles render here.<br />
-              Drop a screenshot of <code className="text-white/60">/baseline/&lt;id&gt;</code> view to fill this slot.
-            </p>
-          </div>
+          {/* Phase 1.2 — stylized hero visual showing what a real
+              extraction returns: skeleton overlay + joint-angle pills
+              + racket-head trail. Replaces the placeholder so first-
+              time visitors see the product above the fold. When a real
+              screenshot of /baseline/<id> is ready, swap HeroPoseVisual
+              for an <Image> tag pointing at /public/hero-pose.png. */}
+          <HeroPoseVisual />
         </div>
       </section>
 
