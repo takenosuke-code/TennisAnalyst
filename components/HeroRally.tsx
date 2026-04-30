@@ -141,24 +141,6 @@ const SWING_CONTACT_PHASE = 0.65
 const RACKET_CONTACT_NORM_X = 0.326
 const RACKET_CONTACT_NORM_Y = 0.508
 
-// Angle pills — only on the right (the "you") figure. The opponent
-// is decorative; pills there would clutter and dilute the diagnostic
-// signal of the right figure.
-const ANGLE_PILLS: Array<{
-  joint: keyof Joints
-  parent: keyof Joints
-  child: keyof Joints
-  offsetX: number
-  offsetY: number
-}> = [
-  { joint: 'right_elbow', parent: 'right_shoulder', child: 'right_wrist', offsetX: 30, offsetY: -8 },
-  { joint: 'left_elbow', parent: 'left_shoulder', child: 'left_wrist', offsetX: -54, offsetY: -8 },
-  { joint: 'right_knee', parent: 'right_hip', child: 'right_ankle', offsetX: 22, offsetY: 6 },
-  { joint: 'left_knee', parent: 'left_hip', child: 'left_ankle', offsetX: -54, offsetY: 6 },
-]
-const PILL_W = 44
-const PILL_H = 18
-
 // ---------- Math ----------
 
 function shortDelta(a: number, b: number): number {
@@ -256,19 +238,6 @@ function buildSkeleton(phase: number): { joints: Joints; racketHead: Pt } {
   }
 }
 
-function angleAtPx(a: Pt, b: Pt, c: Pt): number {
-  const v1x = a[0] - b[0]
-  const v1y = a[1] - b[1]
-  const v2x = c[0] - b[0]
-  const v2y = c[1] - b[1]
-  const dot = v1x * v2x + v1y * v2y
-  const m1 = Math.hypot(v1x, v1y)
-  const m2 = Math.hypot(v2x, v2y)
-  if (m1 === 0 || m2 === 0) return 0
-  const cos = Math.max(-1, Math.min(1, dot / (m1 * m2)))
-  return Math.round((Math.acos(cos) * 180) / Math.PI)
-}
-
 // ---------- prefers-reduced-motion ----------
 
 function subscribeReducedMotion(cb: () => void): () => void {
@@ -292,11 +261,6 @@ interface FigureRefs {
   joints: (SVGCircleElement | null)[]
   racketHead: SVGCircleElement | null
   racketGrip: SVGLineElement | null
-}
-
-interface PillRefs {
-  rect: SVGRectElement | null
-  text: SVGTextElement | null
 }
 
 // ---------- Component ----------
@@ -323,7 +287,6 @@ export default function HeroRally() {
     racketHead: null,
     racketGrip: null,
   })
-  const pillRefs = useRef<PillRefs[]>(ANGLE_PILLS.map(() => ({ rect: null, text: null })))
   const ballRef = useRef<SVGCircleElement | null>(null)
   const courtRef = useRef<SVGGElement | null>(null)
 
@@ -363,7 +326,6 @@ export default function HeroRally() {
       baseX: number,
       baseY: number,
       mirrored: boolean,
-      withPills: boolean,
     ): Pt {
       const { joints, racketHead } = buildSkeleton(phase)
       const px: Record<keyof Joints, Pt> = {} as Record<keyof Joints, Pt>
@@ -401,21 +363,6 @@ export default function HeroRally() {
         grip.setAttribute('x2', String(headPx[0]))
         grip.setAttribute('y2', String(headPx[1]))
       }
-      // Angle pills only on right figure.
-      if (withPills) {
-        ANGLE_PILLS.forEach((pill, idx) => {
-          const slot = pillRefs.current[idx]
-          if (!slot || !slot.rect || !slot.text) return
-          const angle = angleAtPx(px[pill.parent], px[pill.joint], px[pill.child])
-          const cx = px[pill.joint][0] + pill.offsetX
-          const cy = px[pill.joint][1] + pill.offsetY
-          slot.rect.setAttribute('x', String(cx - PILL_W / 2))
-          slot.rect.setAttribute('y', String(cy - PILL_H / 2))
-          slot.text.setAttribute('x', String(cx))
-          slot.text.setAttribute('y', String(cy + 4))
-          slot.text.textContent = `${angle}°`
-        })
-      }
       return headPx
     }
 
@@ -441,8 +388,8 @@ export default function HeroRally() {
     }
 
     // Initial paint.
-    paintFigure(0, rightRefs.current, rightBaseX, rightBaseY, false, true)
-    paintFigure(0, leftRefs.current, leftBaseX, leftBaseY, true, false)
+    paintFigure(0, rightRefs.current, rightBaseX, rightBaseY, false)
+    paintFigure(0, leftRefs.current, leftBaseX, leftBaseY, true)
     const restRacketRight = racketHeadAtPhase(0, rightBaseX, rightBaseY, false)
     if (ballRef.current) {
       ballRef.current.setAttribute('cx', String(restRacketRight[0] - 60))
@@ -570,8 +517,8 @@ export default function HeroRally() {
       }
 
       // Paint everything.
-      paintFigure(rightPhase, rightRefs.current, rightBaseX, rightBaseY, false, true)
-      paintFigure(leftPhase, leftRefs.current, leftBaseX, leftBaseY, true, false)
+      paintFigure(rightPhase, rightRefs.current, rightBaseX, rightBaseY, false)
+      paintFigure(leftPhase, leftRefs.current, leftBaseX, leftBaseY, true)
       if (ballRef.current) {
         ballRef.current.setAttribute('cx', String(ball.x))
         ballRef.current.setAttribute('cy', String(ball.y))
@@ -619,40 +566,41 @@ export default function HeroRally() {
               - 2 vertical service lines (1/4 and 3/4 from each baseline)
               - 1 horizontal center service line
               - Net at the exact center vertical */}
-        <g ref={courtRef} stroke="var(--cream)" strokeOpacity="0.30" strokeWidth="1.5" fill="none">
+        <g ref={courtRef} stroke="var(--cream)" strokeOpacity="0.32" strokeWidth="1.5" fill="none">
           {/* Top doubles + singles sidelines */}
-          <line x1="3%" y1="22%" x2="97%" y2="22%" />
-          <line x1="3%" y1="32%" x2="97%" y2="32%" />
+          <line x1="3%" y1="8%" x2="97%" y2="8%" />
+          <line x1="3%" y1="18%" x2="97%" y2="18%" />
           {/* Bottom singles + doubles sidelines */}
-          <line x1="3%" y1="68%" x2="97%" y2="68%" />
-          <line x1="3%" y1="78%" x2="97%" y2="78%" />
+          <line x1="3%" y1="82%" x2="97%" y2="82%" />
+          <line x1="3%" y1="92%" x2="97%" y2="92%" />
           {/* Baselines (left + right ends) */}
-          <line x1="3%" y1="22%" x2="3%" y2="78%" />
-          <line x1="97%" y1="22%" x2="97%" y2="78%" />
+          <line x1="3%" y1="8%" x2="3%" y2="92%" />
+          <line x1="97%" y1="8%" x2="97%" y2="92%" />
           {/* Service lines */}
-          <line x1="28%" y1="32%" x2="28%" y2="68%" />
-          <line x1="72%" y1="32%" x2="72%" y2="68%" />
+          <line x1="28%" y1="18%" x2="28%" y2="82%" />
+          <line x1="72%" y1="18%" x2="72%" y2="82%" />
           {/* Center service line — the "T" */}
           <line x1="28%" y1="50%" x2="72%" y2="50%" />
         </g>
 
-        {/* Net — vertical post line + tape, centered. Slight droop in the
-            middle so it doesn't read as a hard rectangle. */}
+        {/* Net — vertical band + tape, centered, posts at top/bottom.
+            Spans the full court height now (6%–94%) since the court
+            fills the green. */}
         <g pointerEvents="none">
-          {/* Net mesh — series of vertical lines for cross-hatch suggestion */}
+          {/* Net mesh — vertical hatches for the woven look */}
           <g stroke="var(--ink)" strokeOpacity="0.45" strokeWidth="1">
-            {Array.from({ length: 8 }).map((_, i) => {
-              const yPct = 22 + i * 8
-              return <line key={`n${i}`} x1="50%" y1={`${yPct}%`} x2="50%" y2={`${yPct + 6}%`} />
+            {Array.from({ length: 12 }).map((_, i) => {
+              const yPct = 8 + i * 7
+              return <line key={`n${i}`} x1="50%" y1={`${yPct}%`} x2="50%" y2={`${yPct + 5.5}%`} />
             })}
           </g>
-          {/* Net top tape — cream bar */}
-          <rect x="49.5%" y="20%" width="1%" height="2%" fill="var(--cream)" opacity="0.9" />
-          {/* Net body */}
-          <rect x="49.5%" y="22%" width="1%" height="56%" fill="var(--ink)" opacity="0.35" />
-          {/* Net posts (ink dots top + bottom) */}
-          <circle cx="50%" cy="20%" r="4" fill="var(--ink)" />
-          <circle cx="50%" cy="80%" r="4" fill="var(--ink)" />
+          {/* Net top tape — cream bar across the top of the net */}
+          <rect x="49.5%" y="6%" width="1%" height="2%" fill="var(--cream)" opacity="0.9" />
+          {/* Net body — translucent ink */}
+          <rect x="49.5%" y="8%" width="1%" height="86%" fill="var(--ink)" opacity="0.35" />
+          {/* Net posts */}
+          <circle cx="50%" cy="6%" r="4" fill="var(--ink)" />
+          <circle cx="50%" cy="94%" r="4" fill="var(--ink)" />
         </g>
 
         {/* Right figure — bones, racket, joint dots, angle pills. */}
@@ -720,38 +668,6 @@ export default function HeroRally() {
             fill="var(--cream)"
             opacity="0.95"
           />
-        ))}
-
-        {/* Angle pills — right figure only. */}
-        {ANGLE_PILLS.map((_, idx) => (
-          <g key={`pill-${idx}`}>
-            <rect
-              ref={(el) => {
-                const slot = pillRefs.current[idx]
-                if (slot) slot.rect = el
-              }}
-              width={PILL_W}
-              height={PILL_H}
-              fill="var(--ink)"
-              fillOpacity="0.85"
-              rx="3"
-              ry="3"
-            />
-            <text
-              ref={(el) => {
-                const slot = pillRefs.current[idx]
-                if (slot) slot.text = el
-              }}
-              fill="var(--cream)"
-              fontFamily="var(--font-sans)"
-              fontSize="11"
-              fontWeight="600"
-              textAnchor="middle"
-              style={{ pointerEvents: 'none' }}
-            >
-              0°
-            </text>
-          </g>
         ))}
 
         {/* Tennis ball */}

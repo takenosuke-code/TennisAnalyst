@@ -64,14 +64,16 @@
   --color-hard-court: #7ba6c2;
   --color-hard-court-soft: #a3c4d9;
 
-  /* Editorial sans pulled in via <link> in app/layout.tsx. The display
-     weight is Manrope-800 for hero, the body uses 400/500. */
+  /* Body + UI uses Manrope (humanist sans).
+     Display uses Fraunces (variable serif w/ opsz axis) — the editorial
+     hero treatment. The opsz axis on Fraunces auto-tunes proportions
+     for display sizes; we set font-variation-settings on .font-display
+     consumers if we want to lock specific axes. */
   --font-sans:
     'Manrope', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     'Segoe UI', sans-serif;
   --font-display:
-    'Manrope', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-    'Segoe UI', sans-serif;
+    'Fraunces', 'Times New Roman', Georgia, serif;
 }
 
 body {

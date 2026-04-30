@@ -16,15 +16,16 @@ export default function RootLayout({
   return (
     <html lang="en" className="h-full">
       <head>
-        {/* Manrope (OFL) — humanist sans, replaces system / Inter / Geist.
-            Preconnect saves a round trip; the css2 import covers the
-            weights we actually use (400 body, 500 emphasis, 700 strong,
-            800 hero display). Loaded once at the root — every route
-            inherits it through var(--font-sans) on body. */}
+        {/* Manrope (OFL) for body + UI; Fraunces (OFL) for the editorial
+            display headline. Pair: humanist sans for everything
+            functional, dramatic variable serif for the hero so the words
+            stand out against the green court instead of looking like
+            generic SaaS type. Both loaded together to keep one Google
+            Fonts round-trip. */}
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
         <link
-          href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap"
+          href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Fraunces:opsz,wght@9..144,700;9..144,900&display=swap"
           rel="stylesheet"
         />
       </head>

@@ -101,7 +101,13 @@ export default function HomePage() {
           <p className="text-[11px] sm:text-xs uppercase tracking-[0.18em] text-cream/70 mb-5">
             AI Pose Tracking · For Tennis
           </p>
-          <h1 className="font-display font-extrabold text-cream leading-[0.95] tracking-tight text-[44px] sm:text-[64px] lg:text-[88px] mb-6">
+          <h1
+            className="font-display text-cream leading-[0.92] tracking-[-0.02em] text-[52px] sm:text-[76px] lg:text-[104px] mb-6"
+            style={{
+              fontWeight: 900,
+              fontVariationSettings: '"opsz" 144, "wght" 900, "SOFT" 30',
+            }}
+          >
             Beat Your<br />Last Swing.
           </h1>
           <p className="text-cream/80 text-base sm:text-lg max-w-xl mx-auto mb-8 leading-relaxed">
