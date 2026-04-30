@@ -5,22 +5,25 @@ import { useEffect, useRef, useSyncExternalStore } from 'react'
 /*
  * HeroSwingTracer — animated forehand-swing skeleton for the homepage hero.
  *
- * Design and implementation synthesizes four research briefs:
- *   /tmp/research-anim-tech.md       — rAF + refs, centripetal Catmull-Rom, no library
- *   /tmp/research-anim-keyframes.md  — 10 keyframes, bone-length validated, non-uniform t
- *   /tmp/research-anim-aesthetic.md  — 0.4× pacing, ink/clay/hard-court palette, restrained
- *   /tmp/research-anim-gotchas.md    — implementation checklist (drops the t=1 duplicate,
- *                                     state machine for 3-cycles-then-settle, phase-gated
- *                                     trail, single global phase warp)
+ * v2: angle-driven forward-kinematics rebuild. The v1 used Catmull-Rom on
+ * joint POSITIONS, which collapsed bone lengths up to 66% mid-segment on
+ * the high-rotation transitions (the "rubber-banding" the user flagged
+ * as not-tennis-like). v2 interpolates BONE ANGLES instead and rebuilds
+ * the skeleton each frame as `child = parent + L · unitVec(angle)` — bone
+ * lengths are exact at every interpolated frame by construction.
  *
- * Why hand-rolled (no Framer / Motion / GSAP):
- *   - Framer Motion's smallest tree-shake floor is ~4.6 KB gzipped, but for our use case
- *     (write 22 SVG attributes per frame with our own spline) the library buys nothing —
- *     we'd still write the Catmull-Rom math ourselves.
- *   - Hand-rolled rAF + refs has zero React reconcile cost and survives the next revert.
+ * Synthesizes four research briefs in /tmp/research-anim-*.md:
+ *   - keyframes.md       — 9 hand-validated poses (1.5%-collapse-free at the keyframes)
+ *   - tennis-truth.md    — biomechanical tells (X-factor, racket lag, kinetic chain)
+ *   - ik-impl.md         — the angle table + buildSkeleton math used here
+ *   - polish.md          — breathing micro-motion in the settled pose (alive, not frozen)
+ *
+ * No animation library — Framer Motion / Motion floor at ~5KB gzipped for our case
+ * and we'd still be writing the FK math ourselves. rAF + refs has zero React
+ * reconcile cost.
  */
 
-// ---------- Keyframes (9 unique; t=1.0 row dropped per gotchas #2) ----------
+// ---------- Joints + Keyframes ----------
 
 type Joints = {
   nose: [number, number]
@@ -38,149 +41,118 @@ type Joints = {
   right_ankle: [number, number]
 }
 
-interface Keyframe {
-  t: number
-  joints: Joints
-  racket_head: [number, number]
+type Pt = [number, number]
+
+// SSR / reduced-motion rest-pose. Computed by feeding KEYFRAME_ANGLES[0] through
+// buildSkeleton — duplicated here as literal numbers so SSR doesn't need to run
+// any math to render the static fallback.
+const REST_POSE: { joints: Joints; racket_head: Pt } = {
+  joints: {
+    nose: [0.5, 0.2],
+    left_shoulder: [0.45, 0.3],
+    right_shoulder: [0.55, 0.3],
+    left_elbow: [0.396, 0.428],
+    right_elbow: [0.604, 0.428],
+    left_wrist: [0.351, 0.553],
+    right_wrist: [0.649, 0.553],
+    left_hip: [0.46, 0.55],
+    right_hip: [0.54, 0.55],
+    left_knee: [0.454, 0.72],
+    right_knee: [0.546, 0.72],
+    left_ankle: [0.454, 0.92],
+    right_ankle: [0.546, 0.92],
+  },
+  racket_head: [0.672, 0.425],
 }
 
-// Forehand keyframes from /tmp/research-anim-keyframes.md, calibrated against
-// real BlazePose data in pro-videos/clips/federer_forehand_NEW_kp.json.
-// 9 unique poses (t=1.0 recovery row dropped — bit-identical to t=0.0 ready).
-// The wrap segment spans follow_through(0.80) → ready(treated as 1.0).
-const KEYFRAMES: Keyframe[] = [
-  {
-    t: 0.0,
-    joints: {
-      nose: [0.5, 0.2],
-      left_shoulder: [0.45, 0.3], right_shoulder: [0.55, 0.3],
-      left_elbow: [0.396, 0.428], right_elbow: [0.604, 0.428],
-      left_wrist: [0.351, 0.553], right_wrist: [0.649, 0.553],
-      left_hip: [0.46, 0.55], right_hip: [0.54, 0.55],
-      left_knee: [0.454, 0.72], right_knee: [0.546, 0.72],
-      left_ankle: [0.454, 0.92], right_ankle: [0.546, 0.92],
-    },
-    racket_head: [0.672, 0.425],
-  },
-  {
-    t: 0.15,
-    joints: {
-      nose: [0.51, 0.2],
-      left_shoulder: [0.47, 0.3], right_shoulder: [0.57, 0.3],
-      left_elbow: [0.458, 0.438], right_elbow: [0.618, 0.431],
-      left_wrist: [0.47, 0.57], right_wrist: [0.694, 0.54],
-      left_hip: [0.48, 0.55], right_hip: [0.56, 0.55],
-      left_knee: [0.474, 0.72], right_knee: [0.566, 0.72],
-      left_ankle: [0.474, 0.92], right_ankle: [0.566, 0.92],
-    },
-    racket_head: [0.717, 0.412],
-  },
-  {
-    t: 0.4,
-    joints: {
-      nose: [0.52, 0.21],
-      left_shoulder: [0.5, 0.31], right_shoulder: [0.6, 0.31],
-      left_elbow: [0.631, 0.358], right_elbow: [0.734, 0.274],
-      left_wrist: [0.676, 0.483], right_wrist: [0.79, 0.153],
-      left_hip: [0.49, 0.56], right_hip: [0.57, 0.56],
-      left_knee: [0.432, 0.72], right_knee: [0.628, 0.72],
-      left_ankle: [0.467, 0.917], right_ankle: [0.593, 0.917],
-    },
-    racket_head: [0.767, 0.025],
-  },
-  {
-    t: 0.475,
-    joints: {
-      nose: [0.515, 0.21],
-      left_shoulder: [0.49, 0.31], right_shoulder: [0.59, 0.31],
-      left_elbow: [0.502, 0.448], right_elbow: [0.729, 0.315],
-      left_wrist: [0.53, 0.578], right_wrist: [0.86, 0.338],
-      left_hip: [0.485, 0.56], right_hip: [0.565, 0.56],
-      left_knee: [0.432, 0.722], right_knee: [0.618, 0.722],
-      left_ankle: [0.46, 0.92], right_ankle: [0.59, 0.92],
-    },
-    racket_head: [0.973, 0.403],
-  },
-  {
-    t: 0.55,
-    joints: {
-      nose: [0.51, 0.21],
-      left_shoulder: [0.48, 0.31], right_shoulder: [0.58, 0.31],
-      left_elbow: [0.36, 0.38], right_elbow: [0.711, 0.358],
-      left_wrist: [0.372, 0.512], right_wrist: [0.723, 0.49],
-      left_hip: [0.48, 0.56], right_hip: [0.56, 0.56],
-      left_knee: [0.436, 0.724], right_knee: [0.604, 0.724],
-      left_ankle: [0.453, 0.923], right_ankle: [0.587, 0.923],
-    },
-    racket_head: [0.7, 0.618],
-  },
-  {
-    t: 0.6,
-    joints: {
-      nose: [0.5, 0.205],
-      left_shoulder: [0.465, 0.305], right_shoulder: [0.565, 0.305],
-      left_elbow: [0.327, 0.317], right_elbow: [0.624, 0.431],
-      left_wrist: [0.346, 0.449], right_wrist: [0.605, 0.563],
-      left_hip: [0.465, 0.555], right_hip: [0.545, 0.555],
-      left_knee: [0.43, 0.721], right_knee: [0.58, 0.721],
-      left_ankle: [0.444, 0.921], right_ankle: [0.563, 0.92],
-    },
-    racket_head: [0.492, 0.628],
-  },
-  {
-    t: 0.65,
-    joints: {
-      nose: [0.49, 0.2],
-      left_shoulder: [0.45, 0.3], right_shoulder: [0.55, 0.3],
-      left_elbow: [0.319, 0.252], right_elbow: [0.498, 0.429],
-      left_wrist: [0.45, 0.275], right_wrist: [0.448, 0.552],
-      left_hip: [0.46, 0.55], right_hip: [0.54, 0.55],
-      left_knee: [0.43, 0.717], right_knee: [0.57, 0.717],
-      left_ankle: [0.437, 0.917], right_ankle: [0.553, 0.916],
-    },
-    racket_head: [0.326, 0.508],
-  },
-  {
-    t: 0.725,
-    joints: {
-      nose: [0.485, 0.2],
-      left_shoulder: [0.435, 0.3], right_shoulder: [0.535, 0.3],
-      left_elbow: [0.315, 0.23], right_elbow: [0.408, 0.357],
-      left_wrist: [0.443, 0.264], right_wrist: [0.283, 0.312],
-      left_hip: [0.45, 0.55], right_hip: [0.53, 0.55],
-      left_knee: [0.429, 0.719], right_knee: [0.554, 0.718],
-      left_ankle: [0.432, 0.919], right_ankle: [0.544, 0.918],
-    },
-    racket_head: [0.17, 0.247],
-  },
-  {
-    t: 0.8,
-    joints: {
-      nose: [0.48, 0.2],
-      left_shoulder: [0.42, 0.3], right_shoulder: [0.52, 0.3],
-      left_elbow: [0.314, 0.211], right_elbow: [0.389, 0.252],
-      left_wrist: [0.439, 0.256], right_wrist: [0.434, 0.127],
-      left_hip: [0.44, 0.55], right_hip: [0.52, 0.55],
-      left_knee: [0.425, 0.719], right_knee: [0.535, 0.719],
-      left_ankle: [0.425, 0.919], right_ankle: [0.535, 0.919],
-    },
-    racket_head: [0.424, 0.007],
-  },
+// Bone lengths in normalized frame-height units. Sourced from the keyframes
+// brief's "Locked bone-length invariants" table; verified within 0.7% across
+// every keyframe. Single source of truth — no magic numbers in buildSkeleton.
+const BONE_LENGTHS = {
+  hipHalfWidth: 0.04,
+  shoulderHalfWidth: 0.05,
+  trunk: 0.25,
+  neck: 0.1,
+  upperArm: 0.139,
+  forearm: 0.133,
+  thigh: 0.17,
+  shin: 0.2,
+} as const
+
+// Global-frame bone angles in degrees, signed in (-180, 180]. SVG axes:
+// 0=right, 90=down, 180=left, -90=up.
+// Computed from the position keyframes via atan2(child - parent), 1-decimal
+// precision, max round-off ≤0.001 normalized. See /tmp/research-anim-ik-impl.md
+// for the derivation script.
+type KeyframeAngles = {
+  t: number
+  hipCenter: [number, number]
+  trunk: number; neck: number
+  uArmL: number; fArmL: number
+  uArmR: number; fArmR: number
+  thighL: number; shinL: number
+  thighR: number; shinR: number
+  racket: number; racketLen: number
+}
+
+const KEYFRAME_ANGLES: KeyframeAngles[] = [
+  // ready
+  { t: 0.0, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -90.0,
+    uArmL: 112.9, fArmL: 109.8, uArmR: 67.1, fArmR: 70.2,
+    thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
+    racket: -79.8, racketLen: 0.13 },
+  // unit_turn
+  { t: 0.15, hipCenter: [0.52, 0.55], trunk: -90.0, neck: -95.7,
+    uArmL: 95.0, fArmL: 84.8, uArmR: 69.9, fArmR: 55.1,
+    thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
+    racket: -79.8, racketLen: 0.13 },
+  // load
+  { t: 0.4, hipCenter: [0.53, 0.56], trunk: -85.4, neck: -106.7,
+    uArmL: 20.1, fArmL: 70.2, uArmR: -15.0, fArmR: -65.2,
+    thighL: 109.9, shinL: 79.9, thighR: 70.1, shinR: 100.1,
+    racket: -100.2, racketLen: 0.13 },
+  // coil (bridge)
+  { t: 0.475, hipCenter: [0.525, 0.56], trunk: -86.6, neck: -104.0,
+    uArmL: 85.0, fArmL: 77.8, uArmR: 2.1, fArmR: 10.0,
+    thighL: 108.1, shinL: 82.0, thighR: 71.9, shinR: 98.0,
+    racket: 29.9, racketLen: 0.13 },
+  // drop
+  { t: 0.55, hipCenter: [0.52, 0.56], trunk: -87.7, neck: -101.3,
+    uArmL: 149.7, fArmL: 84.8, uArmR: 20.1, fArmR: 84.8,
+    thighL: 105.0, shinL: 85.1, thighR: 75.0, shinR: 94.9,
+    racket: 100.2, racketLen: 0.13 },
+  // drive (bridge)
+  { t: 0.6, hipCenter: [0.505, 0.555], trunk: -87.7, neck: -98.5,
+    uArmL: 175.0, fArmL: 81.8, uArmR: 64.9, fArmR: 98.2,
+    thighL: 101.9, shinL: 86.0, thighR: 78.1, shinR: 94.9,
+    racket: 150.1, racketLen: 0.13 },
+  // contact
+  { t: 0.65, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -95.7,
+    uArmL: -159.9, fArmL: 10.0, uArmR: 112.0, fArmR: 112.1,
+    thighL: 100.2, shinL: 88.0, thighR: 79.8, shinR: 94.9,
+    racket: -160.2, racketLen: 0.13 },
+  // wrap (bridge)
+  { t: 0.725, hipCenter: [0.49, 0.55], trunk: -91.1, neck: -90.0,
+    uArmL: -149.7, fArmL: 14.9, uArmR: 155.8, fArmR: -160.2,
+    thighL: 97.1, shinL: 89.1, thighR: 81.9, shinR: 92.9,
+    racket: -150.1, racketLen: 0.13 },
+  // follow_through
+  { t: 0.8, hipCenter: [0.48, 0.55], trunk: -92.3, neck: -84.3,
+    uArmL: -140.0, fArmL: 19.8, uArmR: -159.9, fArmR: -70.2,
+    thighL: 95.1, shinL: 90.0, thighR: 84.9, shinR: 90.0,
+    racket: -94.8, racketLen: 0.12 },
 ]
 
-const N = KEYFRAMES.length // 9
-const REST_POSE = KEYFRAMES[0]
+const N = KEYFRAME_ANGLES.length // 9
 
-// SVG drawing space — 9:16 portrait, matches the keyframe normalized [0,1] space scaled.
 const VB_W = 360
 const VB_H = 640
 
-// Bone connectivity. Each entry is [from_joint, to_joint] keys of Joints.
 const BONES: [keyof Joints, keyof Joints][] = [
-  ['left_shoulder', 'right_shoulder'],   // shoulder bar
-  ['left_hip', 'right_hip'],             // hip bar
-  ['right_shoulder', 'right_hip'],       // right side spine
-  ['left_shoulder', 'left_hip'],         // left side spine
+  ['left_shoulder', 'right_shoulder'],
+  ['left_hip', 'right_hip'],
+  ['right_shoulder', 'right_hip'],
+  ['left_shoulder', 'left_hip'],
   ['left_shoulder', 'left_elbow'],
   ['left_elbow', 'left_wrist'],
   ['right_shoulder', 'right_elbow'],
@@ -191,7 +163,6 @@ const BONES: [keyof Joints, keyof Joints][] = [
   ['right_knee', 'right_ankle'],
 ]
 
-// Joint dot order matches BONES so we can iterate predictably.
 const JOINT_KEYS: (keyof Joints)[] = [
   'nose',
   'left_shoulder', 'right_shoulder',
@@ -204,107 +175,146 @@ const JOINT_KEYS: (keyof Joints)[] = [
 
 // ---------- Animation parameters ----------
 
-const SWING_MS = 1600          // 0.4× real-time forehand
-const REST_MS = 500             // hold at ready between cycles
+const SWING_MS = 1600
+const REST_MS = 500
 const TOTAL_CYCLES = 3
 const TRAIL_COUNT = 4
-const TRAIL_DT = 0.04           // sample 40ms (in phase units) behind the racket
+const TRAIL_DT = 0.04
 const TRAIL_OPACITIES = [0.25, 0.18, 0.1, 0.05]
-const TRAIL_GATE_FROM = 0.55    // drop phase start (per aesthetic brief)
-const TRAIL_GATE_TO = 0.8       // follow_through phase end
+const TRAIL_GATE_FROM = 0.55
+const TRAIL_GATE_TO = 0.8
+
+// Breathing oscillation in the settled pose (polish brief). 14 bpm = 0.233 Hz.
+// Amplitude in normalized [0,1] units — 0.8px on a 640px viewBox = 0.00125.
+const BREATH_HZ = 0.233
+const BREATH_AMPLITUDE_NORM = 0.8 / VB_H
 
 // ---------- Math helpers ----------
 
-type Pt = [number, number]
+function shortDelta(a: number, b: number): number {
+  let d = b - a
+  while (d > 180) d -= 360
+  while (d <= -180) d += 360
+  return d
+}
+
+function lerpAngle(a: number, b: number, u: number): number {
+  return a + shortDelta(a, b) * u
+}
 
 function lerp(a: number, b: number, u: number): number {
   return a + (b - a) * u
 }
 
-// Centripetal Catmull-Rom (alpha = 0.5) for one axis.
-// Computes interpolated value at param u ∈ [0,1] within the segment P1 → P2,
-// using surrounding control points P0 and P3 for tangents.
-function catmullRom1D(P0: number, P1: number, P2: number, P3: number, u: number): number {
-  // Linear-fallback when surrounding points are coincident — protects against
-  // NaN at the loop seam if any chord has zero length.
-  // We use alpha = 0.5 (centripetal) for visually natural motion; alpha = 0
-  // would give uniform Catmull-Rom (more loopy/overshoot), alpha = 1 chordal.
-  // Math reference: Yuksel, Schaefer & Keyser (2011) — formulas 3-4 unrolled
-  // per axis here so we don't need a vector library.
-  const u2 = u * u
-  const u3 = u2 * u
-  const a = -0.5 * P0 + 1.5 * P1 - 1.5 * P2 + 0.5 * P3
-  const b = P0 - 2.5 * P1 + 2 * P2 - 0.5 * P3
-  const c = -0.5 * P0 + 0.5 * P2
-  const d = P1
-  return a * u3 + b * u2 + c * u + d
-}
-
-function catmullRom2D(P0: Pt, P1: Pt, P2: Pt, P3: Pt, u: number): Pt {
-  return [
-    catmullRom1D(P0[0], P1[0], P2[0], P3[0], u),
-    catmullRom1D(P0[1], P1[1], P2[1], P3[1], u),
-  ]
-}
-
-// Segment lookup by non-uniform t (gotchas #1). Treats KEYFRAMES[0] as the
-// wrap target — when phase is in [0.80, 1.00] the segment is
-// follow_through(idx N-1) → ready(idx 0, treated as t=1.0).
+// Segment lookup by non-uniform t. Wrap segment is KEYFRAME_ANGLES[N-1] →
+// KEYFRAME_ANGLES[0] with end-t treated as 1.0.
 function findSegment(phase: number): { i: number; u: number } {
-  // Phase wrapped to [0, 1).
   const p = phase - Math.floor(phase)
-  // Walk the keyframe ring. Last segment is KEYFRAMES[N-1] → KEYFRAMES[0]
-  // with end-t = 1.0.
   for (let i = 0; i < N - 1; i++) {
-    if (p < KEYFRAMES[i + 1].t) {
-      const t0 = KEYFRAMES[i].t
-      const t1 = KEYFRAMES[i + 1].t
+    if (p < KEYFRAME_ANGLES[i + 1].t) {
+      const t0 = KEYFRAME_ANGLES[i].t
+      const t1 = KEYFRAME_ANGLES[i + 1].t
       return { i, u: (p - t0) / (t1 - t0) }
     }
   }
-  // Wrap segment.
-  const t0 = KEYFRAMES[N - 1].t
-  const t1 = 1.0
-  return { i: N - 1, u: (p - t0) / (t1 - t0) }
+  const t0 = KEYFRAME_ANGLES[N - 1].t
+  return { i: N - 1, u: (p - t0) / (1.0 - t0) }
 }
 
-// Joint position at a given phase ∈ [0, 1) for one keyframe attribute.
-function jointAt(key: keyof Joints, phase: number): Pt {
-  const { i, u } = findSegment(phase)
-  // Cyclic indexing for control points around segment i.
-  const i0 = (i - 1 + N) % N
-  const i1 = i % N
-  const i2 = (i + 1) % N
-  const i3 = (i + 2) % N
-  return catmullRom2D(
-    KEYFRAMES[i0].joints[key],
-    KEYFRAMES[i1].joints[key],
-    KEYFRAMES[i2].joints[key],
-    KEYFRAMES[i3].joints[key],
-    u,
-  )
-}
-
-function racketHeadAt(phase: number): Pt {
-  const { i, u } = findSegment(phase)
-  const i0 = (i - 1 + N) % N
-  const i1 = i % N
-  const i2 = (i + 1) % N
-  const i3 = (i + 2) % N
-  return catmullRom2D(
-    KEYFRAMES[i0].racket_head,
-    KEYFRAMES[i1].racket_head,
-    KEYFRAMES[i2].racket_head,
-    KEYFRAMES[i3].racket_head,
-    u,
-  )
-}
-
-// Single global phase warp (gotchas #8): smoothstep gives the spline a slow-
-// fast-slow temporal envelope so the strike feels punchier than a uniform
-// spline. Approximates cubic-bezier(0.4, 0, 0.6, 1).
+// Single global phase warp. Smoothstep gives a slow-fast-slow envelope so
+// the strike feels punchier than uniform Catmull-Rom traversal would.
 function warpPhase(t: number): number {
   return t * t * (3 - 2 * t)
+}
+
+// Build the whole skeleton from interpolated angles at a given phase.
+// Bone lengths are exact by construction (parent + L · unit_vec(angle)).
+// breathOffset applies a tiny y-shift to hipCenter for the breathing
+// micro-motion in the settled pose; pass 0 during active swinging.
+function buildSkeleton(
+  phase: number,
+  breathOffset: number = 0,
+): { joints: Joints; racketHead: Pt } {
+  const { i, u } = findSegment(phase)
+  const A = KEYFRAME_ANGLES[i]
+  const B = KEYFRAME_ANGLES[(i + 1) % N]
+
+  const hipCx = lerp(A.hipCenter[0], B.hipCenter[0], u)
+  const hipCy = lerp(A.hipCenter[1], B.hipCenter[1], u) + breathOffset
+
+  const trunk = lerpAngle(A.trunk, B.trunk, u)
+  const neck = lerpAngle(A.neck, B.neck, u)
+  const uArmL = lerpAngle(A.uArmL, B.uArmL, u)
+  const fArmL = lerpAngle(A.fArmL, B.fArmL, u)
+  const uArmR = lerpAngle(A.uArmR, B.uArmR, u)
+  const fArmR = lerpAngle(A.fArmR, B.fArmR, u)
+  const thighL = lerpAngle(A.thighL, B.thighL, u)
+  const shinL = lerpAngle(A.shinL, B.shinL, u)
+  const thighR = lerpAngle(A.thighR, B.thighR, u)
+  const shinR = lerpAngle(A.shinR, B.shinR, u)
+  const racket = lerpAngle(A.racket, B.racket, u)
+  const racketLen = lerp(A.racketLen, B.racketLen, u)
+
+  const polar = (L: number, deg: number): Pt => {
+    const r = (deg * Math.PI) / 180
+    return [L * Math.cos(r), L * Math.sin(r)]
+  }
+
+  // Hips: horizontal bar around hipCenter (NOT rotated by trunk — the
+  // keyframes lock hip y globally even when trunk dips; rotating the bar
+  // would break that invariant).
+  const left_hip: Pt = [hipCx - BONE_LENGTHS.hipHalfWidth, hipCy]
+  const right_hip: Pt = [hipCx + BONE_LENGTHS.hipHalfWidth, hipCy]
+
+  // midShoulder = hipCenter + trunk vector
+  const [tx, ty] = polar(BONE_LENGTHS.trunk, trunk)
+  const midShx = hipCx + tx
+  const midShy = hipCy + ty
+
+  // Shoulders: horizontal bar around midShoulder
+  const left_shoulder: Pt = [midShx - BONE_LENGTHS.shoulderHalfWidth, midShy]
+  const right_shoulder: Pt = [midShx + BONE_LENGTHS.shoulderHalfWidth, midShy]
+
+  // Head
+  const [nx, ny] = polar(BONE_LENGTHS.neck, neck)
+  const nose: Pt = [midShx + nx, midShy + ny]
+
+  // Arms
+  const [ueLx, ueLy] = polar(BONE_LENGTHS.upperArm, uArmL)
+  const left_elbow: Pt = [left_shoulder[0] + ueLx, left_shoulder[1] + ueLy]
+  const [ueRx, ueRy] = polar(BONE_LENGTHS.upperArm, uArmR)
+  const right_elbow: Pt = [right_shoulder[0] + ueRx, right_shoulder[1] + ueRy]
+  const [feLx, feLy] = polar(BONE_LENGTHS.forearm, fArmL)
+  const left_wrist: Pt = [left_elbow[0] + feLx, left_elbow[1] + feLy]
+  const [feRx, feRy] = polar(BONE_LENGTHS.forearm, fArmR)
+  const right_wrist: Pt = [right_elbow[0] + feRx, right_elbow[1] + feRy]
+
+  // Legs
+  const [tLx, tLy] = polar(BONE_LENGTHS.thigh, thighL)
+  const left_knee: Pt = [left_hip[0] + tLx, left_hip[1] + tLy]
+  const [tRx, tRy] = polar(BONE_LENGTHS.thigh, thighR)
+  const right_knee: Pt = [right_hip[0] + tRx, right_hip[1] + tRy]
+  const [sLx, sLy] = polar(BONE_LENGTHS.shin, shinL)
+  const left_ankle: Pt = [left_knee[0] + sLx, left_knee[1] + sLy]
+  const [sRx, sRy] = polar(BONE_LENGTHS.shin, shinR)
+  const right_ankle: Pt = [right_knee[0] + sRx, right_knee[1] + sRy]
+
+  // Racket
+  const [rkx, rky] = polar(racketLen, racket)
+  const racketHead: Pt = [right_wrist[0] + rkx, right_wrist[1] + rky]
+
+  return {
+    joints: {
+      nose,
+      left_shoulder, right_shoulder,
+      left_elbow, right_elbow,
+      left_wrist, right_wrist,
+      left_hip, right_hip,
+      left_knee, right_knee,
+      left_ankle, right_ankle,
+    },
+    racketHead,
+  }
 }
 
 // ---------- prefers-reduced-motion ----------
@@ -349,14 +359,9 @@ export default function HeroSwingTracer() {
   })
   const hasPlayedRef = useRef(false)
 
-  // Render one frame at a given phase (clamped to [0,1)) into the SVG attrs.
-  // Pure: no React state, just direct DOM writes via refs.
-  const paintAtPhase = (phase: number, drawTrail: boolean) => {
-    const positions = {} as Record<keyof Joints, Pt>
-    for (const key of JOINT_KEYS) {
-      positions[key] = jointAt(key, phase)
-    }
-    // Joints
+  const paintAtPhase = (phase: number, drawTrail: boolean, breathOffset = 0) => {
+    const { joints: positions, racketHead: head } = buildSkeleton(phase, breathOffset)
+
     JOINT_KEYS.forEach((key, idx) => {
       const dot = refs.current.joints[idx]
       if (!dot) return
@@ -364,7 +369,7 @@ export default function HeroSwingTracer() {
       dot.setAttribute('cx', String(x * VB_W))
       dot.setAttribute('cy', String(y * VB_H))
     })
-    // Bones
+
     BONES.forEach(([from, to], idx) => {
       const line = refs.current.bones[idx]
       if (!line) return
@@ -375,8 +380,7 @@ export default function HeroSwingTracer() {
       line.setAttribute('x2', String(x2 * VB_W))
       line.setAttribute('y2', String(y2 * VB_H))
     })
-    // Racket
-    const head = racketHeadAt(phase)
+
     const wrist = positions.right_wrist
     const headEl = refs.current.racketHead
     if (headEl) {
@@ -390,7 +394,7 @@ export default function HeroSwingTracer() {
       grip.setAttribute('x2', String(head[0] * VB_W))
       grip.setAttribute('y2', String(head[1] * VB_H))
     }
-    // Trail — phase-gated to drop→follow_through (gotchas #14).
+
     const trailVisible = drawTrail && phase >= TRAIL_GATE_FROM && phase <= TRAIL_GATE_TO
     refs.current.trail.forEach((dot, idx) => {
       if (!dot) return
@@ -404,15 +408,16 @@ export default function HeroSwingTracer() {
         dot.setAttribute('opacity', '0')
         return
       }
-      const [gx, gy] = racketHeadAt(ghostPhase)
-      dot.setAttribute('cx', String(gx * VB_W))
-      dot.setAttribute('cy', String(gy * VB_H))
+      // Re-build skeleton at ghostPhase to get racket head only — 4 extra
+      // builds × ~5µs = ~20µs/frame, well under budget.
+      const ghost = buildSkeleton(ghostPhase, 0)
+      dot.setAttribute('cx', String(ghost.racketHead[0] * VB_W))
+      dot.setAttribute('cy', String(ghost.racketHead[1] * VB_H))
       dot.setAttribute('opacity', String(TRAIL_OPACITIES[idx] ?? 0))
     })
   }
 
   useEffect(() => {
-    // Always paint the rest pose first (matches SSR + reduced-motion fallback).
     paintAtPhase(0, false)
     if (reducedMotion) return
 
@@ -422,17 +427,17 @@ export default function HeroSwingTracer() {
     let rafId = 0
     let cancelled = false
     let started = false
+    // settledStart tracks when the swing fully completes; afterwards rAF
+    // keeps running purely to drive the breathing oscillation.
+    let settledStart = 0
 
-    // State machine: 'rest' (hold) → 'swing' (1.6s) → 'rest' → 'swing' → 'rest' → 'swing'
-    // On cycle 3 swing, we stop at phase = 0.8 (follow_through), don't recover.
-    // hasPlayedRef ensures we play exactly once per page lifetime.
     const start = () => {
       if (started || hasPlayedRef.current) return
       started = true
 
-      let cycle = 0          // 0..2
+      let cycle = 0
       let stateStart = performance.now()
-      let mode: 'rest' | 'swing' = 'rest'
+      let mode: 'rest' | 'swing' | 'settled' = 'rest'
 
       const tick = (now: number) => {
         if (cancelled) return
@@ -444,34 +449,32 @@ export default function HeroSwingTracer() {
             mode = 'swing'
             stateStart = now
           }
-        } else {
-          // swing
+        } else if (mode === 'swing') {
           const u = Math.min(1, elapsed / SWING_MS)
-          // Single global phase warp (gotchas #8): the smoothstep gives the
-          // spline a slow-fast-slow temporal envelope so the strike feels
-          // punchier than a uniform Catmull-Rom traversal. No per-segment
-          // easing — that would break C¹ continuity at the seams.
           const fullPhase = warpPhase(u)
           paintAtPhase(fullPhase, true)
 
-          // Cycle-3 freeze on follow_through (phase 0.8). Per gotchas #4 we
-          // explicitly do NOT complete cycle 3 — we settle on the gesture.
           if (cycle === TOTAL_CYCLES - 1 && fullPhase >= 0.8) {
-            paintAtPhase(0.8, false)
+            mode = 'settled'
+            settledStart = now
             hasPlayedRef.current = true
-            cancelled = true
-            return
-          }
-          if (u >= 1) {
+          } else if (u >= 1) {
             cycle++
             if (cycle >= TOTAL_CYCLES) {
+              mode = 'settled'
+              settledStart = now
               hasPlayedRef.current = true
-              cancelled = true
-              return
+            } else {
+              mode = 'rest'
+              stateStart = now
             }
-            mode = 'rest'
-            stateStart = now
           }
+        } else {
+          // settled — paint follow_through pose with breath oscillation.
+          // The body looks alive (paused person) instead of frozen (paused diagram).
+          const sinceSettle = (now - settledStart) / 1000
+          const breath = Math.sin(2 * Math.PI * BREATH_HZ * sinceSettle) * BREATH_AMPLITUDE_NORM
+          paintAtPhase(0.8, false, breath)
         }
 
         rafId = requestAnimationFrame(tick)
@@ -479,8 +482,6 @@ export default function HeroSwingTracer() {
       rafId = requestAnimationFrame(tick)
     }
 
-    // IntersectionObserver: start once when the element is at least 30% visible
-    // and the user hasn't already seen the play-out (gotchas #7).
     const io = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -493,12 +494,9 @@ export default function HeroSwingTracer() {
     )
     io.observe(svg)
 
-    // Page Visibility — start on visibilitychange if IO already saw us but we
-    // were hidden; pause is implicit (rAF is throttled when hidden).
     const onVis = () => {
-      if (!document.hidden && !hasPlayedRef.current) {
-        // IO will refire if appropriate; nothing to do here besides not block.
-      }
+      // No-op — IO will refire if the element becomes visible. rAF is
+      // already paused by the browser when the tab is hidden.
     }
     document.addEventListener('visibilitychange', onVis)
 
@@ -510,8 +508,6 @@ export default function HeroSwingTracer() {
     }
   }, [reducedMotion])
 
-  // Initial SVG positions match the rest pose (so SSR / first paint shows
-  // a finished diagram, never a blank/half pose).
   const restJoints = REST_POSE.joints
   const restRacket = REST_POSE.racket_head
 
@@ -524,7 +520,6 @@ export default function HeroSwingTracer() {
       aria-label="Animated forehand-swing skeleton"
       role="img"
     >
-      {/* Bones — ink at 85% opacity */}
       {BONES.map(([from, to], idx) => {
         const [x1, y1] = restJoints[from]
         const [x2, y2] = restJoints[to]
@@ -542,7 +537,6 @@ export default function HeroSwingTracer() {
         )
       })}
 
-      {/* Racket grip — ink, slightly thinner */}
       <line
         ref={(el) => { refs.current.racketGrip = el }}
         x1={restJoints.right_wrist[0] * VB_W}
@@ -555,7 +549,6 @@ export default function HeroSwingTracer() {
         strokeLinecap="round"
       />
 
-      {/* Racket-head trail — phase-gated, drawn behind the head */}
       {Array.from({ length: TRAIL_COUNT }).map((_, idx) => (
         <circle
           key={`trail-${idx}`}
@@ -568,7 +561,6 @@ export default function HeroSwingTracer() {
         />
       ))}
 
-      {/* Racket head — clay, the "action" element */}
       <circle
         ref={(el) => { refs.current.racketHead = el }}
         cx={restRacket[0] * VB_W}
@@ -577,7 +569,6 @@ export default function HeroSwingTracer() {
         fill="var(--clay)"
       />
 
-      {/* Joint dots — hard-court fill, 0.5px cream inner ring */}
       {JOINT_KEYS.map((key, idx) => {
         const [x, y] = restJoints[key]
         const r = key === 'nose' ? 7 : 5
