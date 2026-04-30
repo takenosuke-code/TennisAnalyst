@@ -16,23 +16,25 @@
   --cream: #f4f1ea;
   --cream-soft: #ebe6da;
 
-  /* Lavender wash — hero gradient stops, evening sky. */
-  --lavender-1: #d6c5dc;
-  --lavender-2: #bea9c4;
-  --lavender-3: #8b7da3;
-  --lavender-4: #5d5570;
+  /* Tennis green wash — hero gradient stops, court + grass tones.
+     Replaces the lavender scheme; the variable names are *-green-* so
+     the rest of the codebase can grep one token to find every usage. */
+  --green-1: #d3e2c8;
+  --green-2: #a8c595;
+  --green-3: #4f7f4a;
+  --green-4: #1f3d22;
 
   /* Pastel accents. Clay = sun-baked warmth (primary CTA family).
-     Hard-court = cool court-blue (secondary CTA family). */
+     Hard-court = cool court-blue (used on per-shot stripes only). */
   --clay: #d97757;
   --clay-soft: #e8a48a;
   --hard-court: #7ba6c2;
   --hard-court-soft: #a3c4d9;
 
-  /* App-wide background + foreground default to the lavender wash
-     with cream text — set once here, the page-level gradient lives
-     on the homepage hero. */
-  --background: var(--lavender-3);
+  /* App-wide background + foreground default to a mid green with
+     cream text — set once here, the page-level gradient lives on
+     the homepage hero. */
+  --background: var(--green-3);
   --foreground: var(--cream);
 }
 
@@ -53,10 +55,10 @@
   --color-ink-soft: #2a2d3a;
   --color-cream: #f4f1ea;
   --color-cream-soft: #ebe6da;
-  --color-lavender-1: #d6c5dc;
-  --color-lavender-2: #bea9c4;
-  --color-lavender-3: #8b7da3;
-  --color-lavender-4: #5d5570;
+  --color-green-1: #d3e2c8;
+  --color-green-2: #a8c595;
+  --color-green-3: #4f7f4a;
+  --color-green-4: #1f3d22;
   --color-clay: #d97757;
   --color-clay-soft: #e8a48a;
   --color-hard-court: #7ba6c2;
@@ -83,13 +85,13 @@ body {
 
 /* Hero gradient class — one source of truth. Applied to the homepage
    hero section, can be reused on landing-style headers elsewhere. */
-.bg-lavender-wash {
+.bg-green-wash {
   background: linear-gradient(
     160deg,
-    var(--lavender-1) 0%,
-    var(--lavender-2) 30%,
-    var(--lavender-3) 65%,
-    var(--lavender-4) 100%
+    var(--green-1) 0%,
+    var(--green-2) 30%,
+    var(--green-3) 65%,
+    var(--green-4) 100%
   );
 }
 
@@ -98,8 +100,8 @@ body {
 .bg-app-shell {
   background: linear-gradient(
     180deg,
-    var(--lavender-3) 0%,
-    var(--lavender-4) 100%
+    var(--green-3) 0%,
+    var(--green-4) 100%
   );
   background-attachment: fixed;
   min-height: 100vh;

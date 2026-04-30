@@ -520,6 +520,8 @@ export default function HeroSwingTracer() {
       aria-label="Animated forehand-swing skeleton"
       role="img"
     >
+      {/* Bones: cream (white) on the green wash for high contrast.
+          Was ink-on-cream when the figure sat in a cream card. */}
       {BONES.map(([from, to], idx) => {
         const [x1, y1] = restJoints[from]
         const [x2, y2] = restJoints[to]
@@ -529,9 +531,9 @@ export default function HeroSwingTracer() {
             ref={(el) => { refs.current.bones[idx] = el }}
             x1={x1 * VB_W} y1={y1 * VB_H}
             x2={x2 * VB_W} y2={y2 * VB_H}
-            stroke="var(--ink)"
-            strokeOpacity="0.85"
-            strokeWidth="2.25"
+            stroke="var(--cream)"
+            strokeOpacity="0.95"
+            strokeWidth="2.5"
             strokeLinecap="round"
           />
         )
@@ -543,9 +545,9 @@ export default function HeroSwingTracer() {
         y1={restJoints.right_wrist[1] * VB_H}
         x2={restRacket[0] * VB_W}
         y2={restRacket[1] * VB_H}
-        stroke="var(--ink)"
-        strokeOpacity="0.85"
-        strokeWidth="2"
+        stroke="var(--cream)"
+        strokeOpacity="0.95"
+        strokeWidth="2.25"
         strokeLinecap="round"
       />
 
@@ -569,6 +571,9 @@ export default function HeroSwingTracer() {
         fill="var(--clay)"
       />
 
+      {/* Joint dots: cream (white) fill, no inner ring needed against
+          the green wash. Was hard-court blue with a cream ring back
+          when the figure was on a cream card. */}
       {JOINT_KEYS.map((key, idx) => {
         const [x, y] = restJoints[key]
         const r = key === 'nose' ? 7 : 5
@@ -579,9 +584,7 @@ export default function HeroSwingTracer() {
             cx={x * VB_W}
             cy={y * VB_H}
             r={r}
-            fill="var(--hard-court)"
-            stroke="var(--cream)"
-            strokeWidth="1"
+            fill="var(--cream)"
           />
         )
       })}

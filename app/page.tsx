@@ -25,11 +25,11 @@ function Glyph({ d, className = '' }: { d: string; className?: string }) {
 const FEATURES: Array<{
   title: string
   desc: string
-  stripe: 'clay' | 'hard-court' | 'lavender'
+  stripe: 'clay' | 'hard-court' | 'green'
   glyph: string
 }> = [
   {
-    title: 'Joint tracking',
+    title: 'Joint Tracking',
     desc: 'Pose AI marks 33 body landmarks — shoulders, elbows, wrists, knees — on every frame.',
     stripe: 'clay',
     // Stick figure
@@ -37,65 +37,64 @@ const FEATURES: Array<{
       'M16 6.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM16 10.5v8m-5-5h10m-7 5l-3 7m5-7l3 7',
   },
   {
-    title: 'Swing path trails',
+    title: 'Swing Path Trails',
     desc: 'Watch your racket-hand motion traced in real time as a smooth Bezier curve.',
     stripe: 'hard-court',
     // Curve
     glyph: 'M5 22 C 10 8, 22 8, 27 22',
   },
   {
-    title: 'Toggle any joint',
+    title: 'Toggle Any Joint',
     desc: 'Show or hide individual joint groups so you can focus on what matters for your shot.',
-    stripe: 'lavender',
+    stripe: 'green',
     // Eye
     glyph:
       'M4 16c3-6 9-9 12-9s9 3 12 9c-3 6-9 9-12 9s-9-3-12-9zM16 12.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z',
   },
   {
-    title: 'Save a baseline',
+    title: 'Save A Baseline',
     desc: 'Mark your best-day swing as the reference. Compare every future session against it.',
     stripe: 'clay',
     // Pin
     glyph: 'M16 4l5 5-3 2 2 6-4 4-4-4 2-6-3-2zM12 25l4-4',
   },
   {
-    title: 'AI coaching',
+    title: 'AI Coaching',
     desc: 'Claude reads your joint angles vs your best day and tells you what held up and what drifted.',
     stripe: 'hard-court',
     // Tennis ball with stitching
     glyph: 'M16 4a12 12 0 1 1 0 24 12 12 0 0 1 0-24zM5 11c4 1 8 1 12 0M5 21c4-1 8-1 12 0',
   },
   {
-    title: 'Side by side',
+    title: 'Side By Side',
     desc: 'Synchronized video playback. Scrub both swings in lockstep at any speed.',
-    stripe: 'lavender',
+    stripe: 'green',
     // Two panels
     glyph: 'M5 7h10v18H5zM17 7h10v18H17z',
   },
 ]
 
-const STRIPE_BG: Record<'clay' | 'hard-court' | 'lavender', string> = {
+const STRIPE_BG: Record<'clay' | 'hard-court' | 'green', string> = {
   clay: 'bg-clay',
   'hard-court': 'bg-hard-court',
-  lavender: 'bg-lavender-2',
+  green: 'bg-green-3',
 }
 
 export default function HomePage() {
   return (
     <div>
-      {/* Hero — lavender wash, asymmetric 2-col on desktop, stacked on mobile.
-          Editorial headline (Manrope 800, big), pill CTA, no animate-pulse,
-          no cyan-emerald gradient text. The visual on the right is a
-          deliberately simple "court line" panel with a tennis ball glyph —
-          we don't want stock photography or an emoji. */}
-      <section className="bg-lavender-wash text-ink">
+      {/* Hero — green wash, asymmetric 2-col on desktop, stacked on mobile.
+          Editorial headline (Manrope 800, big), pill CTA. The animated
+          stick figure on the right floats directly on the wash — no card,
+          no cream backdrop. */}
+      <section className="bg-green-wash text-ink">
         <div className="max-w-6xl mx-auto px-5 sm:px-8 pt-16 pb-20 lg:pt-24 lg:pb-28 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
           <div className="lg:col-span-7">
             <p className="text-[11px] sm:text-xs uppercase tracking-[0.18em] text-ink/70 mb-5">
-              ai pose tracking · for tennis
+              AI Pose Tracking · For Tennis
             </p>
             <h1 className="font-display font-extrabold text-ink leading-[0.95] tracking-tight text-[44px] sm:text-[64px] lg:text-[88px] mb-6">
-              beat your<br />last swing.
+              Beat Your<br />Last Swing.
             </h1>
             <p className="text-ink/75 text-base sm:text-lg max-w-xl mb-8 leading-relaxed">
               Drop a video. We read your joint angles, save your best day, and tell
@@ -107,51 +106,37 @@ export default function HomePage() {
                 href="/analyze"
                 className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-sm font-semibold tracking-wide transition-colors"
               >
-                analyze my swing
+                Analyze My Swing
               </Link>
               <Link
                 href="/baseline"
                 className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-cream hover:bg-cream-soft text-ink text-sm font-semibold tracking-wide transition-colors"
               >
-                my baselines
+                My Baselines
               </Link>
             </div>
           </div>
 
-          {/* Hero visual — a cream "card" with a court diagram + ball,
-              hard corners. Renders on lg+ as the asymmetric companion to
-              the headline; hidden on mobile so the type carries the hero. */}
+          {/* Hero visual — animated forehand-swing skeleton, floats
+              directly on the green wash with no card chrome. Plays 3
+              cycles on scroll-into-view then settles on the
+              follow-through pose. */}
           <div className="hidden lg:block lg:col-span-5">
-            <div className="relative">
-              <div className="bg-cream aspect-[4/5] w-full max-w-md ml-auto p-6 flex flex-col">
-                <div className="h-2 bg-clay -mx-6 -mt-6" />
-                <div className="flex-1 flex items-center justify-center">
-                  {/* Animated forehand-swing skeleton. Plays 3 cycles on
-                      scroll-into-view then settles on the follow-through
-                      pose. SSR + reduced-motion fallback paints the rest
-                      pose. See components/HeroSwingTracer.tsx + the four
-                      research briefs at /tmp/research-anim-*.md. */}
-                  <HeroSwingTracer />
-                </div>
-                <div className="pt-4 border-t border-ink/10 flex items-baseline justify-between">
-                  <span className="text-[11px] uppercase tracking-[0.18em] text-ink/60">today</span>
-                  <span className="font-display font-extrabold text-2xl text-ink">+4.2°</span>
-                </div>
-                <p className="text-xs text-ink/55 mt-1">elbow extension vs. baseline</p>
-              </div>
+            <div className="aspect-[9/16] w-full max-w-sm ml-auto flex items-center justify-center">
+              <HeroSwingTracer />
             </div>
           </div>
         </div>
       </section>
 
       {/* Feature grid — pastel panels with a colored top stripe per card.
-          Hard corners throughout. Stripe alternates clay/hard-court/lavender. */}
+          Hard corners throughout. Stripe alternates clay/hard-court/green. */}
       <section className="bg-cream text-ink">
         <div className="max-w-6xl mx-auto px-5 sm:px-8 py-20 lg:py-24">
           <div className="mb-12 max-w-2xl">
-            <p className="text-[11px] uppercase tracking-[0.18em] text-ink/60 mb-3">what&apos;s inside</p>
+            <p className="text-[11px] uppercase tracking-[0.18em] text-ink/60 mb-3">What&apos;s Inside</p>
             <h2 className="font-display font-extrabold text-3xl sm:text-4xl text-ink leading-tight">
-              everything you need to level up.
+              Everything You Need To Level Up.
             </h2>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
@@ -174,17 +159,17 @@ export default function HomePage() {
       <section className="bg-ink text-cream">
         <div className="max-w-5xl mx-auto px-5 sm:px-8 py-20 lg:py-24">
           <div className="mb-12 max-w-2xl">
-            <p className="text-[11px] uppercase tracking-[0.18em] text-cream/60 mb-3">how it works</p>
+            <p className="text-[11px] uppercase tracking-[0.18em] text-cream/60 mb-3">How It Works</p>
             <h2 className="font-display font-extrabold text-3xl sm:text-4xl leading-tight">
-              four steps, one cup of coffee.
+              Four Steps, One Cup Of Coffee.
             </h2>
           </div>
           <ol className="grid grid-cols-1 md:grid-cols-4 gap-5">
             {[
-              { n: '01', label: 'upload', desc: 'Drop your swing video — MP4 or MOV.' },
-              { n: '02', label: 'track', desc: 'AI extracts 33 joint landmarks from every frame.' },
-              { n: '03', label: 'pin a baseline', desc: 'Mark your best swing as the reference.' },
-              { n: '04', label: 'beat it', desc: 'Upload future swings and see what changed.' },
+              { n: '01', label: 'Upload', desc: 'Drop your swing video — MP4 or MOV.' },
+              { n: '02', label: 'Track', desc: 'AI extracts 33 joint landmarks from every frame.' },
+              { n: '03', label: 'Pin A Baseline', desc: 'Mark your best swing as the reference.' },
+              { n: '04', label: 'Beat It', desc: 'Upload future swings and see what changed.' },
             ].map((step) => (
               <li key={step.n} className="bg-ink-soft p-5 flex flex-col gap-3">
                 <span className="font-display font-extrabold text-clay-soft text-2xl tracking-tight">
@@ -198,11 +183,11 @@ export default function HomePage() {
         </div>
       </section>
 
-      {/* Closing CTA — back to the lavender wash so the page bookends. */}
-      <section className="bg-lavender-wash text-ink">
+      {/* Closing CTA — back to the green wash so the page bookends. */}
+      <section className="bg-green-wash text-ink">
         <div className="max-w-3xl mx-auto px-5 sm:px-8 py-20 lg:py-24 text-center">
           <h2 className="font-display font-extrabold text-3xl sm:text-5xl leading-tight mb-4">
-            ready to see the difference?
+            Ready To See The Difference?
           </h2>
           <p className="text-ink/70 text-base sm:text-lg mb-8">
             No sign-up required. Upload your video and get instant feedback.
@@ -211,7 +196,7 @@ export default function HomePage() {
             href="/analyze"
             className="inline-flex items-center justify-center px-8 py-4 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-sm font-semibold tracking-wide transition-colors"
           >
-            start analyzing free
+            Start Analyzing Free
           </Link>
         </div>
       </section>

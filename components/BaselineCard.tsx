@@ -16,7 +16,7 @@ interface BaselineCardProps {
 const SHOT_STRIPE: Record<string, string> = {
   forehand: 'bg-clay',
   backhand: 'bg-hard-court',
-  serve: 'bg-lavender-2',
+  serve: 'bg-green-3',
   volley: 'bg-clay',
   slice: 'bg-hard-court',
 }
@@ -52,7 +52,7 @@ export default function BaselineCard({ baseline, onSetActive, onRename, onDelete
     }
   }
 
-  const stripe = SHOT_STRIPE[baseline.shot_type] ?? 'bg-lavender-2'
+  const stripe = SHOT_STRIPE[baseline.shot_type] ?? 'bg-green-3'
 
   return (
     <div

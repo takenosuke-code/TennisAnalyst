@@ -13,12 +13,12 @@ type BaselineShot = (typeof BASELINE_SHOTS)[number]
 // Shot-type → stripe color mapping. Five shot types share three stripe
 // colors so the grid reads as variegated instead of stripey-rainbow.
 // Forehand/volley = clay (warm), backhand/slice = hard-court (cool),
-// serve = lavender (vertical / overhead). Kept inline so we don't reach
+// serve = green (vertical / overhead). Kept inline so we don't reach
 // into lib/ — the brief gates lib changes.
 const SHOT_STRIPE: Record<BaselineShot, string> = {
   forehand: 'bg-clay',
   backhand: 'bg-hard-court',
-  serve: 'bg-lavender-2',
+  serve: 'bg-green-3',
   volley: 'bg-clay',
   slice: 'bg-hard-court',
 }
