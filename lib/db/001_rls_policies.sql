@@ -1,4 +1,4 @@
--- RLS Policies for Tennis Analyst
+-- RLS Policies for Swingframe
 -- Run this migration in the Supabase SQL editor after the base schema.
 
 -- =============================================================================

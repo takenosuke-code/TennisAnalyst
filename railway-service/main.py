@@ -1,5 +1,5 @@
 """
-Tennis Analyst Railway Microservice
+Swingframe Railway Microservice
 FastAPI service for server-side pose extraction from videos.
 Used for processing pro player videos offline and seeding the database.
 """
@@ -56,7 +56,7 @@ async def _lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Tennis Analyst Pose Service", lifespan=_lifespan)
+app = FastAPI(title="Swingframe Pose Service", lifespan=_lifespan)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]

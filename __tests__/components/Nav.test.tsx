@@ -19,12 +19,12 @@ vi.mock('@/hooks/useUser', () => ({
 describe('Nav', () => {
   it('renders the app name', () => {
     render(<Nav />)
-    expect(screen.getByText('Tennis Analyst')).toBeInTheDocument()
+    expect(screen.getByText('Swingframe')).toBeInTheDocument()
   })
 
   it('renders the tennis ball emoji logo', () => {
     render(<Nav />)
-    expect(screen.getByText('Tennis Analyst').closest('a')).toBeInTheDocument()
+    expect(screen.getByText('Swingframe').closest('a')).toBeInTheDocument()
   })
 
   it('renders Analyze navigation link', () => {
@@ -39,7 +39,7 @@ describe('Nav', () => {
 
   it('logo links to home page', () => {
     render(<Nav />)
-    const logoLink = screen.getByText('Tennis Analyst').closest('a')!
+    const logoLink = screen.getByText('Swingframe').closest('a')!
     expect(logoLink).toHaveAttribute('href', '/')
   })
 

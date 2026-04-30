@@ -17,7 +17,7 @@ export default function Nav() {
             <circle cx="12" cy="12" r="9" />
             <path d="M3.5 9c4 1 8 1 12 0M3.5 16c4-1 8-1 12 0" transform="translate(2,-1)" />
           </svg>
-          <span>Tennis Analyst</span>
+          <span>Swingframe</span>
         </Link>
 
         <div className="flex items-center gap-1">

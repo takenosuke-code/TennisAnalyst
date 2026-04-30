@@ -1,4 +1,4 @@
-# Tennis Analyst — Architecture & Setup Guide
+# Swingframe — Architecture & Setup Guide
 
 ## What This Is
 
