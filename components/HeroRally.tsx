@@ -162,7 +162,22 @@ const BALL_SPEED = 540 // px/sec — feels like a rally tempo, not Pong
 
 // Swing
 const SWING_MS = 700
-const RACKET_HIT_RADIUS = 36
+const RACKET_HIT_RADIUS = 50
+
+// The keyframes' contact frame is at t=0.65, but warpPhase squishes
+// the timing. We solve numerically: warpPhase(u) = u²·(3-2u) = 0.65 →
+// u ≈ 0.604. So contact happens at SWING_MS · 0.604 ≈ 423ms after the
+// swing starts. We fire the swing this many ms BEFORE the ball reaches
+// the racket's contact-frame X — so the racket sweeps through the
+// strike zone exactly as the ball arrives. Pong-like timing.
+const SWING_TO_CONTACT_MS = 423
+const SWING_CONTACT_PHASE = 0.65
+
+// In the keyframes, the racket head at contact is at normalized
+// (0.326, 0.508) — across the body, slightly below center. The figure
+// must aim this point at the incoming ball, not its hipCenter.
+const RACKET_CONTACT_NORM_X = 0.326
+const RACKET_CONTACT_NORM_Y = 0.508
 
 // Angle pills — 4 pills surfaced on the figure to match the screenshot
 // reference. Each pill labels the joint angle (in degrees) at one of
@@ -486,6 +501,7 @@ export default function HeroRally({ headlineRef }: Props) {
     type State = 'preswing' | 'swinging'
     let state: State = 'preswing'
     let swingStart = 0
+    let hitRegistered = false  // ensures we reverse the ball exactly once per swing
     let figureBaseYRest = containerRect.height / 2
     figureBaseY = figureBaseYRest
     // Ball — start near the racket, traveling toward the headline (left).
@@ -498,57 +514,73 @@ export default function HeroRally({ headlineRef }: Props) {
       vx: -BALL_SPEED,
       vy: 0,
     }
-    // Pre-compute a real first-serve vy so the opening trajectory hits
-    // the words too (no horizontal-line first shot).
     ball.vy = pickReturnVy(initialBallX, initialBallY)
     let lastTime = performance.now()
     let rafId = 0
     let cancelled = false
+
+    // Pre-derived constants.
+    const racketYOffsetFromHip = (RACKET_CONTACT_NORM_Y - 0.5) * FIGURE_PX_HEIGHT
 
     function step(now: number) {
       if (cancelled) return
       const dt = Math.min(0.05, (now - lastTime) / 1000)
       lastTime = now
 
-      // Determine swing phase. preswing → phase 0 (rest pose).
+      // Determine swing phase.
       let swingPhase = 0
       if (state === 'swinging') {
         const u = Math.min(1, (now - swingStart) / SWING_MS)
         swingPhase = warpPhase(u)
         if (u >= 1) {
           state = 'preswing'
+          hitRegistered = false
         }
       }
 
-      // Figure Y tracking. The figure's X is locked at figureBaseX
-      // (rooted), but the Y anchor drifts toward the predicted ball Y
-      // when the ball is incoming. Mid-swing the Y is held at whatever
-      // it was when the swing started so the strike doesn't drift mid-
-      // animation.
+      // ─── Pre-swing logic: anticipate, track, fire ─────────────────────
+      // The figure must START swinging BEFORE the ball arrives so the
+      // racket sweeps through the strike zone exactly as the ball gets
+      // there — that's the Pong-feel the user asked for. We compute
+      // time-to-contact from the ball's current trajectory, then:
+      //   (a) while we have time, soft-track figureBaseY toward the
+      //       predicted ball Y (the figure leans to meet the shot).
+      //   (b) when time-to-contact drops to SWING_TO_CONTACT_MS, snap
+      //       figureBaseY to the exact target so the racket lands on
+      //       the ball, and fire the swing.
       if (state === 'preswing' && ball.vx > 0) {
-        // Predict y at the moment the ball reaches the racket plane.
-        const tToRacket = Math.max(0, (figureBaseX - ball.x) / ball.vx)
-        const predictedY = ball.y + ball.vy * tToRacket
-        // Clamp to the figure's reachable band relative to rest.
-        const target = Math.max(
-          figureBaseYRest - FIGURE_Y_TRACK_AMPLITUDE_PX,
-          Math.min(figureBaseYRest + FIGURE_Y_TRACK_AMPLITUDE_PX, predictedY),
-        )
-        // Soft tracking — exponential smoothing toward the target.
-        figureBaseY = figureBaseY + (target - figureBaseY) * FIGURE_Y_TRACK_LERP
-      }
-      // Note: when state === 'swinging' we just don't update figureBaseY,
-      // so the swing animates from wherever the figure had committed.
+        // The racket's contact-frame X is across the body (left of
+        // center) — that's where we want the ball at contact time.
+        const racketContactX =
+          figureBaseX + (RACKET_CONTACT_NORM_X - 0.5) * FIGURE_PX_WIDTH
+        const tToContact = (racketContactX - ball.x) / ball.vx
 
-      // Ball physics (kinematic — no gravity, simple Euler).
+        if (tToContact > 0) {
+          const predBallY = ball.y + ball.vy * tToContact
+          const targetY = Math.max(
+            figureBaseYRest - FIGURE_Y_TRACK_AMPLITUDE_PX,
+            Math.min(figureBaseYRest + FIGURE_Y_TRACK_AMPLITUDE_PX,
+              predBallY - racketYOffsetFromHip),
+          )
+
+          if (tToContact * 1000 <= SWING_TO_CONTACT_MS) {
+            // Time to fire. Snap so the contact frame lands on the ball.
+            figureBaseY = targetY
+            state = 'swinging'
+            swingStart = now
+            hitRegistered = false
+          } else {
+            // Soft track — figure leans toward where the ball will be.
+            figureBaseY += (targetY - figureBaseY) * FIGURE_Y_TRACK_LERP
+          }
+        }
+      }
+
+      // Ball physics (kinematic — no gravity).
       ball.x += ball.vx * dt
       ball.y += ball.vy * dt
 
-      // Headline collision (single AABB for both lines). Ball must be
-      // crossing the right edge from the right (vx < 0) and within the
-      // headline's vertical band. Our pickReturnVy guarantees the
-      // outbound trajectory lands here, so this should always trigger
-      // before the ball can escape.
+      // ─── Headline collision (only collision surface on the left) ─────
       if (
         ball.vx < 0 &&
         ball.y >= headlineLocal.top - BALL_RADIUS &&
@@ -559,27 +591,32 @@ export default function HeroRally({ headlineRef }: Props) {
         ball.x = headlineLocal.right + BALL_RADIUS
       }
 
-      // Racket collision — fires the swing. We only test this when the
-      // ball is incoming (vx > 0) and the figure isn't already mid-swing.
-      if (state === 'preswing' && ball.vx > 0) {
-        const racketPx = racketHeadAtPhase(0)
+      // ─── Mid-swing contact: racket strikes the ball ───────────────────
+      // The figure committed to a target Y when the swing fired, so the
+      // racket head at SWING_CONTACT_PHASE should meet the ball within
+      // a small radius. Reverse the ball at the moment the swing crosses
+      // contact phase. The proximity guard catches edge cases where the
+      // ball trajectory was perturbed (resize, etc.) — if it's still
+      // close, we hit; if not, the ball flies past.
+      if (state === 'swinging' && !hitRegistered && swingPhase >= SWING_CONTACT_PHASE) {
+        const racketPx = racketHeadAtPhase(SWING_CONTACT_PHASE)
         const dx = ball.x - racketPx[0]
         const dy = ball.y - racketPx[1]
-        if (dx * dx + dy * dy <= RACKET_HIT_RADIUS * RACKET_HIT_RADIUS) {
-          state = 'swinging'
-          swingStart = now
-          ball.vx = -ball.vx
-          // Pick a vy that guarantees the ball lands on the headline AND
-          // returns within reachable y. Replaces the prior random kick
-          // that could shoot the ball over/under the words.
+        if (dx * dx + dy * dy <= (RACKET_HIT_RADIUS * 1.5) ** 2) {
+          ball.vx = -Math.abs(ball.vx)  // ensure leftward
           ball.vy = pickReturnVy(ball.x, ball.y)
+          // Snap ball to racket head so the visual is "racket meets
+          // ball" rather than "ball reverses near racket."
+          ball.x = racketPx[0]
+          ball.y = racketPx[1]
         }
+        hitRegistered = true
       }
 
       // No top/bottom air walls. The ball can ONLY bounce off the words
-      // (left wall) and the figure's racket (right side). pickReturnVy
-      // keeps every trajectory in-bounds; if a resize mid-flight ever
-      // breaks that invariant, the next racket hit re-clamps.
+      // (left) and the figure's racket (right). pickReturnVy keeps every
+      // trajectory in-bounds; if anything escapes (resize edge case), the
+      // ball flies past the figure rather than teleporting back into play.
 
       // Paint figure + ball.
       paintAtSwingPhase(swingPhase)
