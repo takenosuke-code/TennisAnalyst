@@ -669,10 +669,54 @@ export default function HeroRally() {
 
       rafId = requestAnimationFrame(step)
     }
-    rafId = requestAnimationFrame((t) => {
-      lastTime = t
-      step(t)
-    })
+
+    // Gate the loop on visibility. Two reasons:
+    //   1. Performance — no rAF cost when the hero isn't onscreen.
+    //   2. Scroll feel — a continuously-painting absolutely-positioned
+    //      element near the top of the page can cause the browser's
+    //      scroll-anchoring algorithm to fight the user's scroll
+    //      ("pulls them back up"). Stopping rAF when the section is
+    //      out of view kills that interaction entirely. The container
+    //      also gets `overflow-anchor: none` as a belt-and-suspenders
+    //      so anchoring never targets a moving figure.
+    let onScreen = true
+    let docVisible = typeof document !== 'undefined' ? !document.hidden : true
+    function shouldRun() { return onScreen && docVisible }
+
+    function start() {
+      if (rafId) return
+      rafId = requestAnimationFrame((t) => {
+        // Reset lastTime on resume so dt doesn't jump after a pause
+        // (which would warp the ball + swing phase forward).
+        lastTime = t
+        step(t)
+      })
+    }
+    function stop() {
+      if (!rafId) return
+      cancelAnimationFrame(rafId)
+      rafId = 0
+    }
+
+    const io = new IntersectionObserver(
+      (entries) => {
+        onScreen = entries[0]?.isIntersecting ?? false
+        if (shouldRun()) start()
+        else stop()
+      },
+      { threshold: 0 },
+    )
+    io.observe(container)
+
+    function onVisibility() {
+      docVisible = !document.hidden
+      if (shouldRun()) start()
+      else stop()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+
+    // Kick off if the section is already onscreen at mount.
+    if (shouldRun()) start()
 
     const ro = new ResizeObserver(() => {
       containerRect = container.getBoundingClientRect()
@@ -685,8 +729,10 @@ export default function HeroRally() {
 
     return () => {
       cancelled = true
-      cancelAnimationFrame(rafId)
+      stop()
+      io.disconnect()
       ro.disconnect()
+      document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [reducedMotion])
 
@@ -695,6 +741,14 @@ export default function HeroRally() {
       ref={containerRef}
       className="absolute inset-0 pointer-events-none hidden lg:block"
       aria-hidden="true"
+      // Opt out of scroll anchoring. Without this, a moving SVG near
+      // the top of the page can become the browser's anchor target,
+      // and per-frame motion is read as "content shifted above me" —
+      // the browser then nudges scroll to compensate, fighting the
+      // user. The IntersectionObserver below already pauses the loop
+      // off-screen; this guards the still-onscreen-but-near-edge
+      // case where anchoring could engage during scroll.
+      style={{ overflowAnchor: 'none' }}
     >
       <svg
         ref={svgRef}
