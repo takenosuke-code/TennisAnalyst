@@ -298,6 +298,75 @@ describe('detectSwings', () => {
     expect(result[0].endFrame).toBe(29)
   })
 
+  it('detects soft swings even when one explosive swing dominates the clip', () => {
+    // Regression for the global-max threshold inflation bug. Before the P90
+    // fix, one explosive swing's peak set `max`, which pushed
+    // `threshold = median + 0.3 × (max − median)` past every softer swing
+    // in the clip — slices, drop volleys, blocked returns would all fall
+    // below threshold and be silently dropped. With P90 as the spread
+    // denominator, one outlier can no longer inflate the bar.
+    //
+    // Fixture shape:
+    //   - Triangle-profile swings (angle ramps to apex and back). Activity
+    //     stays at a single plateau through the swing, so the
+    //     above-threshold region is one continuous span — not two short
+    //     halves split by a mid-swing zero like a sin profile would
+    //     produce.
+    //   - 1 hard swing (peakDelta=60°) followed by 3 soft swings
+    //     (peakDelta=12°). Hard activity is ~5× soft activity per frame.
+    //   - Long rest periods (60 frames each) so the hard swing's
+    //     high-activity frames are well under 10% of the clip — the
+    //     condition for P90 to land in the soft-swing range rather than
+    //     in the hard-swing range.
+    const buildSwing = (
+      numFrames: number,
+      startMs: number,
+      peakDelta: number,
+    ): PoseFrame[] => {
+      const out: PoseFrame[] = []
+      for (let i = 0; i < numFrames; i++) {
+        const t = i / Math.max(1, numFrames - 1)
+        const ramp = t < 0.5 ? t * 2 : (1 - t) * 2
+        const e = peakDelta * ramp
+        const angles: JointAngles = {
+          right_elbow: 160 - e,
+          left_elbow: 160 - e * 0.4,
+          right_shoulder: 30 + e * 0.6,
+          left_shoulder: 30 + e * 0.3,
+          hip_rotation: 10 + e * 0.4,
+          trunk_rotation: 10 + e * 0.4,
+        }
+        out.push(makeFrame(i, startMs + i * 33, makeStandingPose(), angles))
+      }
+      return out
+    }
+
+    const REST = 60
+    const SWING = 30
+    const sections: PoseFrame[][] = []
+    let cursorMs = 0
+    sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * 33
+    sections.push(buildSwing(SWING, cursorMs, 60));  cursorMs += SWING * 33
+    sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * 33
+    sections.push(buildSwing(SWING, cursorMs, 12));  cursorMs += SWING * 33
+    sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * 33
+    sections.push(buildSwing(SWING, cursorMs, 12));  cursorMs += SWING * 33
+    sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * 33
+    sections.push(buildSwing(SWING, cursorMs, 12));  cursorMs += SWING * 33
+    sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * 33
+
+    const allFrames: PoseFrame[] = []
+    let idx = 0
+    for (const sect of sections) {
+      for (const f of sect) {
+        allFrames.push({ ...f, frame_index: idx++ })
+      }
+    }
+
+    const result = detectSwings(allFrames)
+    expect(result.length).toBe(4)
+  })
+
   it('sets peakFrame to the frame with maximum activity', () => {
     const frames: PoseFrame[] = []
     for (let i = 0; i < 30; i++) {

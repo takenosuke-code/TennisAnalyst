@@ -174,7 +174,7 @@ export function detectSwings(
   allFrames: PoseFrame[],
   opts: { minSwingFrames?: number; restThreshold?: number; mergeGapFrames?: number } = {}
 ): SwingSegment[] {
-  const { minSwingFrames = 15, restThreshold = 0.3, mergeGapFrames = 10 } = opts
+  const { minSwingFrames = 12, restThreshold = 0.3, mergeGapFrames = 5 } = opts
 
   if (allFrames.length < minSwingFrames) {
     return [{
@@ -219,11 +219,20 @@ export function detectSwings(
     smoothed.push(sum / count)
   }
 
-  // Find the adaptive threshold: median + fraction of (max - median)
+  // Adaptive threshold = median + restThreshold × (P90 − median).
+  //
+  // Was previously median + restThreshold × (max − median), but a single
+  // explosive swing in a long rally clip would set `max` to that swing's
+  // peak alone, inflating the threshold past every softer shot in the
+  // clip — slices, drop volleys, second-ball blocks would all silently
+  // fall below threshold and be dropped. P90 caps the spread denominator
+  // at the 90th percentile, so one outlier no longer raises the bar for
+  // everyone else. Mirrors the same trick LiveSwingDetector.thresholdStats
+  // already uses (lib/liveSwingDetector.ts:263-286).
   const sorted = [...smoothed].sort((a, b) => a - b)
   const median = sorted[Math.floor(sorted.length / 2)]
-  const max = sorted[sorted.length - 1]
-  const threshold = median + restThreshold * (max - median)
+  const p90 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))]
+  const threshold = median + restThreshold * (p90 - median)
 
   // Find contiguous regions above threshold
   const regions: { start: number; end: number; peakIdx: number; peakVal: number }[] = []
