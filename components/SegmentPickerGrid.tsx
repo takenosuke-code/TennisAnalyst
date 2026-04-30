@@ -47,6 +47,10 @@ export default function SegmentPickerGrid({
   errorBySegmentId,
 }: SegmentPickerGridProps) {
   const [filter, setFilter] = useState<FilterOption>('all')
+  // Per-card enlarge state. Only one card can be enlarged at a time —
+  // an enlarged card spans 2 grid columns so its preview is materially
+  // bigger without taking the user out of the grid context.
+  const [expandedId, setExpandedId] = useState<string | null>(null)
 
   const filtered = useMemo(() => {
     if (filter === 'all') return segments
@@ -110,7 +114,7 @@ export default function SegmentPickerGrid({
           No segments match this filter.
         </p>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 auto-rows-min grid-flow-row-dense">
           {filtered.map((segment) => (
             <SegmentCard
               key={segment.id}
@@ -121,6 +125,10 @@ export default function SegmentPickerGrid({
               saved={savedSegmentIds?.has(segment.id) ?? false}
               errorMessage={errorBySegmentId?.[segment.id] ?? null}
               signedIn={signedIn}
+              expanded={expandedId === segment.id}
+              onToggleExpand={() =>
+                setExpandedId((prev) => (prev === segment.id ? null : segment.id))
+              }
             />
           ))}
         </div>

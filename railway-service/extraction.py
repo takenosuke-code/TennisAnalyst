@@ -186,6 +186,116 @@ def _detect_racket_for_frame(
 # frames so the racket trail stays continuous.
 RACKET_MOTION_GATE_NORM = 0.005
 
+# Above this clip duration the cheap motion pre-pass kicks in so we
+# only pose-extract within motion windows instead of every sampled
+# frame of e.g. a 5-min match (most of which is the player walking
+# between points). Below the threshold the pre-pass overhead isn't
+# worth it.
+MOTION_PREPASS_MIN_DURATION_SEC = 90.0
+
+
+def _detect_motion_windows(
+    video_path: str,
+    sample_fps: int = 5,
+    threshold_percentile: float = 70.0,
+    padding_sec: float = 1.0,
+    min_window_sec: float = 0.5,
+) -> list[tuple[int, int]] | None:
+    """Cheap motion-peak detection over the whole video.
+
+    Goal: identify the frame ranges where the player is actively
+    swinging so the expensive YOLO+RTMPose pipeline only runs on those
+    windows. A 5-min match clip might be ~80% non-swing time (walking
+    between points, ball retrieval, talking to partner) — paying full
+    inference cost on those frames is wasted compute and the user
+    doesn't see skeletons there anyway, since the multi-shot grid
+    only surfaces detected swings.
+
+    Algorithm:
+      1. Sample frames at `sample_fps` (default 5fps).
+      2. Downsample each to 320x240 grayscale, frame-diff against the
+         previous, take mean abs-difference as the motion score.
+      3. Threshold at the `threshold_percentile` of motion scores.
+      4. Group consecutive above-threshold frames into windows with
+         `padding_sec` of slack on each side so a swing's wind-up and
+         follow-through (lower motion than peak contact) still land
+         inside the window.
+
+    Cost: ~1ms per sampled frame on CPU. A 5-min clip at 5fps motion
+    sampling is 1500 frames × ~1ms = ~1.5s of pre-pass overhead in
+    exchange for avoiding pose extraction on ~70% of frames.
+
+    Returns a list of (start_frame, end_frame) tuples in original-
+    video frame indices, or None when no usable motion was detected
+    (caller falls back to processing every frame). Returning None is
+    intentionally conservative — we'd rather over-process than
+    silently drop swings.
+    """
+    cap = _open_video_autorotated(video_path)
+    if not cap.isOpened():
+        return None
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    sample_interval = max(1, int(fps / sample_fps))
+
+    motion_scores: list[tuple[int, float]] = []
+    prev_gray = None
+    frame_idx = 0
+
+    try:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame_idx % sample_interval == 0:
+                small = cv2.resize(frame, (320, 240))
+                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                if prev_gray is not None:
+                    diff = cv2.absdiff(gray, prev_gray)
+                    score = float(np.mean(diff))
+                    motion_scores.append((frame_idx, score))
+                prev_gray = gray
+            frame_idx += 1
+    finally:
+        cap.release()
+
+    if len(motion_scores) < 3:
+        return None
+
+    scores = np.array([s for _, s in motion_scores])
+    threshold_score = float(np.percentile(scores, threshold_percentile))
+
+    # If the threshold itself is tiny, the video is essentially
+    # uniform-motion (camera shake, a static scene with no clear peaks)
+    # — don't filter. Process whole video.
+    if threshold_score < 1.0:
+        return None
+
+    motion_frames = [f for f, s in motion_scores if s >= threshold_score]
+    if not motion_frames:
+        return None
+
+    pad = int(padding_sec * fps)
+    min_window_frames = int(min_window_sec * fps)
+    windows: list[tuple[int, int]] = []
+    cur_start = max(0, motion_frames[0] - pad)
+    cur_end = motion_frames[0] + pad
+
+    for f in motion_frames[1:]:
+        if f - pad <= cur_end:
+            # Adjacent or overlapping — extend current window.
+            cur_end = f + pad
+        else:
+            # Gap — close current window if it meets the minimum length.
+            if cur_end - cur_start >= min_window_frames:
+                windows.append((cur_start, cur_end))
+            cur_start = max(0, f - pad)
+            cur_end = f + pad
+    if cur_end - cur_start >= min_window_frames:
+        windows.append((cur_start, cur_end))
+
+    return windows or None
+
 
 def _dominant_wrist_norm(landmarks: list[dict]) -> tuple[float, float] | None:
     """Pick the higher-visibility wrist from a 33-entry landmark list and
@@ -263,6 +373,42 @@ def _extract_with_rtmpose(
     # videos still fit the budget. Mirrors the browser-side adaptive
     # sampling at lib/poseExtraction.ts:184-198.
     duration_sec_est = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / video_fps
+
+    # Motion pre-pass for long clips: detect motion windows up front so
+    # we only pose-extract within them. The cheap motion scan runs in
+    # ~1.5s for a 5-min clip and typically reduces the inference set to
+    # ~20-30% of the original frames (most match footage is non-swing
+    # dead time). For shorter clips the pre-pass overhead isn't worth
+    # it — the threshold matches the existing adaptive-sampling tier.
+    motion_windows: list[tuple[int, int]] | None = None
+    if duration_sec_est > MOTION_PREPASS_MIN_DURATION_SEC:
+        import time as _time
+        t_motion = _time.perf_counter()
+        # Release our cap so the motion-prepass cap doesn't fight for
+        # the same video file handle on platforms that gate concurrent
+        # opens (rare but observed on some FS combinations).
+        cap.release()
+        motion_windows = _detect_motion_windows(video_path)
+        motion_ms = round((_time.perf_counter() - t_motion) * 1000, 1)
+        if motion_windows:
+            total_window_frames = sum(e - s for s, e in motion_windows)
+            total_window_sec = total_window_frames / video_fps
+            print(
+                f"[extract:rtmpose] motion pre-pass ({motion_ms}ms): "
+                f"{len(motion_windows)} windows covering {total_window_sec:.1f}s "
+                f"of {duration_sec_est:.1f}s "
+                f"({100 * total_window_sec / duration_sec_est:.0f}%)"
+            )
+        else:
+            print(
+                f"[extract:rtmpose] motion pre-pass ({motion_ms}ms): "
+                f"no usable windows; processing all sampled frames"
+            )
+        # Reopen for the main loop.
+        cap = _open_video_autorotated(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Cannot reopen video after motion prepass: {video_path}")
+
     if duration_sec_est > 120:
         effective_sample_fps = min(sample_fps, 8)
     elif duration_sec_est > 60:
@@ -439,7 +585,18 @@ def _extract_with_rtmpose(
             })
             processed_index += 1
 
+    def _in_motion_window(idx: int) -> bool:
+        """True when `idx` is inside any pre-detected motion window
+        (or when no pre-pass ran, in which case every frame is in)."""
+        if motion_windows is None:
+            return True
+        for s, e in motion_windows:
+            if s <= idx <= e:
+                return True
+        return False
+
     chunk: list[tuple[int, int, np.ndarray]] = []
+    motion_skipped = 0
     with ThreadPoolExecutor(max_workers=POOL_WORKERS) as pool:
         while cap.isOpened():
             ret, frame = cap.read()
@@ -449,6 +606,10 @@ def _extract_with_rtmpose(
                 break
 
             if frame_index % frame_interval == 0:
+                if not _in_motion_window(frame_index):
+                    motion_skipped += 1
+                    frame_index += 1
+                    continue
                 timestamp_ms = int((frame_index / video_fps) * 1000)
                 # .copy() so cv2's reused frame buffer doesn't change
                 # under us while a worker thread still holds the ref.
@@ -461,6 +622,12 @@ def _extract_with_rtmpose(
 
         if chunk:
             _process_chunk(chunk, pool)
+
+    if motion_windows is not None:
+        print(
+            f"[extract:rtmpose] motion pre-pass skipped {motion_skipped} sampled frames "
+            f"({person_yolo_skipped} of the processed frames also skipped person YOLO)"
+        )
 
     cap.release()
 

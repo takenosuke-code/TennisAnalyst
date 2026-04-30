@@ -30,6 +30,11 @@ interface SegmentCardProps {
   // When false, the save button renders as a "sign in" prompt -- the grid
   // passes auth state down so each card reflects the same gate.
   signedIn?: boolean
+  // Inline-enlarge: when true the card spans 2 grid columns on lg+ so
+  // the video preview is materially bigger. Toggled by the grid; only
+  // one card can be enlarged at a time.
+  expanded?: boolean
+  onToggleExpand?: () => void
 }
 
 // One per-segment card on the multi-shot analyze flow. The card is
@@ -45,6 +50,8 @@ export default function SegmentCard({
   canSave = true,
   errorMessage = null,
   signedIn = true,
+  expanded = false,
+  onToggleExpand,
 }: SegmentCardProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const classifierIsBaselineShot = isBaselineShot(segment.shot_type)
@@ -151,8 +158,10 @@ export default function SegmentCard({
     })
   }
 
+  const cardSpan = expanded ? 'sm:col-span-2 lg:col-span-2' : ''
+
   return (
-    <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3 flex flex-col gap-3">
+    <div className={`rounded-xl border border-white/10 bg-white/[0.03] p-3 flex flex-col gap-3 ${cardSpan}`}>
       <div className="rounded-lg overflow-hidden bg-black aspect-video relative">
         <video
           ref={videoRef}
@@ -162,6 +171,17 @@ export default function SegmentCard({
           playsInline
           className="w-full h-full object-contain"
         />
+        {onToggleExpand && (
+          <button
+            type="button"
+            onClick={onToggleExpand}
+            className="absolute top-2 right-2 px-2 py-1 rounded bg-black/70 hover:bg-black text-white text-xs font-medium"
+            aria-label={expanded ? 'Shrink card' : 'Enlarge card'}
+            aria-pressed={expanded}
+          >
+            {expanded ? 'Shrink' : 'Enlarge'}
+          </button>
+        )}
         <button
           type="button"
           onClick={playSegment}
