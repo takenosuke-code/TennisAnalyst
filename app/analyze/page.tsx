@@ -3,6 +3,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import JointTogglePanel from '@/components/JointTogglePanel'
 import SwingSelector from '@/components/SwingSelector'
 import SegmentPickerGrid from '@/components/SegmentPickerGrid'
@@ -10,7 +11,7 @@ import BestShotPanel from '@/components/BestShotPanel'
 import SwingBaselineGrid, { type SwingBaselineSaveOverride } from '@/components/SwingBaselineGrid'
 import BackendChip from '@/components/BackendChip'
 import type { SegmentCardSaveOverride } from '@/components/SegmentCard'
-import { usePoseStore, useJointStore } from '@/store'
+import { usePoseStore, useJointStore, useCompareHandoff } from '@/store'
 import { detectSwings } from '@/lib/jointAngles'
 import { useUser } from '@/hooks/useUser'
 import { useProfile } from '@/hooks/useProfile'
@@ -42,6 +43,8 @@ export default function AnalyzePage() {
   const [baselineError, setBaselineError] = useState<string | null>(null)
   const { user, loading: authLoading } = useUser()
   const { profile, skipped, loading: profileLoading } = useProfile()
+  const router = useRouter()
+  const setCompareHandoff = useCompareHandoff((s) => s.setHandoff)
   const isAdvanced = !profileLoading && profile?.skill_tier === 'advanced'
   // Always render both arms. Earlier the forehand view suppressed the
   // off-hand elbow/wrist on the theory that a one-armed shot makes the
@@ -282,6 +285,24 @@ export default function AnalyzePage() {
     }
   }
 
+  // Park the selected swing in the handoff store and route to the
+  // compare page. The compare page re-runs detectSwings on `allFrames`
+  // and pre-selects swing N — same code path as a fresh upload + manual
+  // pick, just with state pre-populated. Gated upstream on `!!blobUrl`
+  // (the card hides the button without one) and on `signedIn` (compare
+  // requires auth).
+  const handleCompareSwingToBaseline = (swingIndex: number) => {
+    if (!blobUrl || allFrames.length === 0) return
+    setCompareHandoff({
+      frames: allFrames,
+      videoSrc: blobUrl,
+      preselectedSwingIndex: swingIndex,
+      extractorBackend,
+      fallbackReason,
+    })
+    router.push('/baseline/compare')
+  }
+
   const saveAsBaseline = async () => {
     if (!canSaveBaseline) return
     setBaselineStatus('saving')
@@ -395,6 +416,7 @@ export default function AnalyzePage() {
               defaultShotType={shotType ?? 'forehand'}
               signedIn={!!user}
               onSaveSwing={handleSaveSwingAsBaseline}
+              onCompareSwing={handleCompareSwingToBaseline}
               savingSwingIndex={savingSwingIndex}
               savedSwingIndices={savedSwingIndices}
               errorBySwingIndex={errorBySwingIndex}

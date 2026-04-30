@@ -21,6 +21,11 @@ interface SwingBaselineCardProps {
   blobUrl: string
   defaultShotType: string
   onSave: (swingIndex: number, override: SwingBaselineSaveOverride) => void | Promise<void>
+  // Optional handler to ferry this swing to the baseline-comparison
+  // page. When provided, the card renders a "Compare to baseline"
+  // button alongside Save. The grid owns the navigation; the card
+  // just emits the swing index.
+  onCompare?: (swingIndex: number) => void
   saving: boolean
   saved: boolean
   errorMessage: string | null
@@ -38,6 +43,7 @@ function SwingBaselineCard({
   blobUrl,
   defaultShotType,
   onSave,
+  onCompare,
   saving,
   saved,
   errorMessage,
@@ -215,20 +221,31 @@ function SwingBaselineCard({
       {saved && <p className="text-xs text-emerald-300">Saved as baseline.</p>}
 
       {signedIn ? (
-        <button
-          type="button"
-          onClick={handleSave}
-          disabled={saving || saved}
-          className={`px-3 py-2 rounded-lg text-sm font-semibold transition-colors ${
-            saving || saved
-              ? 'bg-white/10 text-white/40 cursor-not-allowed'
-              : 'bg-emerald-500 hover:bg-emerald-400 text-white'
-          }`}
-        >
-          {saving ? 'Saving...' : saved ? 'Saved' : 'Save as baseline'}
-        </button>
+        <div className="flex flex-col gap-2">
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving || saved}
+            className={`px-3 py-2 rounded-lg text-sm font-semibold transition-colors ${
+              saving || saved
+                ? 'bg-white/10 text-white/40 cursor-not-allowed'
+                : 'bg-emerald-500 hover:bg-emerald-400 text-white'
+            }`}
+          >
+            {saving ? 'Saving...' : saved ? 'Saved' : 'Save as baseline'}
+          </button>
+          {onCompare && (
+            <button
+              type="button"
+              onClick={() => onCompare(swing.index)}
+              className="px-3 py-2 rounded-lg text-sm font-semibold bg-white/10 hover:bg-white/15 text-white transition-colors"
+            >
+              Compare to baseline →
+            </button>
+          )}
+        </div>
       ) : (
-        <p className="text-xs text-white/50">Sign in to save this as a baseline.</p>
+        <p className="text-xs text-white/50">Sign in to save or compare this swing.</p>
       )}
     </div>
   )
@@ -240,6 +257,10 @@ interface SwingBaselineGridProps {
   defaultShotType: string
   signedIn: boolean
   onSaveSwing: (swingIndex: number, override: SwingBaselineSaveOverride) => void | Promise<void>
+  // Optional. When set, each card gets a "Compare to baseline" button
+  // that hands the swing off to /baseline/compare via the
+  // useCompareHandoff store.
+  onCompareSwing?: (swingIndex: number) => void
   // Keyed by swing.index. Parent owns the state so per-card UI stays
   // consistent across rerenders.
   savingSwingIndex: number | null
@@ -262,6 +283,7 @@ export default function SwingBaselineGrid({
   defaultShotType,
   signedIn,
   onSaveSwing,
+  onCompareSwing,
   savingSwingIndex,
   savedSwingIndices,
   errorBySwingIndex,
@@ -287,6 +309,7 @@ export default function SwingBaselineGrid({
             blobUrl={blobUrl}
             defaultShotType={defaultShotType}
             onSave={onSaveSwing}
+            onCompare={onCompareSwing}
             saving={savingSwingIndex === swing.index}
             saved={savedSwingIndices.has(swing.index)}
             errorMessage={errorBySwingIndex[swing.index] ?? null}

@@ -8,6 +8,7 @@ import { upload } from '@vercel/blob/client'
 import JointTogglePanel from '@/components/JointTogglePanel'
 import SwingSelector from '@/components/SwingSelector'
 import { useBaselineStore } from '@/store/baseline'
+import { useCompareHandoff } from '@/store'
 import { usePoseExtractor } from '@/hooks/usePoseExtractor'
 import { useUser } from '@/hooks/useUser'
 import { detectSwings } from '@/lib/jointAngles'
@@ -43,6 +44,13 @@ export default function BaselineComparePage() {
   const { extract, progress, isProcessing } = usePoseExtractor()
   const { user, loading: authLoading } = useUser()
   const router = useRouter()
+  // One-shot handoff from /analyze: when the user clicked
+  // "Compare to baseline" on a swing card, the analyze page parked the
+  // candidate (frames + blob URL + which swing index) in this store.
+  // We consume it on mount, populate today's-clip state from it, and
+  // clear so a back-and-return doesn't re-prefill.
+  const pendingHandoff = useCompareHandoff((s) => s.pending)
+  const clearHandoff = useCompareHandoff((s) => s.clearHandoff)
 
   const [todayObjectUrl, setTodayObjectUrl] = useState<string | null>(null)
   const [todayFrames, setTodayFrames] = useState<PoseFrame[]>([])
@@ -251,6 +259,22 @@ export default function BaselineComparePage() {
       setSelectedTodaySwing(null)
     }
   }, [todaySwings.length, selectedTodaySwing])
+
+  // Consume any pending handoff from /analyze. We only run this once
+  // per page load — the clear-after-consume guard handles
+  // back-button-then-return without re-prefilling stale state. The
+  // handoff video URL is the Vercel blob https URL, so the existing
+  // revokeObjectURL cleanup at line ~117 stays a no-op for handoffs.
+  useEffect(() => {
+    if (!pendingHandoff) return
+    if (authLoading || !user) return
+    setTodayObjectUrl(pendingHandoff.videoSrc)
+    setTodayFrames(pendingHandoff.frames)
+    setTodayExtractorBackend(pendingHandoff.extractorBackend)
+    setTodayFallbackReason(pendingHandoff.fallbackReason)
+    setSelectedTodaySwing(pendingHandoff.preselectedSwingIndex)
+    clearHandoff()
+  }, [pendingHandoff, authLoading, user, clearHandoff])
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()

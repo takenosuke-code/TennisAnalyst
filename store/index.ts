@@ -211,6 +211,42 @@ export const useAnalysisStore = create<AnalysisStore>((set) => ({
   reset: () => set({ feedback: '', scores: {}, loading: false }),
 }))
 
+// One-shot handoff from /analyze → /baseline/compare. The analyze page
+// can't pass non-serializable PoseFrame[] through a query param, and
+// re-fetching from a `?segment=ID` requires the segment to be persisted
+// (server-side detection isn't always on). Park the candidate in the
+// store, navigate, then have the compare page consume + clear it on
+// mount. Always uses the Vercel blob URL (not a local object URL) so the
+// compare page's existing `revokeObjectURL(todayObjectUrl)` cleanup
+// stays a no-op for handoff-sourced videos.
+interface CompareHandoff {
+  // Full frame array from the analyze session — compare page re-runs
+  // detectSwings on it so its UI for multi-swing clips lights up
+  // exactly the way it would after a fresh upload.
+  frames: PoseFrame[]
+  // Vercel blob URL (https). Required — handoffs are skipped when the
+  // analyze session has no blob URL.
+  videoSrc: string
+  // 1-based swing index within the compare-page's detected swings to
+  // pre-select. Mirrors the index the user clicked on the analyze
+  // grid.
+  preselectedSwingIndex: number
+  extractorBackend: ExtractorBackend | null
+  fallbackReason: string | null
+}
+
+interface CompareHandoffStore {
+  pending: CompareHandoff | null
+  setHandoff: (h: CompareHandoff) => void
+  clearHandoff: () => void
+}
+
+export const useCompareHandoff = create<CompareHandoffStore>((set) => ({
+  pending: null,
+  setHandoff: (pending) => set({ pending }),
+  clearHandoff: () => set({ pending: null }),
+}))
+
 // Synchronized playback time for comparison views
 interface SyncStore {
   syncedTime: number
