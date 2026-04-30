@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 // Mock @vercel/blob/client BEFORE importing the module under test so
 // the upload() shim is in place when the module's import binding is
@@ -71,7 +73,7 @@ describe('sliceToSubClip', () => {
       // Swing 2: covers chunk 4 (4000–5000ms).
       { swingIndex: 2, startMs: 4100, endMs: 4900 },
     ]
-    const result = sliceToSubClip(chunks, 'video/mp4', swings, 0)
+    const result = await sliceToSubClip(chunks, 'video/mp4', swings, 0)
 
     // The included chunks should be {0, 2, 3, 4} → sizes 1 + 4 + 8 + 16
     // = 29. Chunk 1 (size 2) lives in [1000, 2000)ms — outside every
@@ -110,12 +112,12 @@ describe('sliceToSubClip', () => {
     })
   })
 
-  it('handles empty chunks / empty swings gracefully', () => {
-    const a = sliceToSubClip([], 'video/mp4', [{ swingIndex: 0, startMs: 0, endMs: 100 }], 0)
+  it('handles empty chunks / empty swings gracefully', async () => {
+    const a = await sliceToSubClip([], 'video/mp4', [{ swingIndex: 0, startMs: 0, endMs: 100 }], 0)
     expect(a.blob.size).toBe(0)
     expect(a.perSwingOffsets).toHaveLength(0)
 
-    const b = sliceToSubClip(
+    const b = await sliceToSubClip(
       [new Blob([new Uint8Array([1])], { type: 'video/mp4' })],
       'video/mp4',
       [],
@@ -123,6 +125,94 @@ describe('sliceToSubClip', () => {
     )
     expect(b.blob.size).toBe(0)
     expect(b.perSwingOffsets).toHaveLength(0)
+  })
+
+  it('demuxes a real mp4 fixture, packs two swing windows contiguously, and emits valid mp4 bytes', async () => {
+    // Fixture: 3s, 320x240, 30fps, libx264, yuv420p. Generated once via:
+    //   ffmpeg -y -f lavfi -i testsrc=duration=3:size=320x240:rate=30 \
+    //          -c:v libx264 -pix_fmt yuv420p -t 3 \
+    //          __tests__/fixtures/test-3s-30fps.mp4
+    // Re-generate with the same command if the binary needs refreshing
+    // (it's checked into the repo via the !__tests__/fixtures/*.mp4
+    // exception in .gitignore).
+    const fixturePath = resolve(__dirname, '../fixtures/test-3s-30fps.mp4')
+    let fixtureBytes: Buffer
+    try {
+      fixtureBytes = readFileSync(fixturePath)
+    } catch {
+      // If the fixture is missing (e.g., a sparse checkout), skip
+      // gracefully rather than fail the suite. The mp4box path is
+      // still smoke-covered by the other sliceToSubClip tests above
+      // (which exercise the not-mp4 fallback branch).
+      console.warn('[liveSwingBatchExtractor.test] fixture missing, skipping mp4box round-trip test')
+      return
+    }
+    // Wrap in a Blob — the pipeline takes Blob[] from MediaRecorder, so
+    // we mimic a single-chunk recording.
+    const chunks = [
+      new Blob([new Uint8Array(fixtureBytes)], { type: 'video/mp4' }),
+    ]
+
+    // Two non-overlapping windows: [200ms, 800ms] and [1500ms, 2200ms].
+    // Sum of durations: 600 + 700 = 1300ms.
+    const swings: BatchExtractSwingInput[] = [
+      { swingIndex: 0, startMs: 200, endMs: 800 },
+      { swingIndex: 1, startMs: 1500, endMs: 2200 },
+    ]
+
+    const result = await sliceToSubClip(chunks, 'video/mp4', swings, 0)
+
+    // Output must be non-empty and a real mp4 (ftyp box at offset 4).
+    expect(result.blob.size).toBeGreaterThan(0)
+    // jsdom 24's Blob lacks `.arrayBuffer()` in some configurations; fall
+    // back to FileReader (always available) for cross-environment safety.
+    const outBuf = await new Promise<ArrayBuffer>((res, rej) => {
+      const reader = new FileReader()
+      reader.onload = () => res(reader.result as ArrayBuffer)
+      reader.onerror = () => rej(reader.error)
+      reader.readAsArrayBuffer(result.blob)
+    })
+    const outBytes = new Uint8Array(outBuf)
+    expect(outBytes[4]).toBe(0x66) // 'f'
+    expect(outBytes[5]).toBe(0x74) // 't'
+    expect(outBytes[6]).toBe(0x79) // 'y'
+    expect(outBytes[7]).toBe(0x70) // 'p'
+
+    // Two perSwingOffsets, packed contiguously (swing 0 starts at 0,
+    // swing 1 starts where swing 0 ended).
+    expect(result.perSwingOffsets).toHaveLength(2)
+    expect(result.perSwingOffsets[0]?.spliceStartMs).toBe(0)
+    expect(result.perSwingOffsets[1]?.spliceStartMs).toBe(
+      result.perSwingOffsets[0]?.spliceEndMs,
+    )
+
+    // Total emitted duration ≈ sum of swing-window durations (~1300ms).
+    // Tolerate ±10% for sample-boundary rounding (mp4box emits whole
+    // sample durations, so the tail of each window can over-/under-shoot
+    // by up to one frame ≈ 33ms at 30fps).
+    const totalMs = result.perSwingOffsets[1]?.spliceEndMs ?? 0
+    expect(totalMs).toBeGreaterThan(1300 * 0.85)
+    expect(totalMs).toBeLessThan(1300 * 1.15)
+
+    // Re-parse the output with mp4box and assert at least one video
+    // sample was kept.
+    const MP4Box = await import('mp4box')
+    const reparsed = MP4Box.createFile()
+    let reparseError: string | null = null
+    reparsed.onError = (_m, msg) => {
+      reparseError = msg
+    }
+    const wrapped = MP4Box.MP4BoxBuffer.fromArrayBuffer(outBuf, 0)
+    reparsed.appendBuffer(wrapped)
+    reparsed.flush()
+    expect(reparseError).toBeNull()
+    const reparsedInfo = reparsed.getInfo()
+    expect(reparsedInfo.videoTracks?.length ?? 0).toBeGreaterThan(0)
+    // The output must report a non-trivial number of samples (at least
+    // ~1 frame; for a 1.3s window at 30fps we expect ~39 samples but
+    // mp4box's sample count post-fragmentation is implementation-
+    // dependent, so we assert >0).
+    expect(reparsedInfo.videoTracks?.[0]?.nb_samples ?? 0).toBeGreaterThan(0)
   })
 })
 

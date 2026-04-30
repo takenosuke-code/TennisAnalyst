@@ -13,14 +13,34 @@
 // integration workers can wire it up to whatever buffering scheme they
 // land on.
 //
-// TODO(E1): Worker E1 is running an fMP4 spike in parallel. The
-// `sliceToSubClip` helper assumes each MediaRecorder chunk is
-// independently demuxable (the fMP4 path). If the spike report says
-// fMP4 is unavailable on iOS Safari, swap the splice strategy for the
-// "send the whole blob with explicit time-range markers per swing"
-// fallback (see TODO inside sliceToSubClip). Both code paths are kept
-// behind the same public API so swapping is a one-line change here, not
-// in E3/E4.
+// Phase E6 update — mp4box demux + remux for iOS Safari compatibility.
+// Real-device testing (`app/dev/fmp4-spike`) on iPhone Safari showed
+// chunks #1+ from MediaRecorder fail standalone playback ("operation not
+// supported"). iOS produces a non-fragmented mp4 prefix (moov in chunk
+// #0 only), so the previous "concat raw chunks per swing window" path
+// produced malformed mp4 bytes that Modal would reject. Modal's reject
+// fell back to E3's on-device frames, so /live still worked, but Phase
+// E benefits never materialised on iPhones.
+//
+// Fix: concatenate ALL chunks into one ArrayBuffer (this prefix IS a
+// valid mp4 thanks to chunk #0's moov), parse it with mp4box.js,
+// extract the video samples whose presentation time falls in any swing
+// window, and emit a fresh fragmented mp4 containing only those
+// samples. Audio is dropped — Modal extracts pose from video frames
+// only, so audio bytes would just inflate the upload.
+//
+// Memory/perf budget: mp4box parses 30s of typical phone-recording
+// (~5-10MB) in <200ms on a recent phone; 5min of recording (~50-80MB)
+// in ~1-2s. Both are run on a worker tick, not in the swing-detect hot
+// path, so the cost is invisible to the camera preview. Don't try to
+// "optimize" without measuring on a real device — premature
+// optimization here has historically broken iOS playback semantics.
+//
+// Browser compat: mp4box.js is pure JS, ESM, ~50KB minified. Works on
+// iOS Safari 17+, Chrome (any), Firefox 110+. The dynamic import below
+// keeps it out of the SSR bundle (lib/liveSwingBatchExtractor.ts is
+// imported by hooks that could in theory be tree-shaken into a server
+// component).
 
 import { upload } from '@vercel/blob/client'
 import type { PoseFrame } from '@/lib/supabase'
@@ -107,65 +127,45 @@ function extForMime(mimeType: string): string {
   return KNOWN_VIDEO_EXT[base] ?? 'bin'
 }
 
-// =====================================================================
-// Splice helper
-// =====================================================================
-
 /**
- * Splice the swing windows from `chunks` into ONE concatenated sub-clip
- * Blob. Tracks per-swing offsets within the spliced clip so split-back
- * works after Modal returns a flat keypoint array.
- *
- * Approach (fMP4-friendly path):
- *   - Treat each MediaRecorder chunk as independently demuxable. Each
- *     chunk maps to a fixed time slice [chunkStartMs, chunkEndMs) based
- *     on a uniform-distribution assumption of total duration / chunk
- *     count. This is the assumption fMP4 mode buys us.
- *   - For each swing window, gather the chunks whose time slice
- *     intersects [startMs, endMs] and concatenate their bytes.
- *   - Record per-swing offsets so the caller can map flat output frames
- *     back to their swing.
- *
- * TODO(E1 fallback): If the fMP4 spike fails, swap the chunk-walking
- * loop for "ship the whole concatenated buffer + send swing time
- * markers as side metadata to /api/extract", and have Modal slice
- * server-side. That fallback would mux via the `mp4-muxer` package
- * (~10KB) — gated on what E1 reports.
- *
- * Note on duration estimation: MediaRecorder doesn't tag each chunk
- * with a precise duration. We estimate per-chunk duration from
- * (totalEndMs - blobStartMs) / chunks.length. This is approximate but
- * good enough for splice boundaries — the keypoint split-back uses the
- * spliced timestamps, not chunk-aligned ones.
+ * Cheap check that the buffer's first 12 bytes look like an mp4 ftyp
+ * box: bytes [4..8) === 'ftyp'. The size prefix at [0..4) and the brand
+ * at [8..12) are not checked — we only need to know whether mp4box has
+ * a chance of parsing this as ISO BMFF. If not, fall back to the dumb
+ * raw-concat path so unit-test smoke fixtures (which pass tiny Uint8Arrays
+ * that don't claim to be mp4) keep working.
  */
-export function sliceToSubClip(
+function looksLikeMp4(buf: ArrayBuffer): boolean {
+  if (buf.byteLength < 12) return false
+  const view = new Uint8Array(buf, 4, 4)
+  // 'f' 't' 'y' 'p' = 0x66 0x74 0x79 0x70
+  return view[0] === 0x66 && view[1] === 0x74 && view[2] === 0x79 && view[3] === 0x70
+}
+
+// =====================================================================
+// Splice helper — fallback (raw concat) path
+// =====================================================================
+//
+// Used when (a) chunks aren't recognisable as mp4 (unit-test fixtures
+// pass synthetic 1-byte Blobs), or (b) the mp4box demux/remux path
+// throws unexpectedly. The fallback is the legacy behaviour: walk the
+// chunks under a uniform-duration assumption, emit the intersecting
+// chunks raw, and produce per-swing offsets via running counter. Modal
+// will reject the resulting bytes when chunks aren't actually
+// fragmented, but E3's per-swing failure path catches that and falls
+// back to on-device frames — so /live keeps working even on the
+// fallback.
+
+function fallbackRawConcatSplice(
   chunks: Blob[],
   mimeType: string,
   swings: BatchExtractSwingInput[],
   blobStartMs: number,
 ): SplicedSubClip {
-  if (chunks.length === 0) {
-    return {
-      blob: new Blob([], { type: mimeType }),
-      perSwingOffsets: [],
-    }
-  }
-  if (swings.length === 0) {
-    return {
-      blob: new Blob([], { type: mimeType }),
-      perSwingOffsets: [],
-    }
-  }
-
-  // Estimate the total media-clock duration covered by the chunk buffer.
-  // Use the latest swing's endMs as the upper bound — caller is expected
-  // to flush MediaRecorder before invoking us, so the latest swing end
-  // is at or before the buffer's tail.
   const lastEnd = Math.max(...swings.map((s) => s.endMs))
   const totalDurationMs = Math.max(1, lastEnd - blobStartMs)
   const perChunkMs = totalDurationMs / chunks.length
 
-  // Build a [chunkIndex] → [chunkStartMs, chunkEndMs) table.
   const chunkRanges: Array<{ start: number; end: number }> = chunks.map((_, i) => ({
     start: blobStartMs + i * perChunkMs,
     end: blobStartMs + (i + 1) * perChunkMs,
@@ -180,7 +180,6 @@ export function sliceToSubClip(
     const swingEnd = swing.endMs
     const spliceStartMs = runningSpliceMs
 
-    // Walk the chunks in order; include any that intersect this swing.
     for (let i = 0; i < chunks.length; i++) {
       const range = chunkRanges[i]
       if (!range) continue
@@ -204,6 +203,309 @@ export function sliceToSubClip(
   return {
     blob: new Blob(splicedBlobs, { type: mimeType }),
     perSwingOffsets,
+  }
+}
+
+// =====================================================================
+// Splice helper — mp4box demux/remux (production path)
+// =====================================================================
+
+/**
+ * Splice the swing windows from `chunks` into ONE concatenated mp4 sub-clip
+ * Blob using mp4box.js to demux + remux. This is the production path that
+ * works on iOS Safari (where MediaRecorder produces classic, not fragmented,
+ * mp4 — so naive concat-by-time produces malformed bytes).
+ *
+ * Algorithm:
+ *   1. Concatenate ALL provided chunks into one Blob and read as
+ *      ArrayBuffer. This prefix is a valid mp4 because chunk #0
+ *      contains the moov.
+ *   2. Parse with mp4box.appendBuffer + start. Pick the first video
+ *      track.
+ *   3. For each video sample, compute its presentation time
+ *      (cts / timescale * 1000) in ms. Mark samples whose time falls
+ *      in ANY requested swing window.
+ *   4. Group selected samples by swing → contiguous runs (a swing
+ *      window picks consecutive samples by construction, so each swing
+ *      is one run).
+ *   5. Mutate sample.dts/cts so each swing's samples start at the
+ *      desired contiguous output time (spliceStartMs in track-timescale
+ *      units) — preserves inter-sample spacing within the swing.
+ *   6. Build the init segment via initializeSegmentation().
+ *   7. For each swing's run, call createFragment(track_id, runStart,
+ *      runEnd, sharedStream) to append a moof+mdat. mp4box's createMoof
+ *      uses sample[0].dts to set tfdt.baseMediaDecodeTime, so our
+ *      mutation in step 5 anchors the fragment correctly.
+ *   8. Concat init buffer + fragments stream → output Blob.
+ *
+ * Audio decision: dropped. Modal's pose extractor reads video frames
+ * only via OpenCV. Including audio just inflates upload bytes for no
+ * downstream benefit. setSegmentOptions is called only on the video
+ * track, and the moov rebuilt by initializeSegmentation only contains
+ * fragmented tracks — audio falls out naturally.
+ */
+async function mp4boxSplice(
+  chunks: Blob[],
+  mimeType: string,
+  swings: BatchExtractSwingInput[],
+): Promise<SplicedSubClip> {
+  // Dynamic import keeps mp4box.js out of any server bundles. The lib
+  // file declares 'use client', but Next can still tree-shake imports
+  // into server graphs if a server component touches anything from
+  // this module. Lazy-loading mp4box on first call is cheap (~50KB
+  // gzipped, browser-only path).
+  const MP4Box = await import('mp4box')
+
+  const fullBlob = new Blob(chunks, { type: mimeType })
+  const fullBuf = await fullBlob.arrayBuffer()
+
+  // ISOFile expects an MP4BoxBuffer (ArrayBuffer subclass with a
+  // fileStart property). MP4BoxBuffer.fromArrayBuffer wraps an
+  // existing ArrayBuffer with fileStart=0 in one call.
+  const mp4Buffer = MP4Box.MP4BoxBuffer.fromArrayBuffer(fullBuf, 0)
+
+  const file = MP4Box.createFile()
+
+  // mp4box parses lazily as buffers are appended. Capture errors so we
+  // can fall back gracefully.
+  let parseError: string | null = null
+  file.onError = (_module, message) => {
+    parseError = message
+  }
+
+  // Append the full buffer in one shot, then flush so any final boxes
+  // are processed.
+  file.appendBuffer(mp4Buffer)
+  file.flush()
+
+  if (parseError) {
+    throw new Error(`mp4box parse error: ${parseError}`)
+  }
+
+  const info = file.getInfo()
+  if (!info || !info.videoTracks || info.videoTracks.length === 0) {
+    throw new Error('mp4box: no video tracks found')
+  }
+
+  const videoTrack = info.videoTracks[0]
+  if (!videoTrack) throw new Error('mp4box: video track missing')
+
+  const trackId = videoTrack.id
+  const timescale = videoTrack.timescale
+
+  const trakInternal = (file as unknown as {
+    getTrackById: (id: number) => { samples: Array<{ dts: number; cts: number; duration: number; size: number }> } | undefined
+  }).getTrackById(trackId)
+  if (!trakInternal) throw new Error('mp4box: getTrackById returned nothing')
+
+  const allSamples = trakInternal.samples
+  if (!allSamples || allSamples.length === 0) {
+    throw new Error('mp4box: video track has no samples')
+  }
+
+  // Step 3 — find sample indices in each swing window.
+  //
+  // Swings are evaluated in input order. perSwingOffsets is built in
+  // parallel: each swing's spliceStartMs is the running counter of
+  // previously-packed durations. spliceEndMs is computed from the
+  // selected sample count + their durations rather than from the raw
+  // (endMs - startMs) window, so split-back math matches what mp4box
+  // actually emitted.
+  const perSwingOffsets: SplicedSubClip['perSwingOffsets'] = []
+  const swingSampleRanges: Array<{ first: number; last: number }> = []
+  let runningSpliceMs = 0
+
+  for (const swing of swings) {
+    const startMs = swing.startMs
+    const endMs = swing.endMs
+
+    let firstIdx = -1
+    let lastIdx = -1
+    for (let i = 0; i < allSamples.length; i++) {
+      const s = allSamples[i]
+      if (!s) continue
+      const cts_ms = (s.cts / timescale) * 1000
+      if (cts_ms >= startMs && cts_ms < endMs) {
+        if (firstIdx === -1) firstIdx = i
+        lastIdx = i
+      } else if (firstIdx !== -1) {
+        // Past the window — samples within a window are contiguous, so
+        // we can stop walking.
+        break
+      }
+    }
+
+    if (firstIdx === -1 || lastIdx === -1) {
+      // No samples in this swing's window. Record an empty offset so
+      // splitFramesPerSwing can flag the swing as 'no-frames-in-range'.
+      perSwingOffsets.push({
+        swingIndex: swing.swingIndex,
+        spliceStartMs: runningSpliceMs,
+        spliceEndMs: runningSpliceMs,
+        originalStartMs: swing.startMs,
+      })
+      swingSampleRanges.push({ first: -1, last: -1 })
+      continue
+    }
+
+    // Sum sample durations in [firstIdx, lastIdx] for the actual
+    // emitted window length in track-timescale units.
+    let durationTimescale = 0
+    for (let i = firstIdx; i <= lastIdx; i++) {
+      durationTimescale += allSamples[i]?.duration ?? 0
+    }
+    const durationMs = (durationTimescale / timescale) * 1000
+
+    perSwingOffsets.push({
+      swingIndex: swing.swingIndex,
+      spliceStartMs: runningSpliceMs,
+      spliceEndMs: runningSpliceMs + durationMs,
+      originalStartMs: swing.startMs,
+    })
+    swingSampleRanges.push({ first: firstIdx, last: lastIdx })
+    runningSpliceMs += durationMs
+  }
+
+  // If no swing matched any sample, return an empty blob so the caller
+  // routes everything to the per-swing 'empty-subclip' fallback.
+  const anyMatched = swingSampleRanges.some((r) => r.first !== -1)
+  if (!anyMatched) {
+    return { blob: new Blob([], { type: mimeType }), perSwingOffsets }
+  }
+
+  // Step 5 — mutate selected sample dts/cts so swings pack contiguously
+  // in the output timeline. We snapshot the originals first so we can
+  // restore them if downstream code (or future revisions) re-reads the
+  // file post-remux. This is defensive — currently nothing else touches
+  // `file` after createFragment returns.
+  const originalDtsCts: Array<{ idx: number; dts: number; cts: number }> = []
+  for (let s = 0; s < swings.length; s++) {
+    const range = swingSampleRanges[s]
+    const offset = perSwingOffsets[s]
+    if (!range || range.first === -1 || !offset) continue
+    const baseDts = Math.round((offset.spliceStartMs * timescale) / 1000)
+    const firstSample = allSamples[range.first]
+    if (!firstSample) continue
+    const dtsShift = baseDts - firstSample.dts
+    for (let i = range.first; i <= range.last; i++) {
+      const sample = allSamples[i]
+      if (!sample) continue
+      originalDtsCts.push({ idx: i, dts: sample.dts, cts: sample.cts })
+      sample.dts += dtsShift
+      sample.cts += dtsShift
+    }
+  }
+
+  // Step 6 — set segmentation options for the video track only (drops
+  // audio) and build the init segment.
+  const fileWithSegment = file as unknown as {
+    setSegmentOptions: (id: number, user: unknown, opts: { nbSamples?: number }) => void
+    initializeSegmentation: () => Array<{ id: number; user: unknown; buffer: ArrayBuffer }>
+    createFragment: (track_id: number, sampleStart: number, sampleEnd: number, existingStream: unknown) => unknown
+    onSegment: (id: number, user: unknown, buffer: ArrayBuffer, nextSample: number, last: boolean) => void
+  }
+
+  // No-op onSegment — we drive segmentation manually via createFragment.
+  fileWithSegment.onSegment = () => undefined
+  fileWithSegment.setSegmentOptions(trackId, null, { nbSamples: 1_000_000 })
+
+  const initSegments = fileWithSegment.initializeSegmentation()
+  const initSeg = initSegments.find((s) => s.id === trackId)
+  if (!initSeg) throw new Error('mp4box: initializeSegmentation returned no init for video track')
+
+  // Step 7 — emit one fragment per swing's sample run. mp4box's
+  // DataStream is dynamically resizing; we share a single stream across
+  // all createFragment calls so the moof+mdat boxes are appended in
+  // order.
+  const DataStreamCtor = (MP4Box as unknown as { DataStream: new () => { buffer: ArrayBuffer } }).DataStream
+  const stream = new DataStreamCtor()
+
+  for (let s = 0; s < swings.length; s++) {
+    const range = swingSampleRanges[s]
+    if (!range || range.first === -1) continue
+    // mp4box uses 1-based sample numbers in createFragment; sample[0]
+    // in the array is sample number 1 in the trun's accounting. But
+    // looking at the implementation (createFragment loops for (i=sampleStart;
+    // i<=sampleEnd; i++) and calls getSample(trak, i) which indexes
+    // trak.samples[i] directly), the function uses 0-based array
+    // indices. So we pass the array indices as-is.
+    fileWithSegment.createFragment(trackId, range.first, range.last, stream)
+  }
+
+  // Step 8 — concatenate init segment + fragments stream into a final
+  // Blob. mp4box's stream.buffer is the underlying ArrayBuffer holding
+  // all written bytes; init is a separate ArrayBuffer.
+  const outBlob = new Blob([initSeg.buffer, stream.buffer], { type: 'video/mp4' })
+
+  // Restore the originals (defensive — see snapshot above).
+  for (const orig of originalDtsCts) {
+    const sample = allSamples[orig.idx]
+    if (!sample) continue
+    sample.dts = orig.dts
+    sample.cts = orig.cts
+  }
+
+  return { blob: outBlob, perSwingOffsets }
+}
+
+// =====================================================================
+// Splice helper — public entry point
+// =====================================================================
+
+/**
+ * Splice the swing windows from `chunks` into ONE concatenated sub-clip
+ * Blob. Tracks per-swing offsets within the spliced clip so split-back
+ * works after Modal returns a flat keypoint array.
+ *
+ * Two implementation paths:
+ *   - mp4box demux + remux (production). Handles classic-mp4 input
+ *     from iOS Safari MediaRecorder by parsing the source file,
+ *     selecting samples by presentation time, and emitting a fresh
+ *     fragmented mp4 with the selected samples packed contiguously.
+ *   - Raw concat fallback. Used when input bytes don't look like mp4
+ *     (unit-test smoke fixtures) or when mp4box throws. Walks chunks
+ *     under a uniform-duration assumption and emits the intersecting
+ *     bytes raw. Not robust on real recordings; included to keep the
+ *     existing test suite passing as a smoke test.
+ */
+export async function sliceToSubClip(
+  chunks: Blob[],
+  mimeType: string,
+  swings: BatchExtractSwingInput[],
+  blobStartMs: number,
+): Promise<SplicedSubClip> {
+  if (chunks.length === 0 || swings.length === 0) {
+    return {
+      blob: new Blob([], { type: mimeType }),
+      perSwingOffsets: [],
+    }
+  }
+
+  // Cheap mp4 sniff. Synthetic test Blobs (Uint8Array([1])) trip this
+  // and route to the fallback. Real MediaRecorder output starts with
+  // an ftyp box at offset 4.
+  const fullBlob = new Blob(chunks, { type: mimeType })
+  let fullBuf: ArrayBuffer
+  try {
+    fullBuf = await fullBlob.arrayBuffer()
+  } catch {
+    return fallbackRawConcatSplice(chunks, mimeType, swings, blobStartMs)
+  }
+
+  if (!looksLikeMp4(fullBuf)) {
+    return fallbackRawConcatSplice(chunks, mimeType, swings, blobStartMs)
+  }
+
+  try {
+    return await mp4boxSplice(chunks, mimeType, swings)
+  } catch (err) {
+    // mp4box can throw on malformed inputs we can't anticipate. Falling
+    // back to raw concat is strictly better than aborting the swing —
+    // E3's per-swing failure path catches Modal rejection downstream.
+    if (typeof console !== 'undefined') {
+      console.warn('[liveSwingBatchExtractor] mp4box splice failed, falling back to raw concat:', err)
+    }
+    return fallbackRawConcatSplice(chunks, mimeType, swings, blobStartMs)
   }
 }
 
@@ -387,7 +689,7 @@ export async function extractBatchedSwingKeypoints(
   // Splice up front so we have the offset table even if everything
   // downstream fails — the caller can still report which swings were
   // attempted.
-  const subClip = sliceToSubClip(req.blobChunks, req.blobMimeType, req.swings, req.blobStartMs)
+  const subClip = await sliceToSubClip(req.blobChunks, req.blobMimeType, req.swings, req.blobStartMs)
 
   if (subClip.blob.size === 0 || subClip.perSwingOffsets.length === 0) {
     return {

@@ -53,6 +53,9 @@ bin/
 *.mp4
 *.task
 *.zip
+# Phase E test fixtures: tiny libx264 mp4 used by liveSwingBatchExtractor's
+# mp4box demux/remux test. Regenerate via the recipe in the test file.
+!__tests__/fixtures/*.mp4
 
 # python
 __pycache__/
