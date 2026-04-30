@@ -1,5 +1,8 @@
+'use client'
+
 import Link from 'next/link'
-import HeroSwingTracer from '@/components/HeroSwingTracer'
+import { useRef } from 'react'
+import HeroRally from '@/components/HeroRally'
 
 // Tiny tennis-themed line glyphs. Single-stroke, hand-drawn feel —
 // these replace the emoji feature icons (🎯🌊👁️📌🤖📐). Kept inline
@@ -81,19 +84,27 @@ const STRIPE_BG: Record<'clay' | 'hard-court' | 'green', string> = {
 }
 
 export default function HomePage() {
+  // Headline ref — the rally component reads its bounding rect to know
+  // where the ball should bounce. Plain ref, populated on mount.
+  const headlineRef = useRef<HTMLHeadingElement | null>(null)
   return (
     <div>
-      {/* Hero — green wash, asymmetric 2-col on desktop, stacked on mobile.
-          Editorial headline (Manrope 800, big), pill CTA. The animated
-          stick figure on the right floats directly on the wash — no card,
-          no cream backdrop. */}
-      <section className="bg-green-wash text-ink">
-        <div className="max-w-6xl mx-auto px-5 sm:px-8 pt-16 pb-20 lg:pt-24 lg:pb-28 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
+      {/* Hero — green wash. The figure plays a continuous rally on
+          the right side of the section, and the ball physically
+          bounces off the H1 bounding rect. The rally SVG is an
+          absolutely-positioned overlay (lg+ only) so the ball can
+          travel between the text column and the figure column in one
+          coordinate space. */}
+      <section className="bg-green-wash text-ink relative overflow-hidden">
+        <div className="max-w-6xl mx-auto px-5 sm:px-8 pt-16 pb-20 lg:pt-24 lg:pb-28 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center relative">
           <div className="lg:col-span-7">
             <p className="text-[11px] sm:text-xs uppercase tracking-[0.18em] text-ink/70 mb-5">
               AI Pose Tracking · For Tennis
             </p>
-            <h1 className="font-display font-extrabold text-ink leading-[0.95] tracking-tight text-[44px] sm:text-[64px] lg:text-[88px] mb-6">
+            <h1
+              ref={headlineRef}
+              className="font-display font-extrabold text-ink leading-[0.95] tracking-tight text-[44px] sm:text-[64px] lg:text-[88px] mb-6"
+            >
               Beat Your<br />Last Swing.
             </h1>
             <p className="text-ink/75 text-base sm:text-lg max-w-xl mb-8 leading-relaxed">
@@ -117,16 +128,18 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* Hero visual — animated forehand-swing skeleton, floats
-              directly on the green wash with no card chrome. Plays 3
-              cycles on scroll-into-view then settles on the
-              follow-through pose. */}
+          {/* Right column reserves layout space for the rally figure
+              (so the headline doesn't stretch full-width on desktop).
+              The figure itself lives in the absolute-positioned
+              HeroRally below, NOT inside this div. */}
           <div className="hidden lg:block lg:col-span-5">
-            <div className="aspect-[9/16] w-full max-w-sm ml-auto flex items-center justify-center">
-              <HeroSwingTracer />
-            </div>
+            <div className="aspect-[9/16] w-full max-w-sm ml-auto" />
           </div>
         </div>
+
+        {/* Rally overlay — covers the entire hero section. The component
+            internally hides itself on mobile via `hidden lg:block`. */}
+        <HeroRally headlineRef={headlineRef} />
       </section>
 
       {/* Feature grid — pastel panels with a colored top stripe per card.
