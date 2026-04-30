@@ -220,6 +220,15 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   const [extractProgress, setExtractProgress] = useState<number | null>(null)
   const [extractedKeypoints, setExtractedKeypoints] = useState<KeypointsJson | null>(null)
   const [usingFallback, setUsingFallback] = useState(false)
+  // Empirical skeleton-delay knob for the review screen. Positive value =
+  // delay the rendered skeleton by N ms (i.e., look up PoseFrames N ms
+  // earlier than `video.currentTime`). Surfaced as +/- buttons so the
+  // player can dial in the offset when the live-keypoint anchor drifts
+  // (createPoseDetector cold-start gap, MediaRecorder IDR-frame lag,
+  // VFR-vs-CFR mismatch in the recorded blob — this knob compensates
+  // for whichever is the live cause without us first having to identify
+  // it). Default 0; persists only for the current review session.
+  const [skeletonDelayMs, setSkeletonDelayMs] = useState(0)
   // Object URL for the inline review player. Created when the user enters
   // review, revoked when they leave it (or on unmount).
   const [reviewVideoUrl, setReviewVideoUrl] = useState<string | null>(null)
@@ -827,7 +836,14 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       const logicalW = (canvas.width || 0) / dpr
       const logicalH = (canvas.height || 0) / dpr
       ctx.clearRect(0, 0, logicalW, logicalH)
-      const frame = getFrameAtTime(frames, video.currentTime)
+      // Apply the empirical delay knob: positive `skeletonDelayMs`
+      // looks up keypoints N ms BEFORE the current playback position,
+      // which renders the skeleton N ms LATER (visually delayed).
+      // Compensates for any structural offset between PoseFrame
+      // timestamps and the recorded blob's PTS axis without us having
+      // to identify the exact cause first.
+      const lookupTimeSec = video.currentTime - skeletonDelayMs / 1000
+      const frame = getFrameAtTime(frames, lookupTimeSec)
       if (frame && logicalW > 0 && logicalH > 0) {
         renderPose(ctx, frame, logicalW, logicalH, {
           visible: ALL_JOINT_GROUPS_VISIBLE,
@@ -868,7 +884,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         try { video.cancelVideoFrameCallback(rvfcHandle) } catch { /* ignore */ }
       }
     }
-  }, [pendingResult, reviewPhase, reviewVideoUrl, extractedKeypoints])
+  }, [pendingResult, reviewPhase, reviewVideoUrl, extractedKeypoints, skeletonDelayMs])
 
   // Aggregate session-quality summary used for the review-screen pill.
   // Computed once per pendingResult — averages the keypoint visibility
@@ -1330,8 +1346,106 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
                   Using on-device tracking — server extraction unavailable
                 </div>
               ) : null}
+              {/*
+                Diagnostic source pill — tells the user (and us) which
+                keypoint source is rendering right now. Three states:
+                  Server  → extractedKeypoints landed, Phase 6 happy path
+                  Live    → fallback path or Railway not yet finished
+                  Loading → uploading/extracting in flight, nothing yet
+                Includes pose_backend + frame count + fps so we can spot
+                whether the row was extracted on Modal vs Railway CPU,
+                and whether the source has the expected frame density.
+              */}
+              {(() => {
+                const isServer =
+                  extractedKeypoints?.frames && extractedKeypoints.frames.length > 0
+                const liveFrames = pendingResult?.keypoints?.frames?.length ?? 0
+                const serverFrames = extractedKeypoints?.frames?.length ?? 0
+                const inFlight = reviewPhase === 'uploading' && !isServer && !usingFallback
+                const label = inFlight
+                  ? 'Loading server keypoints…'
+                  : isServer
+                    ? 'Server keypoints'
+                    : 'Live keypoints'
+                const dotClass = inFlight
+                  ? 'bg-sky-400'
+                  : isServer
+                    ? 'bg-emerald-400'
+                    : 'bg-amber-400'
+                const fps =
+                  (isServer ? extractedKeypoints?.fps_sampled : pendingResult?.keypoints?.fps_sampled) ?? null
+                const backendField = (extractedKeypoints as { pose_backend?: string } | null)
+                  ?.pose_backend
+                const detail = isServer
+                  ? `${serverFrames} fr · ${fps ?? '?'}fps · ${backendField ?? 'rtmpose'}`
+                  : `${liveFrames} fr · ${fps ?? '?'}fps · in-browser`
+                return (
+                  <div
+                    data-testid="keypoints-source-pill"
+                    data-source={isServer ? 'server' : inFlight ? 'loading' : 'live'}
+                    className="absolute top-3 right-3 inline-flex items-center gap-1.5 rounded-full bg-black/60 backdrop-blur px-2.5 py-1 text-[11px] text-white/80"
+                  >
+                    <span aria-hidden className={`inline-block w-1.5 h-1.5 rounded-full ${dotClass}`} />
+                    <span>{label}</span>
+                    <span className="text-white/40 font-mono">· {detail}</span>
+                  </div>
+                )
+              })()}
             </div>
           ) : null}
+          {/*
+            Empirical skeleton-delay knob. Positive value = render the
+            skeleton N ms LATER than the playback position (i.e. look up
+            keypoints N ms earlier in the array). User dials this in
+            until the joints land on the body. -3000 / -1000 / -100 / 0 /
+            +100 / +1000 / +3000 ms covers the realistic offset range
+            from a cold-start async gap (~3s) down to fine compositor
+            tweaks (±100ms).
+          */}
+          <div
+            data-testid="skeleton-delay-controls"
+            className="flex items-center gap-2 text-xs text-white/60"
+          >
+            <span className="text-white/50">Skeleton delay</span>
+            <div className="inline-flex items-center gap-1 rounded-full bg-white/[0.04] border border-white/10 p-0.5">
+              {[-3000, -1000, -100].map((step) => (
+                <button
+                  key={step}
+                  type="button"
+                  data-testid={`skeleton-delay-step-${step}`}
+                  onClick={() => setSkeletonDelayMs((v) => v + step)}
+                  className="px-2 py-1 rounded-full hover:bg-white/10 text-white/70 hover:text-white font-mono"
+                >
+                  {step > 0 ? `+${step}` : step}
+                </button>
+              ))}
+              <span
+                data-testid="skeleton-delay-value"
+                className="px-3 py-1 font-mono text-white tabular-nums min-w-[64px] text-center"
+              >
+                {skeletonDelayMs > 0 ? `+${skeletonDelayMs}` : skeletonDelayMs}ms
+              </span>
+              {[100, 1000, 3000].map((step) => (
+                <button
+                  key={step}
+                  type="button"
+                  data-testid={`skeleton-delay-step-${step}`}
+                  onClick={() => setSkeletonDelayMs((v) => v + step)}
+                  className="px-2 py-1 rounded-full hover:bg-white/10 text-white/70 hover:text-white font-mono"
+                >
+                  +{step}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              data-testid="skeleton-delay-reset"
+              onClick={() => setSkeletonDelayMs(0)}
+              className="text-white/40 hover:text-white/70 underline-offset-2 hover:underline"
+            >
+              reset
+            </button>
+          </div>
           <div className="flex flex-wrap gap-4 text-sm text-white/70">
             <span>
               <span className="text-white font-semibold">{summary?.swings ?? 0}</span>{' '}
