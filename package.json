@@ -21,11 +21,13 @@
     "@supabase/supabase-js": "^2.101.1",
     "@vercel/blob": "^2.3.3",
     "ai": "^6.0.145",
+    "mediabunny": "^1.43.0",
     "mp4box": "^2.3.0",
     "next": "^16.2.4",
     "onnxruntime-web": "^1.23.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "tus-js-client": "^4.3.1",
     "zustand": "^5.0.12"
   },
   "devDependencies": {

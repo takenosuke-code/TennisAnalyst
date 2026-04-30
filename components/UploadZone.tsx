@@ -1,7 +1,8 @@
 'use client'
 
 import { useRef, useState, useEffect } from 'react'
-import { upload } from '@vercel/blob/client'
+import { uploadVideoResumable, buildObjectPath, type UploadHandle } from '@/lib/supabaseUpload'
+import { canTranscode, shouldTranscode, sniffVideoSize, transcodeToH264_720p } from '@/lib/videoTranscode'
 import { usePoseStore } from '@/store'
 import { usePoseExtractor } from '@/hooks/usePoseExtractor'
 import { createPoseDetector } from '@/lib/browserPose'
@@ -14,16 +15,6 @@ import type { PoseFrame } from '@/lib/supabase'
 // upload flow keeps using in-browser MediaPipe exactly as before.
 const USE_RAILWAY_EXTRACT =
   process.env.NEXT_PUBLIC_USE_RAILWAY_EXTRACT === 'true'
-
-function safeBlobFilename(name: string): string {
-  return (
-    name
-      .split(/[\\/]/)
-      .pop()!
-      .replace(/[^a-zA-Z0-9._-]/g, '_')
-      .slice(0, 100) || 'upload'
-  )
-}
 
 const SHOT_TYPES = ['forehand', 'backhand', 'serve', 'volley'] as const
 
@@ -43,10 +34,14 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
   // stuck progress bar (root cause of the "stuck at 25%" bug class).
   const [modelLoading, setModelLoading] = useState(false)
   // Last successfully-uploaded file, kept so the retry button can re-run
-  // pose extraction without re-uploading to Vercel Blob (saves the user
-  // ~30s on every retry).
+  // pose extraction without re-uploading to Supabase Storage (saves the
+  // user ~30s on every retry).
   const [lastFile, setLastFile] = useState<File | null>(null)
   const [showRetry, setShowRetry] = useState(false)
+  // Active upload handle so Cancel can abort the in-flight tus upload
+  // (otherwise the chunk PATCH loop keeps running and consumes
+  // bandwidth even after the user backs out).
+  const uploadHandleRef = useRef<UploadHandle | null>(null)
 
   const {
     setFramesData,
@@ -70,7 +65,10 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Remap 0..100 extractor progress into the 25..90 band of our overall bar
+  // Remap 0..100 extractor progress into the 25..90 band of our overall bar.
+  // Bands: transcode 0..10, upload 10..25, extraction 25..90, save 90..100.
+  // tus resumes don't restart the bar (each chunk PATCH commits its own
+  // offset), so the upload band fills monotonically.
   useEffect(() => {
     if (!extracting) return
     setOverallProgress(25 + Math.round((extractProgress / 100) * 65))
@@ -90,11 +88,43 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     setProcessing(true)
     setShowRetry(false)
     setOverallProgress(0)
+
+    // 0. Hardware-accelerated transcode (4K60 → 720p30 H.264) before
+    //    upload, so the bytes we send over cellular are 5-10× smaller
+    //    than what the camera roll has. Skipped for files that are
+    //    already small enough (1080p / under 80 MB) and for browsers
+    //    where WebCodecs isn't available — both fall through to
+    //    uploading the original.
+    let uploadFile = file
+    if (!opts.skipUpload) {
+      try {
+        const dims = await sniffVideoSize(file)
+        if (shouldTranscode(file, dims?.width) && (await canTranscode())) {
+          setStatusMsg('Optimizing video for upload...')
+          const result = await transcodeToH264_720p(file, {
+            // Transcode owns the 0..10 band of the overall bar.
+            onProgress: (frac) => setOverallProgress(Math.round(frac * 10)),
+          })
+          uploadFile = result.file
+          const mb = (n: number) => (n / 1024 / 1024).toFixed(0)
+          console.info(
+            `[UploadZone] transcoded ${mb(result.originalBytes)} MB → ${mb(result.outputBytes)} MB`,
+          )
+        }
+      } catch (err) {
+        // Transcode failed (HEVC decode bug, encoder OOM, codec
+        // mismatch, etc). Fall through and upload the original — the
+        // worst case is a slower upload, not a failed one.
+        console.warn('[UploadZone] transcode failed, uploading original:', err)
+      }
+    }
     setStatusMsg('Uploading video...')
 
-    // 1. Upload directly to Vercel Blob via a signed client token. Going
-    //    through the API route would hit Vercel's serverless body limit
-    //    (4.5MB Hobby / ~100MB Pro) and fail for any real swing clip.
+    // 1. Upload to Supabase Storage via the tus resumable protocol.
+    //    tus persists progress to localStorage so a closed tab, locked
+    //    phone, or dropped connection mid-upload resumes from the last
+    //    completed 6 MB chunk — the actual UX win over the prior
+    //    Vercel-Blob multipart path which lost state on tab close.
     //
     // Retry path: skipUpload=true reuses the cached blob URL from the
     // previous attempt so a failed extraction doesn't re-upload the
@@ -105,26 +135,45 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
       setBlobUrl(blobUrl)
     } else {
       try {
-        const blobPath = `videos/${Date.now()}-${safeBlobFilename(file.name)}`
-        const blob = await upload(blobPath, file, {
-          access: 'public',
-          handleUploadUrl: '/api/upload',
-          contentType: file.type,
+        const objectPath = buildObjectPath(uploadFile.name)
+        // Park the publicUrl in a closure since the Promise resolves
+        // when start()'s called (handle is ready), not when the upload
+        // finishes. We need a separate promise that flips on onSuccess.
+        let resolveUploaded: (url: string) => void
+        let rejectUploaded: (err: Error) => void
+        const uploaded = new Promise<string>((res, rej) => {
+          resolveUploaded = res
+          rejectUploaded = rej
         })
-        blobUrl = blob.url
+        const handle = await uploadVideoResumable(uploadFile, objectPath, {
+          // Map 0..1 progress into the 10..25 band of the overall bar
+          // (transcode owns 0..10). Extraction picks up at 25..90 via
+          // the extracting effect below.
+          onProgress: (frac) => setOverallProgress(10 + Math.round(frac * 15)),
+          onSuccess: (url) => resolveUploaded(url),
+          onError: (err) => rejectUploaded(err),
+        })
+        uploadHandleRef.current = handle
+        blobUrl = await uploaded
+        uploadHandleRef.current = null
         setBlobUrl(blobUrl)
-      } catch {
+      } catch (err) {
+        console.error('[UploadZone] Supabase tus upload failed:', err)
         setStatusMsg('Upload failed. Please try again.')
         setShowRetry(true)
         setProcessing(false)
         setBusy(false)
+        uploadHandleRef.current = null
         return
       }
     }
 
     // Cache the file + blob URL on the component so the retry button
     // can call back into processVideo without re-uploading.
-    setLastFile(file)
+    // Cache the *transcoded* file (or the original on the skip-transcode
+    // path) so retry skips the transcode + upload steps and only re-runs
+    // extraction.
+    setLastFile(uploadFile)
 
     let result: ExtractResult | null = null
     let usedRailway = false
@@ -229,7 +278,7 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
 
       setOverallProgress(25)
       setStatusMsg('Analyzing pose from video...')
-      result = await extract(file)
+      result = await extract(uploadFile)
       if (!result) {
         // Hook handled status/error; just release the processing lock.
         // showRetry is already set by the extractError effect.
@@ -282,7 +331,10 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     // On the Railway path we don't have a local object URL; create one from
     // the original File so playback still works without re-downloading
     // from Vercel Blob.
-    const playbackUrl = usedRailway ? URL.createObjectURL(file) : result.objectUrl
+    // Local playback uses the transcoded file when we transcoded — saves
+    // a re-fetch from Supabase for instant scrubbing, and the file is
+    // already the smaller version the user will see in comparison too.
+    const playbackUrl = usedRailway ? URL.createObjectURL(uploadFile) : result.objectUrl
     setLocalVideoUrl(playbackUrl)
     setFramesData(result.frames)
     setExtractorBackend(result.extractorBackend)
@@ -323,6 +375,11 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
   }
 
   const handleCancel = () => {
+    // Abort the in-flight tus upload first if there is one — otherwise
+    // the chunk-PATCH loop keeps spinning until the connection times
+    // out, burning cellular data while the user has already moved on.
+    uploadHandleRef.current?.abort()
+    uploadHandleRef.current = null
     abort()
     setStatusMsg('Cancelled.')
     setShowRetry(true)
