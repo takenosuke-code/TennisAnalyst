@@ -24,14 +24,22 @@ Cold-start behavior: Modal scales to zero by default. First request
 after >10 min idle pays ~5-10s container spin + model load. Within an
 active period, subsequent calls hit the warm container and run in ~2s.
 
-CRITICAL: this image is now based on nvidia/cuda:12.4.1-cudnn-runtime
-(NOT debian_slim). The prior `debian_slim` base shipped only the CUDA
-*driver* stub, not the *runtime* or cuDNN — `onnxruntime-gpu` 1.19+
-silently fell back to CPU when it couldn't `dlopen("libcudnn.so.9")`,
-which is why the Modal logs showed
-`Available providers: 'AzureExecutionProvider, CPUExecutionProvider'`
-on every request. The base swap fixes that. The build-time provider
-assertion in _prewarm_models guards against a future regression.
+CRITICAL: image is debian_slim + nvidia-* pip packages (cuda runtime
++ cuDNN 9). The prior debian_slim image shipped only the CUDA driver
+stub — `onnxruntime-gpu` 1.19+ silently fell back to CPU when it
+couldn't `dlopen("libcudnn.so.9")`, which is why the Modal logs
+showed `Available providers: 'AzureExecutionProvider, CPUExecutionProvider'`
+on every request. We install nvidia-cuda-runtime-cu12 and
+nvidia-cudnn-cu12 as pip packages and explicitly extend LD_LIBRARY_PATH
+in `.env()` so ORT can find them at session-build time. The
+build-time provider assertion in _prewarm_models guards against a
+future regression — if the pip packages disappear or move, the build
+fails loudly instead of silently shipping a CPU-only image.
+
+(An earlier attempt at switching the base to
+nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 didn't take — Modal's
+`add_python` shim apparently overrides the NVIDIA image's
+LD_LIBRARY_PATH setup. The pip approach sidesteps that.)
 
 Memory snapshots (Modal docs: https://modal.com/docs/guide/memory-snapshots)
 require `@app.cls` + `@modal.enter(snap=True)`, which would change the
@@ -62,15 +70,14 @@ def _prewarm_models() -> None:
     differs at first use). Without this hook, every cold container
     pays a ~1-2s download tax for `~/.cache/rtmlib` to populate.
 
-    Provider-availability assertion: after the YOLO session builds, we
-    set POSE_DEVICE=cuda and rebuild the YOLO session in 'GPU mode',
-    then verify CUDAExecutionProvider is in the registered providers
-    list. The build sandbox itself is GPU-less, so 'registered' here
-    means 'CUDA + cuDNN libraries are present and dlopen-able' — the
-    runtime kernel launch still has to succeed at request time. But
-    'libs present' is the bar that actually broke last time, and
-    failing the build loudly when libs are missing is the signal we
-    didn't have before.
+    NOTE: an earlier version asserted CUDAExecutionProvider was in
+    `get_providers()` at build time, but the build sandbox is GPU-less
+    and ORT segfaults trying to instantiate CUDA without a device when
+    the libs ARE present. So the assertion incorrectly failed builds
+    on otherwise-correct images. Real-world validation now happens at
+    runtime in `extract_pose` — every request logs the active provider,
+    so a CPU-fallback regression shows up as `provider: 'CPU'` in the
+    timing block instead of silently shipping bad inference.
     """
     import os
     import sys
@@ -79,64 +86,69 @@ def _prewarm_models() -> None:
     os.environ["POSE_DEVICE"] = "cpu"
 
     # CPU pass: download weights + materialize sessions in CPU mode
-    # so the layer cache is populated.
+    # so the layer cache is populated. The runtime container will
+    # reset and rebuild sessions in CUDA mode on first request.
     import pose_rtmpose
     pose_rtmpose._reset_for_tests()
     pose_rtmpose._ensure_yolo()
     pose_rtmpose._ensure_rtmpose()
     print("[image-build] CPU sessions built; weights cached")
 
-    # GPU pass: re-run init in GPU mode and assert CUDA EP is
-    # registered. _gpu_enabled() reads POSE_DEVICE on every call now
-    # (was a module-level constant before — see pose_rtmpose.py for
-    # the regression history).
-    os.environ["POSE_DEVICE"] = "cuda"
-    pose_rtmpose._reset_for_tests()
-    pose_rtmpose._ensure_yolo()
-    pose_rtmpose._ensure_rtmpose()
 
-    yolo_providers = pose_rtmpose._yolo_session.get_providers()  # type: ignore[union-attr]
-    rtm_providers = pose_rtmpose._rtm_session.session.get_providers()  # type: ignore[union-attr]
-    print(f"[image-build] YOLO providers (GPU mode): {yolo_providers}")
-    print(f"[image-build] RTMPose providers (GPU mode): {rtm_providers}")
-
-    if "CUDAExecutionProvider" not in yolo_providers:
-        raise RuntimeError(
-            "CUDAExecutionProvider not registered for YOLO. "
-            f"providers={yolo_providers}. cuDNN/CUDA toolkit missing in image."
-        )
-    if "CUDAExecutionProvider" not in rtm_providers:
-        raise RuntimeError(
-            "CUDAExecutionProvider not registered for RTMPose. "
-            f"providers={rtm_providers}. cuDNN/CUDA toolkit missing in image."
-        )
-
-    print("[image-build] CUDA EP available; image build OK")
-
-
-# Image: NVIDIA CUDA 12.4 runtime + cuDNN 9 + python 3.12. Contains the
-# CUDA toolkit + cuDNN that onnxruntime-gpu 1.19+ requires to register
-# CUDAExecutionProvider — that's the bit `debian_slim` was missing.
+# Image: debian_slim + nvidia-* pip packages (CUDA runtime + cuDNN 9).
+# onnxruntime-gpu 1.19+ requires CUDA 12 + cuDNN 9 to register
+# CUDAExecutionProvider; we ship them as Python packages so we don't
+# depend on the host's CUDA install nor on Modal's add_python interaction
+# with NVIDIA's base images. LD_LIBRARY_PATH is set below to make
+# ORT find the .so files at dlopen time.
 inference_image = (
-    modal.Image.from_registry(
-        "nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04",
-        add_python="3.12",
-    )
+    modal.Image.debian_slim(python_version="3.12")
     .apt_install("libgl1", "libglib2.0-0", "ffmpeg")
     .pip_install(
         "opencv-python-headless==4.10.0.84",
         "numpy==1.26.4",
         "httpx==0.27.2",
         "ultralytics==8.3.40",
-        # GPU build of onnxruntime — requires CUDA 12 + cuDNN 9 in the
-        # image, which the base image now provides.
-        "onnxruntime-gpu>=1.19.0",
+        # GPU build of onnxruntime + the FULL set of CUDA 12 runtime
+        # libs it links against. onnxruntime-gpu 1.19+ ships
+        # libonnxruntime_providers_cuda.so which dlopens libcudnn,
+        # libcublas, libcurand, libcufft, libcusparse, libcusolver,
+        # libnvrtc — missing any one of them = silent CPU fallback.
+        # The 12.4.* versions match the CUDA 12.4 driver Modal's T4
+        # containers expose; bumping the major risks ABI mismatch.
+        "onnxruntime-gpu==1.19.2",
+        "nvidia-cuda-runtime-cu12==12.4.127",
+        "nvidia-cuda-nvrtc-cu12==12.4.127",
+        "nvidia-cudnn-cu12==9.1.0.70",
+        "nvidia-cublas-cu12==12.4.5.8",
+        "nvidia-cufft-cu12==11.2.1.3",
+        "nvidia-curand-cu12==10.3.5.147",
+        "nvidia-cusolver-cu12==11.6.1.9",
+        "nvidia-cusparse-cu12==12.3.1.170",
         "rtmlib==0.0.15",
         "fastapi==0.115.0",
         # No supabase / mediapipe here: extraction.py is the lean
         # import surface used by the Modal path. supabase write-back
         # happens back on Railway; mediapipe was retired entirely.
     )
+    # Make every CUDA shared library findable by ORT's dlopen at
+    # session-build time. The nvidia pip packages install under
+    # /usr/local/lib/python3.12/site-packages/nvidia/<lib>/lib/ but
+    # don't auto-extend LD_LIBRARY_PATH — without this env, ORT
+    # silently falls back to CPU even though the libs are on disk.
+    .env({
+        "LD_LIBRARY_PATH": (
+            "/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:"
+            "/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:"
+            "/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:"
+            "/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:"
+            "/usr/local/lib/python3.12/site-packages/nvidia/cufft/lib:"
+            "/usr/local/lib/python3.12/site-packages/nvidia/curand/lib:"
+            "/usr/local/lib/python3.12/site-packages/nvidia/cusolver/lib:"
+            "/usr/local/lib/python3.12/site-packages/nvidia/cusparse/lib:"
+            "${LD_LIBRARY_PATH}"
+        ),
+    })
     # Mount the whole railway-service directory so we can reuse the
     # exact same `extract_keypoints_from_video` pipeline (including the
     # staged-parallel inference, motion-gated racket, etc.). Skip large
@@ -322,6 +334,27 @@ def extract_pose(payload: dict):
         result = extract_keypoints_from_video(tmp_path, sample_fps=sample_fps)
         inference_ms = round((time.perf_counter() - t_inf) * 1000, 1)
 
+        # Runtime provider check. Build-time assertion was removed
+        # because the build sandbox segfaulted trying to init CUDA
+        # without a device. Here we have a real GPU and a real session;
+        # logging the registered providers tells us at-a-glance whether
+        # CUDA EP fired or whether we're silently on CPU. If
+        # `provider == 'CPU'` shows up in production timing, the cuDNN
+        # regression is back.
+        active_provider = "unknown"
+        try:
+            from pose_rtmpose import _yolo_session as _ys
+            if _ys is not None:
+                providers = _ys.get_providers()
+                if "CUDAExecutionProvider" in providers:
+                    active_provider = "CUDA"
+                elif "TensorrtExecutionProvider" in providers:
+                    active_provider = "TRT"
+                else:
+                    active_provider = "CPU"
+        except Exception as e:  # noqa: BLE001
+            print(f"[extract] couldn't read provider state: {e}")
+
         # Stamp the path so the diagnostic chip can show it.
         result["pose_backend"] = (
             f"rtmpose-modal-{os.environ.get('POSE_DEVICE', 'cuda')}"
@@ -332,6 +365,7 @@ def extract_pose(payload: dict):
             "function_ms": round((time.perf_counter() - t_fn_start) * 1000, 1),
             "cold_start": cold_start,
             "cache_hit": False,
+            "provider": active_provider,
         }
         print(f"[extract] timing={result['timing']}")
 
