@@ -196,6 +196,18 @@ export default function VideoCanvas({
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [videoError, setVideoError] = useState(false)
+  // CSS-rotation in 90° increments. Lets the user re-orient a sideways
+  // phone clip without re-uploading. Applied to a wrapper div so both
+  // the <video> and the keypoint canvas rotate together — the canvas's
+  // internal pixel coords stay un-rotated, so keypoints render
+  // correctly relative to the video and the visual rotation aligns
+  // both at once.
+  const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0)
+  // Tracked from the video element's intrinsic size so the wrapper's
+  // aspect-ratio can flip on perpendicular rotation; container queries
+  // size the inner div using the un-rotated dimensions so the rotated
+  // result fills the new bounding box exactly.
+  const [intrinsicSize, setIntrinsicSize] = useState<{ w: number; h: number } | null>(null)
 
   // Interpolates between the two bracketing sampled frames (see
   // getFrameAtTime at module scope). Eliminates the ~1 decoded-frame lag that
@@ -524,6 +536,9 @@ export default function VideoCanvas({
       video.currentTime = 1e101
       video.currentTime = 0
     }
+    if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+      setIntrinsicSize({ w: video.videoWidth, h: video.videoHeight })
+    }
     recomputeDuration()
   }
 
@@ -573,37 +588,75 @@ export default function VideoCanvas({
           {label}
         </div>
       )}
-      <div className="relative rounded-xl overflow-hidden bg-black">
-        <video
-          ref={videoRef}
-          src={src}
-          className="w-full block"
-          playsInline
-          muted
-          // Only the PRIMARY video auto-loops. If the secondary loops on
-          // its own, both videos cycle independently at different
-          // durations and the sync drifts apart on every replay. The
-          // sync effect explicitly drives the secondary's currentTime
-          // each render, including on primary-loop detection (see the
-          // "loop detected" hard-seek below).
-          loop={!isSecondary}
-          onTimeUpdate={handleTimeUpdate}
-          onLoadedMetadata={handleLoadedMetadata}
-          onDurationChange={handleVideoDurationChange}
-          onPlay={() => setPlaying(true)}
-          onPause={() => setPlaying(false)}
-          onError={() => setVideoError(true)}
-        />
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 w-full h-full pointer-events-none"
-        />
-        {videoError && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/80">
-            <p className="text-red-400 text-sm">Failed to load video</p>
+      {(() => {
+        const isPerpendicular = rotation === 90 || rotation === 270
+        const vW = intrinsicSize?.w ?? 16
+        const vH = intrinsicSize?.h ?? 9
+        // Outer wrapper aspect-ratio flips with rotation so the rotated
+        // content sits naturally without letterboxing. Container query
+        // units below let the inner div pick up "outer's height" / "outer's
+        // width" on perpendicular rotation — this is the trick that makes
+        // a 16:9 video fill a 9:16 wrapper post-rotation without any JS-
+        // measured pixel sizing.
+        const wrapperAspect = isPerpendicular ? `${vH} / ${vW}` : `${vW} / ${vH}`
+        const innerStyle: React.CSSProperties = isPerpendicular
+          ? {
+              top: '50%',
+              left: '50%',
+              width: '100cqh',
+              height: '100cqw',
+              transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
+              transformOrigin: 'center',
+              position: 'absolute',
+            }
+          : {
+              inset: 0,
+              transform: rotation === 180 ? 'rotate(180deg)' : undefined,
+              transformOrigin: 'center',
+              position: 'absolute',
+            }
+        return (
+          <div
+            className="relative rounded-xl overflow-hidden bg-black"
+            style={{
+              aspectRatio: wrapperAspect,
+              containerType: isPerpendicular ? 'size' : undefined,
+            }}
+          >
+            <div style={innerStyle}>
+              <video
+                ref={videoRef}
+                src={src}
+                className="w-full h-full block object-contain"
+                playsInline
+                muted
+                // Only the PRIMARY video auto-loops. If the secondary loops on
+                // its own, both videos cycle independently at different
+                // durations and the sync drifts apart on every replay. The
+                // sync effect explicitly drives the secondary's currentTime
+                // each render, including on primary-loop detection (see the
+                // "loop detected" hard-seek below).
+                loop={!isSecondary}
+                onTimeUpdate={handleTimeUpdate}
+                onLoadedMetadata={handleLoadedMetadata}
+                onDurationChange={handleVideoDurationChange}
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                onError={() => setVideoError(true)}
+              />
+              <canvas
+                ref={canvasRef}
+                className="absolute inset-0 w-full h-full pointer-events-none"
+              />
+            </div>
+            {videoError && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/80">
+                <p className="text-red-400 text-sm">Failed to load video</p>
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        )
+      })()}
 
       {showControls && (
         <div className="flex items-center gap-3 px-1">
@@ -637,6 +690,25 @@ export default function VideoCanvas({
           <span className="text-xs text-white/60 font-mono tabular-nums flex-shrink-0">
             {formatTime(currentTime)} / {formatTime(duration)}
           </span>
+
+          {/* Rotate 90° clockwise per click. Cycles 0→90→180→270→0. The
+              transform applies to a wrapper around <video> + <canvas>, so
+              keypoints stay aligned with the rotated video automatically
+              (canvas's internal pixel coords are unchanged, both rotate
+              together via CSS). */}
+          <button
+            onClick={() =>
+              setRotation((r) => ((r + 90) % 360) as 0 | 90 | 180 | 270)
+            }
+            className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-colors flex-shrink-0"
+            aria-label="Rotate video 90°"
+            title={`Rotate video (currently ${rotation}°)`}
+          >
+            <svg viewBox="0 0 24 24" className="w-4 h-4 fill-none stroke-current" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 12a9 9 0 1 1-3.4-7" />
+              <polyline points="21 4 21 9 16 9" />
+            </svg>
+          </button>
         </div>
       )}
     </div>
