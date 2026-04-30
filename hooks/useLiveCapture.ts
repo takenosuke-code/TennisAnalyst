@@ -420,6 +420,38 @@ export function useLiveCapture(
     }
     setFacingMode(grantedFacingMode)
 
+    // iPhone selfie cameras default to a center-cropped narrow FOV
+    // (~55-65°) instead of the lens's native ~80°, which made the user
+    // look "oddly zoomed in" on /live preview. iOS Safari 15.4+ exposes
+    // a `zoom` capability on the video track; setting it to its minimum
+    // dollies out to the widest FOV the lens supports. Best-effort:
+    // wrapped in try/catch because not every browser/device pair
+    // exposes the constraint, and a failure here must never break the
+    // recording flow.
+    try {
+      const videoTrack = stream.getVideoTracks?.()?.[0]
+      // getCapabilities is on the spec but missing in some test doubles
+      // and older mobile browsers — feature-test before calling.
+      const caps = videoTrack && typeof (videoTrack as MediaStreamTrack & {
+        getCapabilities?: () => MediaTrackCapabilities
+      }).getCapabilities === 'function'
+        ? (videoTrack as MediaStreamTrack & {
+            getCapabilities: () => MediaTrackCapabilities & { zoom?: { min: number; max: number } }
+          }).getCapabilities()
+        : null
+      const zoomCap = (caps as { zoom?: { min: number; max: number } } | null)?.zoom
+      if (zoomCap && Number.isFinite(zoomCap.min)) {
+        await videoTrack!.applyConstraints({
+          // The `zoom` constraint is non-standard but supported on
+          // iOS Safari + Chrome Android. TS lib doesn't include it on
+          // MediaTrackConstraintSet, so cast.
+          advanced: [{ zoom: zoomCap.min } as MediaTrackConstraintSet & { zoom: number }],
+        })
+      }
+    } catch {
+      // Non-fatal — keep going with whatever default FOV the device gave
+    }
+
     // Phase E — start the Modal warmup as soon as we know we have a
     // camera. Fire-and-forget; failures are non-fatal (the helper logs
     // an info-level line and never throws). The heartbeat keeps the
