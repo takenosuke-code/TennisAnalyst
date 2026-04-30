@@ -125,7 +125,7 @@ async def extract_pose(
 MODAL_INFERENCE_URL = os.environ.get("MODAL_INFERENCE_URL", "").strip()
 
 
-async def _extract_via_modal(video_url: str, sample_fps: int = 15) -> dict:
+async def _extract_via_modal(video_url: str, sample_fps: int = 30) -> dict:
     """Forward the video URL to a Modal GPU endpoint and return its
     keypoints_json response. Same shape as extract_keypoints_from_video
     so the rest of _run_extraction is agnostic to which path ran.

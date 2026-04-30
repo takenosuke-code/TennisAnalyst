@@ -181,11 +181,7 @@ async function handleBatchEphemeral(blobUrl: unknown): Promise<NextResponse> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         video_url: blobUrl,
-        // 15fps is enough for tennis swing analysis: contact lasts ~5ms
-        // but the swing envelope is ~1s, so half-frame timing precision
-        // (33ms vs 16ms) doesn't change phase detection. Halving the
-        // sample rate cuts server-side extraction roughly in half.
-        sample_fps: 15,
+        sample_fps: 30,
       }),
     })
 
