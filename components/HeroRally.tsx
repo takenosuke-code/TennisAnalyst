@@ -147,6 +147,41 @@ const SWING_CONTACT_PHASE = 0.65
 const RACKET_CONTACT_NORM_X = 0.326
 const RACKET_CONTACT_NORM_Y = 0.508
 
+// Angle labels — small, analytical, leader-line + tabular-figure
+// readout near each joint. Only on the right ("you") figure; the
+// opponent stays decorative. Layout per joint: the label sits at
+// (offsetX, offsetY) from the joint dot, with a thin cream leader
+// line connecting them. Text is tabular-num so digits stay aligned
+// frame-to-frame as the angles tick.
+const ANGLE_LABELS: Array<{
+  joint: keyof Joints
+  parent: keyof Joints
+  child: keyof Joints
+  offsetX: number
+  offsetY: number
+  anchor: 'start' | 'end'
+}> = [
+  { joint: 'right_elbow', parent: 'right_shoulder', child: 'right_wrist', offsetX: 22, offsetY: -2, anchor: 'start' },
+  { joint: 'left_elbow', parent: 'left_shoulder', child: 'left_wrist', offsetX: -22, offsetY: -2, anchor: 'end' },
+  { joint: 'right_knee', parent: 'right_hip', child: 'right_ankle', offsetX: 22, offsetY: 4, anchor: 'start' },
+  { joint: 'left_knee', parent: 'left_hip', child: 'left_ankle', offsetX: -22, offsetY: 4, anchor: 'end' },
+]
+
+// 2D angle at vertex b, given three pixel-space points. Returns
+// degrees rounded to whole numbers (0-180 for joint angles).
+function angleAtPx(a: Pt, b: Pt, c: Pt): number {
+  const v1x = a[0] - b[0]
+  const v1y = a[1] - b[1]
+  const v2x = c[0] - b[0]
+  const v2y = c[1] - b[1]
+  const dot = v1x * v2x + v1y * v2y
+  const m1 = Math.hypot(v1x, v1y)
+  const m2 = Math.hypot(v2x, v2y)
+  if (m1 === 0 || m2 === 0) return 0
+  const cos = Math.max(-1, Math.min(1, dot / (m1 * m2)))
+  return Math.round((Math.acos(cos) * 180) / Math.PI)
+}
+
 // ---------- Math ----------
 
 function shortDelta(a: number, b: number): number {
@@ -342,6 +377,11 @@ interface FigureRefs {
   racketGrip: SVGLineElement | null
 }
 
+interface LabelRef {
+  leader: SVGLineElement | null
+  text: SVGTextElement | null
+}
+
 // ---------- Component ----------
 
 export default function HeroRally() {
@@ -366,6 +406,7 @@ export default function HeroRally() {
     racketHead: null,
     racketGrip: null,
   })
+  const labelRefs = useRef<LabelRef[]>(ANGLE_LABELS.map(() => ({ leader: null, text: null })))
   const ballRef = useRef<SVGCircleElement | null>(null)
   const courtRef = useRef<SVGGElement | null>(null)
 
@@ -405,6 +446,7 @@ export default function HeroRally() {
       baseX: number,
       baseY: number,
       mirrored: boolean,
+      withLabels: boolean,
     ): Pt {
       const { joints, racketHead } = buildSkeleton(phase)
       const px: Record<keyof Joints, Pt> = {} as Record<keyof Joints, Pt>
@@ -442,6 +484,38 @@ export default function HeroRally() {
         grip.setAttribute('x2', String(headPx[0]))
         grip.setAttribute('y2', String(headPx[1]))
       }
+      // Angle readouts — only painted on the figure that has them
+      // (the right "you" figure). Each reads its own joint pixel
+      // position fresh from `px` so the leader line + text stay
+      // pinned to the joint as the swing animates.
+      if (withLabels) {
+        ANGLE_LABELS.forEach((label, idx) => {
+          const slot = labelRefs.current[idx]
+          if (!slot || !slot.leader || !slot.text) return
+          const [jx, jy] = px[label.joint]
+          const tx = jx + label.offsetX
+          const ty = jy + label.offsetY
+          // Leader line from the joint dot edge to the text anchor.
+          // Pull the start point ~5px away from the joint center so
+          // the line reads as a callout, not as a stem on the dot.
+          const dx = tx - jx
+          const dy = ty - jy
+          const len = Math.hypot(dx, dy) || 1
+          const startX = jx + (dx / len) * 5
+          const startY = jy + (dy / len) * 5
+          // End the leader 4px before the text anchor for a small gap.
+          const endX = tx - (dx / len) * 4
+          const endY = ty - (dy / len) * 4
+          slot.leader.setAttribute('x1', String(startX))
+          slot.leader.setAttribute('y1', String(startY))
+          slot.leader.setAttribute('x2', String(endX))
+          slot.leader.setAttribute('y2', String(endY))
+          slot.text.setAttribute('x', String(tx))
+          slot.text.setAttribute('y', String(ty))
+          const angle = angleAtPx(px[label.parent], px[label.joint], px[label.child])
+          slot.text.textContent = `${angle}°`
+        })
+      }
       return headPx
     }
 
@@ -467,8 +541,8 @@ export default function HeroRally() {
     }
 
     // Initial paint.
-    paintFigure(0, rightRefs.current, rightBaseX, rightBaseY, false)
-    paintFigure(0, leftRefs.current, leftBaseX, leftBaseY, true)
+    paintFigure(0, rightRefs.current, rightBaseX, rightBaseY, false, true)
+    paintFigure(0, leftRefs.current, leftBaseX, leftBaseY, true, false)
     const restRacketRight = racketHeadAtPhase(0, rightBaseX, rightBaseY, false)
     if (ballRef.current) {
       ballRef.current.setAttribute('cx', String(restRacketRight[0] - 60))
@@ -596,8 +670,8 @@ export default function HeroRally() {
       }
 
       // Paint everything.
-      paintFigure(rightPhase, rightRefs.current, rightBaseX, rightBaseY, false)
-      paintFigure(leftPhase, leftRefs.current, leftBaseX, leftBaseY, true)
+      paintFigure(rightPhase, rightRefs.current, rightBaseX, rightBaseY, false, true)
+      paintFigure(leftPhase, leftRefs.current, leftBaseX, leftBaseY, true, false)
       if (ballRef.current) {
         ballRef.current.setAttribute('cx', String(ball.x))
         ballRef.current.setAttribute('cy', String(ball.y))
@@ -749,6 +823,45 @@ export default function HeroRally() {
             fill="var(--cream)"
             opacity="0.95"
           />
+        ))}
+
+        {/* Angle readouts — leader line + tabular-figure text per
+            joint, only on the right figure. Tiny, analytical, no
+            pill chrome — feels like a coaching HUD without dominating
+            the rally. Tabular figures via font-feature-settings 'tnum'
+            so the digits stay aligned as the angles tick. */}
+        {ANGLE_LABELS.map((label, idx) => (
+          <g key={`label-${idx}`}>
+            <line
+              ref={(el) => {
+                const slot = labelRefs.current[idx]
+                if (slot) slot.leader = el
+              }}
+              stroke="var(--cream)"
+              strokeOpacity="0.55"
+              strokeWidth="0.75"
+            />
+            <text
+              ref={(el) => {
+                const slot = labelRefs.current[idx]
+                if (slot) slot.text = el
+              }}
+              fill="var(--cream)"
+              fillOpacity="0.95"
+              fontFamily="var(--font-sans)"
+              fontSize="10"
+              fontWeight="600"
+              textAnchor={label.anchor}
+              dominantBaseline="middle"
+              style={{
+                fontFeatureSettings: '"tnum" 1, "ss01" 1',
+                letterSpacing: '0.02em',
+                pointerEvents: 'none',
+              }}
+            >
+              0°
+            </text>
+          </g>
         ))}
 
         {/* Tennis ball */}
