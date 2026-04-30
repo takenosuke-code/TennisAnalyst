@@ -134,9 +134,14 @@ const FIGURE_Y_TRACK_AMPLITUDE_PX = 70
 const BALL_RADIUS = 7
 const BALL_SPEED = 540
 
-const SWING_MS = 700
+// SWING_MS bumped from 700 -> 1100 per the perceptual research:
+// real pro forehands are 1.0-1.5s broadcast; 700ms read as twitchy.
+// 1100ms sits in the editorial-sport-hero band (slowed but not slow-mo).
+const SWING_MS = 1100
 const RACKET_HIT_RADIUS = 50
-const SWING_TO_CONTACT_MS = 423
+// At smootherstep5, solving `6u⁵ - 15u⁴ + 10u³ = 0.65` gives u ≈ 0.582,
+// so contact lands 0.582 * 1100 ≈ 640 ms after the swing fires.
+const SWING_TO_CONTACT_MS = 640
 const SWING_CONTACT_PHASE = 0.65
 const RACKET_CONTACT_NORM_X = 0.326
 const RACKET_CONTACT_NORM_Y = 0.508
@@ -167,29 +172,102 @@ function findSegment(phase: number): { i: number; u: number } {
   const t0 = KEYFRAME_ANGLES[N - 1].t
   return { i: N - 1, u: (p - t0) / (1.0 - t0) }
 }
+// Perlin's smootherstep5 — `6t⁵ - 15t⁴ + 10t³`. C² continuous (the
+// second derivative is zero at both endpoints, so jerk doesn't jump
+// at the loop seam the way it would with smoothstep). Mathematically
+// matches Flash & Hogan's minimum-jerk reaching profile (1985), which
+// human subjects empirically rate as more natural than smoothstep
+// (PeerJ 2020). Drop-in replacement for the prior `t*t*(3-2t)`.
 function warpPhase(t: number): number {
-  return t * t * (3 - 2 * t)
+  return t * t * t * (t * (t * 6 - 15) + 10)
+}
+
+// Precomputed segment widths in phase-space. Used by the Hermite
+// interpolation below to build C¹-continuous angle curves across
+// non-uniformly-spaced keyframes. The wrap segment (KF[N-1] -> KF[0])
+// uses 1.0 as the implicit end time.
+const SEGMENT_DT: number[] = (() => {
+  const dt: number[] = []
+  for (let i = 0; i < N; i++) {
+    const t0 = KEYFRAME_ANGLES[i].t
+    const t1 = i + 1 < N ? KEYFRAME_ANGLES[i + 1].t : 1.0
+    dt.push(t1 - t0)
+  }
+  return dt
+})()
+
+// Cubic Hermite interpolation of a single angle channel across 4
+// control keyframes (i-1, i, i+1, i+2) with non-uniform time spacing.
+// Tangents at i and i+1 are Catmull-Rom-derived (average of incoming
+// and outgoing slopes scaled by segment widths) so the curve is C¹
+// at every keyframe boundary. Angles are unwrapped via shortDelta
+// chained outward from a1, keeping the math correct across the
+// cyclic seam where raw angles can wrap past ±180°.
+function lerpAngleHermite(
+  rawA: number,   // angle at i-1
+  a1: number,    // angle at i (segment start, anchor)
+  rawB: number,  // angle at i+1 (segment end)
+  rawC: number,  // angle at i+2
+  u: number,     // local parameter in [0, 1] within segment i
+  dt0: number,   // segment width before i (t[i] - t[i-1])
+  dt1: number,   // segment width at i (t[i+1] - t[i])
+  dt2: number,   // segment width after i (t[i+2] - t[i+1])
+): number {
+  // Unwrap into a continuous span around a1.
+  const a0 = a1 - shortDelta(rawA, a1)
+  const a2 = a1 + shortDelta(a1, rawB)
+  const a3 = a2 + shortDelta(rawB, rawC)
+  // Tangents in angle/time units (non-uniform Catmull-Rom).
+  const m1 = 0.5 * ((a1 - a0) / dt0 + (a2 - a1) / dt1)
+  const m2 = 0.5 * ((a2 - a1) / dt1 + (a3 - a2) / dt2)
+  // Hermite basis on the local parameter.
+  const u2 = u * u
+  const u3 = u2 * u
+  const h00 = 2 * u3 - 3 * u2 + 1
+  const h10 = u3 - 2 * u2 + u
+  const h01 = -2 * u3 + 3 * u2
+  const h11 = u3 - u2
+  // Tangents must be scaled by the segment width to map (angle/time)
+  // back into raw angle units along the [0,1] local parameter.
+  return h00 * a1 + h10 * dt1 * m1 + h01 * a2 + h11 * dt1 * m2
 }
 
 function buildSkeleton(phase: number): { joints: Joints; racketHead: Pt } {
   const { i, u } = findSegment(phase)
+  // 4 control keyframes around the active segment. Cyclic indexing
+  // for the wrap segment (i = N-1).
+  const Aprev = KEYFRAME_ANGLES[(i - 1 + N) % N]
   const A = KEYFRAME_ANGLES[i]
   const B = KEYFRAME_ANGLES[(i + 1) % N]
+  const Bnext = KEYFRAME_ANGLES[(i + 2) % N]
+  const dt0 = SEGMENT_DT[(i - 1 + N) % N]
+  const dt1 = SEGMENT_DT[i]
+  const dt2 = SEGMENT_DT[(i + 1) % N]
 
+  // hipCenter (2D position) — keep linear; the figure's translation
+  // is small and not visually load-bearing for smoothness.
   const hipCx = lerp(A.hipCenter[0], B.hipCenter[0], u)
   const hipCy = lerp(A.hipCenter[1], B.hipCenter[1], u)
-  const trunk = lerpAngle(A.trunk, B.trunk, u)
-  const neck = lerpAngle(A.neck, B.neck, u)
-  const uArmL = lerpAngle(A.uArmL, B.uArmL, u)
-  const fArmL = lerpAngle(A.fArmL, B.fArmL, u)
-  const uArmR = lerpAngle(A.uArmR, B.uArmR, u)
-  const fArmR = lerpAngle(A.fArmR, B.fArmR, u)
-  const thighL = lerpAngle(A.thighL, B.thighL, u)
-  const shinL = lerpAngle(A.shinL, B.shinL, u)
-  const thighR = lerpAngle(A.thighR, B.thighR, u)
-  const shinR = lerpAngle(A.shinR, B.shinR, u)
-  const racket = lerpAngle(A.racket, B.racket, u)
+  // racketLen — scalar, near-constant; linear is fine.
   const racketLen = lerp(A.racketLen, B.racketLen, u)
+
+  // Bone angles — Hermite with Catmull-Rom tangents, unwrapped per
+  // bone via shortDelta. Eliminates the per-keyframe velocity kinks
+  // that linear lerp introduced (which read as the "robotic" feel
+  // even at 60fps).
+  const H = (rA: number, a1: number, rB: number, rC: number) =>
+    lerpAngleHermite(rA, a1, rB, rC, u, dt0, dt1, dt2)
+  const trunk  = H(Aprev.trunk,  A.trunk,  B.trunk,  Bnext.trunk)
+  const neck   = H(Aprev.neck,   A.neck,   B.neck,   Bnext.neck)
+  const uArmL  = H(Aprev.uArmL,  A.uArmL,  B.uArmL,  Bnext.uArmL)
+  const fArmL  = H(Aprev.fArmL,  A.fArmL,  B.fArmL,  Bnext.fArmL)
+  const uArmR  = H(Aprev.uArmR,  A.uArmR,  B.uArmR,  Bnext.uArmR)
+  const fArmR  = H(Aprev.fArmR,  A.fArmR,  B.fArmR,  Bnext.fArmR)
+  const thighL = H(Aprev.thighL, A.thighL, B.thighL, Bnext.thighL)
+  const shinL  = H(Aprev.shinL,  A.shinL,  B.shinL,  Bnext.shinL)
+  const thighR = H(Aprev.thighR, A.thighR, B.thighR, Bnext.thighR)
+  const shinR  = H(Aprev.shinR,  A.shinR,  B.shinR,  Bnext.shinR)
+  const racket = H(Aprev.racket, A.racket, B.racket, Bnext.racket)
 
   const polar = (L: number, deg: number): Pt => {
     const r = (deg * Math.PI) / 180
