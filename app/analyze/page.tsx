@@ -319,12 +319,12 @@ export default function AnalyzePage() {
   return (
     <div className="max-w-7xl mx-auto px-5 sm:px-8 py-12">
       <div className="mb-10">
-        <p className="text-[11px] uppercase tracking-[0.18em] text-cream/60 mb-3">analyze</p>
+        <p className="text-[11px] uppercase tracking-[0.18em] text-cream/60 mb-3">Analyze</p>
         <h1 className="font-display font-extrabold text-cream text-4xl sm:text-5xl leading-[1.05] tracking-tight mb-3">
-          analyze your swing.
+          Analyze Your Swing.
         </h1>
         <p className="text-cream/70 text-sm sm:text-base max-w-xl leading-relaxed">
-          Upload a video to extract pose landmarks and get AI coaching feedback.
+          Upload A Video To Extract Pose Landmarks And Get AI Coaching Feedback.
         </p>
       </div>
 
@@ -335,7 +335,7 @@ export default function AnalyzePage() {
             <div className="bg-cream text-ink">
               <div className="h-2 bg-clay" />
               <div className="p-6">
-                <h2 className="font-display font-bold text-lg text-ink mb-4">Upload video</h2>
+                <h2 className="font-display font-bold text-lg text-ink mb-4">Upload Video</h2>
                 <UploadZone onComplete={handleComplete} />
               </div>
             </div>
@@ -344,14 +344,14 @@ export default function AnalyzePage() {
               <div className="bg-ink overflow-hidden">
                 <div className="p-3 border-b border-cream/10 flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-cream">Your swing</span>
+                    <span className="text-sm font-semibold text-cream">Your Swing</span>
                     <BackendChip backend={extractorBackend} reason={fallbackReason} />
                   </div>
                   <button
                     onClick={() => setDone(false)}
                     className="text-xs text-cream/50 hover:text-cream"
                   >
-                    Upload different video
+                    Upload Different Video
                   </button>
                 </div>
                 <VideoCanvas

@@ -266,7 +266,7 @@ export default function BaselineComparePage() {
     return (
       <div className="max-w-2xl mx-auto px-4 py-16 text-center">
         <div className="text-5xl mb-3">🎾</div>
-        <h1 className="text-2xl font-black text-white mb-2">No baseline saved yet</h1>
+        <h1 className="text-2xl font-black text-white mb-2">No Baseline Saved Yet</h1>
         <p className="text-white/50 mb-6">
           Analyze a swing first, then mark it as your baseline. You&apos;ll then be able to
           see how future swings stack up.
@@ -459,7 +459,7 @@ export default function BaselineComparePage() {
 
           {selectedBaseline && (
             <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-              <h3 className="text-sm font-semibold text-white mb-2">Comparing against</h3>
+              <h3 className="text-sm font-semibold text-white mb-2">Comparing Against</h3>
               <p className="text-white font-medium truncate">{selectedBaseline.label}</p>
               <p className="text-white/50 text-xs capitalize mt-0.5">
                 {selectedBaseline.shot_type} ·{' '}

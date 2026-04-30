@@ -135,14 +135,14 @@ function OnboardingForm() {
   return (
     <div className="max-w-2xl mx-auto px-4 py-12">
       <div className="mb-8 text-center">
-        <h1 className="text-3xl font-black text-white mb-2">Let&apos;s tune the coaching to you</h1>
+        <h1 className="text-3xl font-black text-white mb-2">Let&apos;s Tune The Coaching To You</h1>
         <p className="text-white/50 text-sm">This takes 30 seconds.</p>
       </div>
 
       <form onSubmit={submit} className="space-y-8">
         {/* Skill tier */}
         <section>
-          <h2 className="text-sm font-semibold text-white/80 mb-3">How would you rate yourself?</h2>
+          <h2 className="text-sm font-semibold text-white/80 mb-3">How Would You Rate Yourself?</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {(Object.keys(SKILL_TIER_LABELS) as SkillTier[]).map((tier) => {
               const active = skillTier === tier
@@ -169,7 +169,7 @@ function OnboardingForm() {
 
         {/* Handedness + backhand */}
         <section>
-          <h2 className="text-sm font-semibold text-white/80 mb-3">Your grip</h2>
+          <h2 className="text-sm font-semibold text-white/80 mb-3">Your Grip</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <p className="text-xs text-white/50 mb-2">Dominant hand</p>
@@ -216,7 +216,7 @@ function OnboardingForm() {
 
         {/* Primary goal */}
         <section>
-          <h2 className="text-sm font-semibold text-white/80 mb-3">What do you want to work on?</h2>
+          <h2 className="text-sm font-semibold text-white/80 mb-3">What Do You Want To Work On?</h2>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {GOAL_ORDER.map((g) => {
               const active = primaryGoal === g

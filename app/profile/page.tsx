@@ -154,7 +154,7 @@ export default function ProfilePage() {
 
       <div className="mb-8">
         <h1 className="text-3xl font-black text-white mb-2">
-          {finishingAfterSkip ? 'Finish setting up' : 'Your coaching profile'}
+          {finishingAfterSkip ? 'Finish Setting Up' : 'Your Coaching Profile'}
         </h1>
         <p className="text-white/50 text-sm">
           {finishingAfterSkip
@@ -165,7 +165,7 @@ export default function ProfilePage() {
 
       <form onSubmit={submit} className="space-y-8">
         <section>
-          <h2 className="text-sm font-semibold text-white/80 mb-3">Skill level</h2>
+          <h2 className="text-sm font-semibold text-white/80 mb-3">Skill Level</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {(Object.keys(SKILL_TIER_LABELS) as SkillTier[]).map((tier) => {
               const active = skillTier === tier
@@ -237,7 +237,7 @@ export default function ProfilePage() {
         </section>
 
         <section>
-          <h2 className="text-sm font-semibold text-white/80 mb-3">Primary goal</h2>
+          <h2 className="text-sm font-semibold text-white/80 mb-3">Primary Goal</h2>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {GOAL_ORDER.map((g) => {
               const active = primaryGoal === g

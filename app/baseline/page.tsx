@@ -31,9 +31,9 @@ export default function BaselinePage() {
     <div className="max-w-4xl mx-auto px-5 sm:px-8 py-12">
       <div className="mb-10 flex items-start justify-between gap-4">
         <div>
-          <p className="text-[11px] uppercase tracking-[0.18em] text-cream/60 mb-3">your baselines</p>
+          <p className="text-[11px] uppercase tracking-[0.18em] text-cream/60 mb-3">Your Baselines</p>
           <h1 className="font-display font-extrabold text-cream text-4xl sm:text-5xl leading-[1.05] tracking-tight mb-4">
-            best-day swings,<br />saved for later.
+            Best-Day Swings,<br />Saved For Later.
           </h1>
           <p className="text-cream/70 max-w-xl text-sm sm:text-base leading-relaxed">
             Upload a new swing and we&apos;ll show you what improved against the baseline you pinned.
@@ -43,7 +43,7 @@ export default function BaselinePage() {
           href="/baseline/compare"
           className="shrink-0 px-5 py-2.5 rounded-full bg-clay hover:bg-[#c4633f] text-cream font-semibold text-sm tracking-wide transition-colors"
         >
-          compare new swing
+          Compare New Swing
         </Link>
       </div>
 
@@ -55,7 +55,7 @@ export default function BaselinePage() {
 
       {loading && baselines.length === 0 && (
         <div className="bg-cream/10 p-8 text-center">
-          <p className="text-cream/60 text-sm">Loading baselines...</p>
+          <p className="text-cream/60 text-sm">Loading Baselines...</p>
         </div>
       )}
 
@@ -68,7 +68,7 @@ export default function BaselinePage() {
               <circle cx="12" cy="12" r="9" />
               <path d="M3.5 9c4 1 8 1 12 0M3.5 16c4-1 8-1 12 0" transform="translate(2,-1)" />
             </svg>
-            <p className="font-display font-bold text-ink text-xl mb-2">No baselines yet</p>
+            <p className="font-display font-bold text-ink text-xl mb-2">No Baselines Yet</p>
             <p className="text-ink/60 text-sm mb-6 max-w-sm mx-auto">
               Analyze a swing and mark it as your baseline to start tracking progress.
             </p>
@@ -76,7 +76,7 @@ export default function BaselinePage() {
               href="/analyze"
               className="inline-block px-6 py-3 rounded-full bg-ink hover:bg-ink-soft text-cream font-semibold text-sm tracking-wide transition-colors"
             >
-              analyze a swing
+              Analyze A Swing
             </Link>
           </div>
         </div>

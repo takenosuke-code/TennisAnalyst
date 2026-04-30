@@ -334,7 +334,7 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
   const processing = busy || extracting
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 text-ink">
       {/* Shot type selector */}
       <div className="flex gap-2 flex-wrap">
         {SHOT_TYPES.map((type) => (
@@ -343,8 +343,8 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
             onClick={() => setShotType(type)}
             className={`px-4 py-1.5 rounded-full text-sm font-medium capitalize transition-all ${
               shotType === type
-                ? 'bg-emerald-500 text-white'
-                : 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
+                ? 'bg-clay text-cream'
+                : 'bg-ink/5 text-ink/70 hover:bg-ink/10 hover:text-ink'
             }`}
           >
             {type}
@@ -352,7 +352,9 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         ))}
       </div>
 
-      {/* Drop zone */}
+      {/* Drop zone — sits inside a cream-bg parent on the analyze
+          page, so all colors are ink-based for contrast. Hard corners
+          per the redesign; clay accents replace the old emerald. */}
       <div
         onDragOver={(e) => {
           e.preventDefault()
@@ -361,10 +363,10 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         onDragLeave={() => setDragging(false)}
         onDrop={handleDrop}
         onClick={() => !processing && fileInputRef.current?.click()}
-        className={`relative border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all ${
+        className={`relative border-2 border-dashed p-12 text-center cursor-pointer transition-all ${
           dragging
-            ? 'border-emerald-400 bg-emerald-500/10'
-            : 'border-white/20 hover:border-white/40 hover:bg-white/5'
+            ? 'border-clay bg-clay/10'
+            : 'border-ink/20 hover:border-ink/40 hover:bg-ink/5'
         } ${processing ? 'cursor-not-allowed opacity-80' : ''}`}
       >
         <input
@@ -381,14 +383,14 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         {processing ? (
           <div className="space-y-4">
             <div className="text-4xl">🎾</div>
-            <p className="text-white font-medium">{statusMsg}</p>
+            <p className="text-ink font-medium">{statusMsg}</p>
             {modelLoading ? (
               // Indeterminate animated bar during the MediaPipe model
               // download. Honest signal: "actively loading" rather than
               // "stuck at 25%". The pulse stripe slides infinitely.
-              <div className="w-full bg-white/10 rounded-full h-2 overflow-hidden relative">
+              <div className="w-full bg-ink/10 h-2 overflow-hidden relative">
                 <div
-                  className="absolute inset-y-0 w-1/3 bg-emerald-400 rounded-full animate-pulse"
+                  className="absolute inset-y-0 w-1/3 bg-clay"
                   style={{
                     animation: 'upload-zone-pulse 1.4s ease-in-out infinite',
                   }}
@@ -401,22 +403,22 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
                 `}</style>
               </div>
             ) : (
-              <div className="w-full bg-white/10 rounded-full h-2 overflow-hidden">
+              <div className="w-full bg-ink/10 h-2 overflow-hidden">
                 <div
-                  className="h-full bg-emerald-400 rounded-full transition-all duration-300"
+                  className="h-full bg-clay transition-all duration-300"
                   style={{ width: `${overallProgress}%` }}
                 />
               </div>
             )}
-            <p className="text-white/50 text-sm">
-              {modelLoading ? 'Loading model (one-time, ~10s)' : `${overallProgress}%`}
+            <p className="text-ink/60 text-sm">
+              {modelLoading ? 'Loading Model (One-Time, ~10s)' : `${overallProgress}%`}
             </p>
             <button
               onClick={(e) => {
                 e.stopPropagation()
                 handleCancel()
               }}
-              className="text-xs text-white/60 hover:text-white underline transition-colors"
+              className="text-xs text-ink/60 hover:text-ink underline transition-colors"
             >
               Cancel
             </button>
@@ -424,14 +426,14 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         ) : (
           <div className="space-y-3">
             <div className="text-5xl">🎬</div>
-            <p className="text-white text-lg font-medium">
-              Drop your swing video here
+            <p className="text-ink text-lg font-medium">
+              Drop Your Swing Video Here
             </p>
-            <p className="text-white/50 text-sm">
-              MP4, MOV, WebM · Max 200MB · Select shot type above first
+            <p className="text-ink/60 text-sm">
+              MP4, MOV, WebM · Max 200MB · Select Shot Type Above First
             </p>
             {statusMsg && (
-              <p className={`${/fail|error|please|cancel/i.test(statusMsg) ? 'text-red-400' : 'text-emerald-400'} text-sm font-medium`}>{statusMsg}</p>
+              <p className={`${/fail|error|please|cancel/i.test(statusMsg) ? 'text-red-600' : 'text-clay'} text-sm font-medium`}>{statusMsg}</p>
             )}
             {showRetry && lastFile && (
               <button
@@ -439,9 +441,9 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
                   e.stopPropagation()
                   handleRetry()
                 }}
-                className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-medium transition-colors"
+                className="px-4 py-2 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-sm font-medium transition-colors"
               >
-                Retry analysis
+                Retry Analysis
               </button>
             )}
           </div>

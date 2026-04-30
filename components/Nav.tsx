@@ -35,7 +35,7 @@ export default function Nav() {
                 href="/login"
                 className="px-4 py-1.5 rounded-full text-sm font-semibold tracking-wide bg-clay hover:bg-[#c4633f] text-cream transition-colors"
               >
-                Sign in
+                Sign In
               </Link>
             )}
           </div>
@@ -55,7 +55,7 @@ function AccountMenu({ email }: { email: string }) {
       </summary>
       <div className="absolute right-0 mt-2 w-56 border border-ink/40 bg-ink shadow-xl overflow-hidden">
         <div className="px-3 py-2 border-b border-cream/10">
-          <p className="text-cream/50 text-xs">Signed in as</p>
+          <p className="text-cream/50 text-xs">Signed In As</p>
           <p className="text-cream text-sm truncate">{email}</p>
         </div>
         <Link
@@ -69,7 +69,7 @@ function AccountMenu({ email }: { email: string }) {
             type="submit"
             className="w-full text-left px-3 py-2 text-sm text-cream/70 hover:bg-cream/5 hover:text-cream transition-colors"
           >
-            Sign out
+            Sign Out
           </button>
         </form>
       </div>

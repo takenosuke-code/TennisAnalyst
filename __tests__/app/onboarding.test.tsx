@@ -79,10 +79,10 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('How would you rate yourself?')).toBeInTheDocument(),
+      expect(screen.getByText('How Would You Rate Yourself?')).toBeInTheDocument(),
     )
-    expect(screen.getByText('Your grip')).toBeInTheDocument()
-    expect(screen.getByText('What do you want to work on?')).toBeInTheDocument()
+    expect(screen.getByText('Your Grip')).toBeInTheDocument()
+    expect(screen.getByText('What Do You Want To Work On?')).toBeInTheDocument()
 
     // All 4 tier buttons render
     expect(screen.getByText('New to tennis')).toBeInTheDocument()
@@ -127,7 +127,7 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('How would you rate yourself?')).toBeInTheDocument(),
+      expect(screen.getByText('How Would You Rate Yourself?')).toBeInTheDocument(),
     )
 
     const submit = screen.getByRole('button', { name: /continue/i })
@@ -150,7 +150,7 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('What do you want to work on?')).toBeInTheDocument(),
+      expect(screen.getByText('What Do You Want To Work On?')).toBeInTheDocument(),
     )
 
     // Not yet shown
@@ -167,7 +167,7 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('How would you rate yourself?')).toBeInTheDocument(),
+      expect(screen.getByText('How Would You Rate Yourself?')).toBeInTheDocument(),
     )
 
     fireEvent.click(screen.getByText('Competitive'))
@@ -192,7 +192,7 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('How would you rate yourself?')).toBeInTheDocument(),
+      expect(screen.getByText('How Would You Rate Yourself?')).toBeInTheDocument(),
     )
 
     fireEvent.click(screen.getByText('Intermediate'))
@@ -217,7 +217,7 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('What do you want to work on?')).toBeInTheDocument(),
+      expect(screen.getByText('What Do You Want To Work On?')).toBeInTheDocument(),
     )
 
     fireEvent.click(screen.getByText('Something else'))
@@ -239,7 +239,7 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('How would you rate yourself?')).toBeInTheDocument(),
+      expect(screen.getByText('How Would You Rate Yourself?')).toBeInTheDocument(),
     )
 
     fireEvent.click(screen.getByText('Intermediate'))
@@ -265,7 +265,7 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('How would you rate yourself?')).toBeInTheDocument(),
+      expect(screen.getByText('How Would You Rate Yourself?')).toBeInTheDocument(),
     )
 
     expect(screen.getByRole('button', { name: /skip for now/i })).toBeInTheDocument()
@@ -277,7 +277,7 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('How would you rate yourself?')).toBeInTheDocument(),
+      expect(screen.getByText('How Would You Rate Yourself?')).toBeInTheDocument(),
     )
 
     fireEvent.click(screen.getByRole('button', { name: /skip for now/i }))
@@ -302,7 +302,7 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('How would you rate yourself?')).toBeInTheDocument(),
+      expect(screen.getByText('How Would You Rate Yourself?')).toBeInTheDocument(),
     )
 
     const skipBtn = screen.getByRole('button', { name: /skip for now/i })
@@ -332,7 +332,7 @@ describe('OnboardingPage', () => {
     render(<OnboardingPage />)
 
     await waitFor(() =>
-      expect(screen.getByText('How would you rate yourself?')).toBeInTheDocument(),
+      expect(screen.getByText('How Would You Rate Yourself?')).toBeInTheDocument(),
     )
 
     fireEvent.click(screen.getByText('Intermediate'))
