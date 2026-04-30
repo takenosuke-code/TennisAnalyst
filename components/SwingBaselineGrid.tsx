@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { SwingSegment } from '@/lib/jointAngles'
+import SegmentLightbox from './SegmentLightbox'
 
 const BASELINE_SHOTS = ['forehand', 'backhand', 'serve', 'volley', 'slice'] as const
 type BaselineShot = (typeof BASELINE_SHOTS)[number]
@@ -49,6 +50,7 @@ function SwingBaselineCard({
   const [overrideShot, setOverrideShot] = useState<BaselineShot>(initialShot)
   const [label, setLabel] = useState<string>(`Swing ${swing.index} — ${initialShot}`)
   const [labelDirty, setLabelDirty] = useState(false)
+  const [lightboxOpen, setLightboxOpen] = useState(false)
 
   // Contact-frame timestamp (peak activity) — used as the preview thumbnail
   // so each card shows the most representative moment of the swing.
@@ -129,7 +131,7 @@ function SwingBaselineCard({
 
   return (
     <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3 flex flex-col gap-3">
-      <div className="rounded-lg overflow-hidden bg-black aspect-video relative">
+      <div className="rounded-lg overflow-hidden bg-black aspect-video relative group">
         <video
           ref={videoRef}
           src={blobUrl}
@@ -138,6 +140,19 @@ function SwingBaselineCard({
           playsInline
           className="w-full h-full object-contain"
         />
+        {/* Transparent click target over the thumbnail; corner buttons
+            sit above this layer so they still get their own clicks. */}
+        <button
+          type="button"
+          onClick={() => setLightboxOpen(true)}
+          aria-label={`Open swing ${swing.index} fullscreen`}
+          className="absolute inset-0 cursor-zoom-in focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+        >
+          <span className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/70 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+          <span className="absolute left-2 bottom-2 text-white text-[11px] font-semibold tracking-wide opacity-0 group-hover:opacity-100 transition-opacity">
+            Click to enlarge
+          </span>
+        </button>
         <button
           type="button"
           onClick={playSwing}
@@ -146,6 +161,14 @@ function SwingBaselineCard({
           Play this swing
         </button>
       </div>
+      <SegmentLightbox
+        open={lightboxOpen}
+        onClose={() => setLightboxOpen(false)}
+        videoUrl={blobUrl}
+        startMs={swing.startMs}
+        endMs={swing.endMs}
+        title={`Swing ${swing.index} — ${overrideShot}`}
+      />
 
       <div className="flex items-center justify-between text-xs text-white/60">
         <span>

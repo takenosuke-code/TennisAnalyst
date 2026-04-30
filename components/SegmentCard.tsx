@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { VideoSegment } from '@/lib/supabase'
+import SegmentLightbox from './SegmentLightbox'
 
 // Shot types the baseline table accepts. Matches the CHECK constraint in
 // lib/db/004_user_baselines.sql. Classifier output includes 'unknown' and
@@ -79,6 +80,7 @@ export default function SegmentCard({
   // save a rest-period segment as a forehand without at least a deliberate
   // selection.
   const [overrideTouched, setOverrideTouched] = useState(false)
+  const [lightboxOpen, setLightboxOpen] = useState(false)
   const [label, setLabel] = useState<string>(
     segment.label?.trim() || `Segment #${segment.segment_index + 1} — ${overrideShot}`,
   )
@@ -181,7 +183,7 @@ export default function SegmentCard({
           reflects what they'd actually save. */}
       <div className={`h-2 ${stripe}`} />
       <div className="p-3 flex flex-col gap-3">
-        <div className="overflow-hidden bg-ink aspect-video relative">
+        <div className="overflow-hidden bg-ink aspect-video relative group">
           <video
             ref={videoRef}
             src={blobUrl}
@@ -190,6 +192,22 @@ export default function SegmentCard({
             playsInline
             className="w-full h-full object-contain"
           />
+          {/* Click anywhere on the thumbnail (except the corner action
+              buttons) to open the lightbox. The button is fully
+              transparent — it just gives us a clickable layer above
+              the <video> with proper keyboard semantics. */}
+          <button
+            type="button"
+            onClick={() => setLightboxOpen(true)}
+            aria-label={`Open ${segment.label?.trim() || `segment ${segment.segment_index + 1}`} fullscreen`}
+            className="absolute inset-0 cursor-zoom-in focus:outline-none focus-visible:ring-2 focus-visible:ring-cream"
+          >
+            {/* Subtle hover hint so users know the thumbnail is clickable. */}
+            <span className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-ink/70 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <span className="absolute left-2 bottom-2 text-cream text-[11px] font-semibold tracking-wide opacity-0 group-hover:opacity-100 transition-opacity">
+              Click to enlarge
+            </span>
+          </button>
           {onToggleExpand && (
             <button
               type="button"
@@ -209,6 +227,17 @@ export default function SegmentCard({
             Play this segment
           </button>
         </div>
+        <SegmentLightbox
+          open={lightboxOpen}
+          onClose={() => setLightboxOpen(false)}
+          videoUrl={blobUrl}
+          startMs={segment.start_ms}
+          endMs={segment.end_ms}
+          title={
+            segment.label?.trim() ||
+            `Segment #${segment.segment_index + 1} — ${overrideShot}`
+          }
+        />
 
         <div className="flex items-center justify-between text-xs text-ink/60">
           <span>
