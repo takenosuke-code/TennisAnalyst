@@ -85,26 +85,19 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* Hero gradient class — one source of truth. Applied to the homepage
-   hero section, can be reused on landing-style headers elsewhere. */
+/* Hero "wash" — kept the class name for compatibility, but the
+   gradient is gone per user direction. Solid mid-court green now;
+   the court line graphics + figures carry the visual interest, and
+   a flat background reads as a real tennis-court color rather than
+   an editorial pastel sweep. */
 .bg-green-wash {
-  background: linear-gradient(
-    160deg,
-    var(--green-1) 0%,
-    var(--green-2) 30%,
-    var(--green-3) 65%,
-    var(--green-4) 100%
-  );
+  background: var(--green-3);
 }
 
-/* Page background — same wash, slightly darker bias so cards on top
-   read clearly. Used as the body backdrop for dark routes. */
+/* Page background — same solid green as the hero so transitions
+   between routes don't introduce a tonal seam. */
 .bg-app-shell {
-  background: linear-gradient(
-    180deg,
-    var(--green-3) 0%,
-    var(--green-4) 100%
-  );
+  background: var(--green-3);
   background-attachment: fixed;
   min-height: 100vh;
 }
