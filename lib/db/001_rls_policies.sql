@@ -1,4 +1,4 @@
--- RLS Policies for TennisIQ
+-- RLS Policies for Tennis Analyst
 -- Run this migration in the Supabase SQL editor after the base schema.
 
 -- =============================================================================

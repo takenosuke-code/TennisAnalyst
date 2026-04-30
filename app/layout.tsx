@@ -3,7 +3,7 @@ import './globals.css'
 import Nav from '@/components/Nav'
 
 export const metadata: Metadata = {
-  title: 'TennisIQ — Swing Analysis',
+  title: 'Tennis Analyst — Swing Analysis',
   description:
     'Compare your tennis swing to the pros using AI-powered pose tracking and analysis.',
 }

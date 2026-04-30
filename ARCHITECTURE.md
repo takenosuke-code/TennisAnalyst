@@ -1,4 +1,4 @@
-# TennisIQ — Architecture & Setup Guide
+# Tennis Analyst — Architecture & Setup Guide
 
 ## What This Is
 

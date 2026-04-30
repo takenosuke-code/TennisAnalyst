@@ -696,7 +696,7 @@ def seed_pro(pro_data: dict):
 
 
 def main():
-    print("TennisIQ Pro Database Seeder")
+    print("Tennis Analyst Pro Database Seeder")
     print("=" * 60)
     print(f"Total pros: {len(PROS_DATA)}")
     print(f"Total swings: {sum(len(p['swings']) for p in PROS_DATA)}")

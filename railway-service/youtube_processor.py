@@ -53,7 +53,7 @@ def download_youtube_video(url: str, output_dir: str | None = None, max_duration
         ValueError: If the video is too long or unavailable.
     """
     if output_dir is None:
-        output_dir = tempfile.mkdtemp(prefix="tennisiq_")
+        output_dir = tempfile.mkdtemp(prefix="tennis_analyst_")
 
     output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
 
