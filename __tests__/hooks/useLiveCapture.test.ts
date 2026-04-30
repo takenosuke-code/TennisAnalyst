@@ -1,25 +1,43 @@
 /**
- * Phase 3 — Visibility worker tests for useLiveCapture, updated for
- * Phase 5D's MediaPipe → onnxruntime-web migration. The test surface is
- * unchanged because the gate logic above the detector is unchanged; only
- * the mock plumbing moved from `@/lib/mediapipe` to `@/lib/browserPose`.
+ * Phase 3 — Visibility worker tests for useLiveCapture. Phase E updated
+ * the on-device inference to a gate-only path (~5fps) and moved per-
+ * frame keypoint extraction to a Modal batch via
+ * lib/liveSwingBatchExtractor. The test surface stays:
  *
- * Two behaviors guarded here:
  *   1. onPoseFrame fires for every detection-tick that survives the
  *      strict body-presence gate (and NOT for face-only / no-pose ticks).
  *   2. onPoseQuality emits transitions only — good → weak → no-body —
  *      not one event per frame.
  *
+ * Plus three Phase E additions:
+ *
+ *   3. extractBatchedSwingKeypoints is called once a batch of 4 swings
+ *      has accumulated, and each emitted swing carries the server-
+ *      extracted frames the lib returned.
+ *   4. On per-swing extraction failure the on-device frames remain in
+ *      place as a fallback so the live coach still has angle data.
+ *   5. pingModalWarmup() fires exactly once at session start.
+ *
+ * The test pump now uses a 200ms tick to match the new gate FPS (5fps
+ * = 200ms gap between detect calls). The pre-Phase-E version assumed
+ * 67ms (15fps) which is faster than the gate path now runs.
+ *
  * To keep the test deterministic without spinning up a real ONNX runtime
  * + getUserMedia + MediaRecorder stack, we mock the pose detector,
- * camera, and recorder layers and drive the loop through a controllable
- * fake `setInterval` (the fallback path that the hook uses when
- * requestVideoFrameCallback is unavailable, which is the case in jsdom).
+ * camera, recorder, batch extractor, and warmup helper layers and drive
+ * the loop through a controllable fake `setInterval` (the fallback path
+ * the hook uses when requestVideoFrameCallback is unavailable, which is
+ * the case in jsdom).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { LANDMARK_INDICES } from '@/lib/jointAngles'
-import type { Landmark } from '@/lib/supabase'
+import type { Landmark, PoseFrame as PoseFrameType } from '@/lib/supabase'
+import type { StreamedSwing } from '@/lib/liveSwingDetector'
+import type {
+  BatchExtractRequest,
+  BatchExtractResult,
+} from '@/lib/liveSwingBatchExtractor'
 
 // --- Mocks ------------------------------------------------------------------
 
@@ -51,13 +69,61 @@ vi.mock('@/lib/browserPose', () => ({
 
 // LiveSwingDetector: we don't want a real one churning on synthetic
 // frames in this test (it has its own dedicated suite). A no-op feed
-// is enough to verify onPoseFrame plumbing.
-vi.mock('@/lib/liveSwingDetector', () => ({
-  LiveSwingDetector: class {
-    feed() {
-      return null
-    }
-  },
+// is enough to verify onPoseFrame plumbing — but the Phase E tests
+// need to drive swing-emit, so the mock exposes a queue of swings to
+// return from feed(). Tests push synthetic StreamedSwings; once the
+// queue drains, feed returns null again.
+const swingQueue: Array<StreamedSwing | null> = []
+let nextSwingIndexCounter = 0
+vi.mock('@/lib/liveSwingDetector', () => {
+  return {
+    LiveSwingDetector: class {
+      feed() {
+        if (swingQueue.length === 0) return null
+        const next = swingQueue.shift()
+        return next ?? null
+      }
+    },
+  }
+})
+
+// Phase E batch extractor mock. The hook composes with the real
+// implementation in lib/liveSwingBatchExtractor.ts, but in tests we
+// stub it so we can assert the request shape and control the frames
+// it returns per swing. The stub stores the most recent request for
+// inspection and replays results from `batchExtractScript`.
+const batchExtractMock = vi.fn<(req: BatchExtractRequest) => Promise<BatchExtractResult>>()
+let batchExtractScript: BatchExtractResult | null = null
+batchExtractMock.mockImplementation(async (req) => {
+  if (batchExtractScript) return batchExtractScript
+  // Default: every swing succeeds with a single synthetic server frame.
+  return {
+    perSwing: req.swings.map((s) => ({
+      swingIndex: s.swingIndex,
+      frames: [
+        {
+          frame_index: 0,
+          timestamp_ms: 0,
+          landmarks: [],
+          joint_angles: { server_marker: 1 } as unknown as PoseFrameType['joint_angles'],
+        },
+      ],
+      failureReason: null,
+    })),
+    totalDurationMs: 0,
+  }
+})
+vi.mock('@/lib/liveSwingBatchExtractor', () => ({
+  extractBatchedSwingKeypoints: (req: BatchExtractRequest) => batchExtractMock(req),
+}))
+
+// Phase E warmup mock — capture the call count and ensure both helpers
+// are no-ops in test (they would otherwise try to fetch /api/extract).
+const pingModalWarmupMock = vi.fn(async () => {})
+const startWarmupHeartbeatMock = vi.fn(() => () => {})
+vi.mock('@/lib/liveModalWarmup', () => ({
+  pingModalWarmup: () => pingModalWarmupMock(),
+  startWarmupHeartbeat: () => startWarmupHeartbeatMock(),
 }))
 
 // poseSmoothing: keep the real isFrameConfident / isBodyVisible behavior
@@ -273,12 +339,24 @@ async function flushMicrotasks() {
 
 // --- Tests ------------------------------------------------------------------
 
+// Phase E — the hook caps detection at 5fps for the gates (200ms gap)
+// regardless of `targetDetectionFps`, since gate-only inference is all
+// the on-device path is responsible for now. Tick at 220ms so each tick
+// reliably crosses the gap and triggers exactly one detection.
+const TICK_MS = 220
+
 describe('useLiveCapture — onPoseFrame + onPoseQuality', () => {
   beforeEach(() => {
     detectMock.mockClear()
     disposeMock.mockClear()
     createPoseDetectorMock.mockClear()
+    batchExtractMock.mockClear()
+    pingModalWarmupMock.mockClear()
+    startWarmupHeartbeatMock.mockClear()
     detectQueue.length = 0
+    swingQueue.length = 0
+    nextSwingIndexCounter = 0
+    batchExtractScript = null
     installBrowserMocks()
     vi.useFakeTimers()
   })
@@ -303,12 +381,15 @@ describe('useLiveCapture — onPoseFrame + onPoseQuality', () => {
       await result.current.start(video)
     })
 
-    // Pump the fallback setInterval (1000/15 ≈ 67ms) past three ticks.
-    // detect() is async so we drain microtasks in between to let the
-    // continuation run before the next interval tick.
+    // Pump the fallback setInterval past three ticks. Phase E caps the
+    // gate path at 5fps (1000/5 = 200ms gap) regardless of target FPS,
+    // so the test ticks at 220ms — comfortably over the gap so every
+    // tick produces a detection. detect() is async so we drain
+    // microtasks in between to let the continuation run before the
+    // next interval tick.
     for (let i = 0; i < 6; i++) {
       await act(async () => {
-        vi.advanceTimersByTime(70)
+        vi.advanceTimersByTime(TICK_MS)
         await flushMicrotasks()
       })
     }
@@ -344,7 +425,7 @@ describe('useLiveCapture — onPoseFrame + onPoseQuality', () => {
     })
     for (let i = 0; i < 4; i++) {
       await act(async () => {
-        vi.advanceTimersByTime(70)
+        vi.advanceTimersByTime(TICK_MS)
         await flushMicrotasks()
       })
     }
@@ -374,7 +455,7 @@ describe('useLiveCapture — onPoseFrame + onPoseQuality', () => {
     })
     for (let i = 0; i < 8; i++) {
       await act(async () => {
-        vi.advanceTimersByTime(70)
+        vi.advanceTimersByTime(TICK_MS)
         await flushMicrotasks()
       })
     }
@@ -403,7 +484,7 @@ describe('useLiveCapture — onPoseFrame + onPoseQuality', () => {
     // First two ticks land good then weak.
     for (let i = 0; i < 4; i++) {
       await act(async () => {
-        vi.advanceTimersByTime(70)
+        vi.advanceTimersByTime(TICK_MS)
         await flushMicrotasks()
       })
     }
@@ -415,7 +496,7 @@ describe('useLiveCapture — onPoseFrame + onPoseQuality', () => {
     // so the no-body timeout triggers.
     for (let i = 0; i < 25; i++) {
       await act(async () => {
-        vi.advanceTimersByTime(70)
+        vi.advanceTimersByTime(TICK_MS)
         await flushMicrotasks()
       })
     }
@@ -440,5 +521,239 @@ describe('useLiveCapture — onPoseFrame + onPoseQuality', () => {
     expect(createPoseDetectorMock).toHaveBeenCalledTimes(1)
     const opts = createPoseDetectorMock.mock.calls[0][0]
     expect(opts?.onProgress).toBe(onModelLoadProgress)
+  })
+
+  it('fires pingModalWarmup once at session start', async () => {
+    detectQueue.push(fullBodyLandmarks())
+    const { result } = renderHook(() =>
+      useLiveCapture({ targetDetectionFps: 15 }),
+    )
+    const video = makeVideoEl()
+    await act(async () => {
+      await result.current.start(video)
+    })
+    expect(pingModalWarmupMock).toHaveBeenCalledTimes(1)
+    // Heartbeat is also wired so mid-session pauses don't lose the
+    // container — assert it's been started exactly once.
+    expect(startWarmupHeartbeatMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// =====================================================================
+// Phase E — server-extraction batching for swings.
+// =====================================================================
+
+function makeSyntheticSwing(swingIndex: number): StreamedSwing {
+  return {
+    swingIndex,
+    startFrameIndex: 0,
+    endFrameIndex: 5,
+    peakFrameIndex: 2,
+    startMs: 1000 * swingIndex,
+    endMs: 1000 * swingIndex + 500,
+    // On-device frames the detector emitted live. The Phase E batch
+    // path replaces these with server-extracted frames on success and
+    // leaves them in place on per-swing failure.
+    frames: [
+      {
+        frame_index: 0,
+        timestamp_ms: 0,
+        landmarks: [],
+        joint_angles: { ondevice_marker: swingIndex } as unknown as PoseFrameType['joint_angles'],
+      },
+    ],
+  }
+}
+
+describe('useLiveCapture — Phase E server extraction', () => {
+  beforeEach(() => {
+    detectMock.mockClear()
+    disposeMock.mockClear()
+    createPoseDetectorMock.mockClear()
+    batchExtractMock.mockClear()
+    pingModalWarmupMock.mockClear()
+    startWarmupHeartbeatMock.mockClear()
+    detectQueue.length = 0
+    swingQueue.length = 0
+    nextSwingIndexCounter = 0
+    batchExtractScript = null
+    installBrowserMocks()
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('emits swings carrying server-extracted frames after batch (size 4)', async () => {
+    // Queue 4 detector returns. Each one will emit a swing on its
+    // mock-feed call because we also queue 4 synthetic swings.
+    for (let i = 0; i < 4; i++) {
+      detectQueue.push(fullBodyLandmarks())
+      swingQueue.push(makeSyntheticSwing(i + 1))
+    }
+
+    // Script the batch result so each swing comes back with frames
+    // containing a unique server marker we can assert against.
+    batchExtractScript = {
+      perSwing: [1, 2, 3, 4].map((idx) => ({
+        swingIndex: idx,
+        frames: [
+          {
+            frame_index: 0,
+            timestamp_ms: 0,
+            landmarks: [],
+            joint_angles: { server_swing: idx } as unknown as PoseFrameType['joint_angles'],
+          },
+        ],
+        failureReason: null,
+      })),
+      totalDurationMs: 1234,
+    }
+
+    const onSwing = vi.fn<(s: StreamedSwing) => void>()
+    const { result } = renderHook(() =>
+      useLiveCapture({ onSwing, targetDetectionFps: 15 }),
+    )
+    const video = makeVideoEl()
+    await act(async () => {
+      await result.current.start(video)
+    })
+
+    // Pump four detection ticks — the swing queue will emit one swing
+    // per tick. The 4th swing trips LIVE_EXTRACTION_BATCH_SIZE and
+    // fires extractBatchedSwingKeypoints.
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(TICK_MS)
+        await flushMicrotasks()
+      })
+    }
+    // After the batch fire, drain microtasks one more time so the
+    // promise chain inside fireBatch runs to completion.
+    await act(async () => {
+      await flushMicrotasks()
+    })
+
+    expect(batchExtractMock).toHaveBeenCalledTimes(1)
+    const req = batchExtractMock.mock.calls[0][0]
+    expect(req.swings.map((s) => s.swingIndex)).toEqual([1, 2, 3, 4])
+    expect(req.blobMimeType.length).toBeGreaterThan(0)
+
+    // All 4 swings forwarded with server-extracted frames.
+    expect(onSwing).toHaveBeenCalledTimes(4)
+    for (let i = 0; i < 4; i++) {
+      const swing = onSwing.mock.calls[i][0]
+      expect(swing.swingIndex).toBe(i + 1)
+      const angles = swing.frames[0].joint_angles as unknown as { server_swing?: number }
+      expect(angles.server_swing).toBe(i + 1)
+    }
+  })
+
+  it('falls back to on-device frames on per-swing extraction failure', async () => {
+    for (let i = 0; i < 4; i++) {
+      detectQueue.push(fullBodyLandmarks())
+      swingQueue.push(makeSyntheticSwing(i + 1))
+    }
+
+    // Swing 2 fails extraction; the others succeed. The hook must
+    // forward swing 2 with its original on-device frames intact.
+    batchExtractScript = {
+      perSwing: [
+        {
+          swingIndex: 1,
+          frames: [
+            {
+              frame_index: 0,
+              timestamp_ms: 0,
+              landmarks: [],
+              joint_angles: { server_swing: 1 } as unknown as PoseFrameType['joint_angles'],
+            },
+          ],
+          failureReason: null,
+        },
+        { swingIndex: 2, frames: [], failureReason: 'no-frames-in-range' },
+        {
+          swingIndex: 3,
+          frames: [
+            {
+              frame_index: 0,
+              timestamp_ms: 0,
+              landmarks: [],
+              joint_angles: { server_swing: 3 } as unknown as PoseFrameType['joint_angles'],
+            },
+          ],
+          failureReason: null,
+        },
+        {
+          swingIndex: 4,
+          frames: [
+            {
+              frame_index: 0,
+              timestamp_ms: 0,
+              landmarks: [],
+              joint_angles: { server_swing: 4 } as unknown as PoseFrameType['joint_angles'],
+            },
+          ],
+          failureReason: null,
+        },
+      ],
+      totalDurationMs: 0,
+    }
+
+    const onSwing = vi.fn<(s: StreamedSwing) => void>()
+    const { result } = renderHook(() =>
+      useLiveCapture({ onSwing, targetDetectionFps: 15 }),
+    )
+    const video = makeVideoEl()
+    await act(async () => {
+      await result.current.start(video)
+    })
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(TICK_MS)
+        await flushMicrotasks()
+      })
+    }
+    await act(async () => {
+      await flushMicrotasks()
+    })
+
+    expect(onSwing).toHaveBeenCalledTimes(4)
+    // Swing 2 should retain its on-device frames marker.
+    const swing2 = onSwing.mock.calls.find((c) => c[0].swingIndex === 2)?.[0]
+    expect(swing2).toBeDefined()
+    const swing2Angles = swing2!.frames[0].joint_angles as unknown as { ondevice_marker?: number }
+    expect(swing2Angles.ondevice_marker).toBe(2)
+    // Swing 3 should have server frames.
+    const swing3 = onSwing.mock.calls.find((c) => c[0].swingIndex === 3)?.[0]
+    const swing3Angles = swing3!.frames[0].joint_angles as unknown as { server_swing?: number }
+    expect(swing3Angles.server_swing).toBe(3)
+  })
+
+  it('does not call extractBatchedSwingKeypoints before the batch fills', async () => {
+    // Only 2 swings — below LIVE_EXTRACTION_BATCH_SIZE (4). No batch
+    // fires until the idle timer (10s) elapses. Within a few ticks of
+    // detection no batch should have been issued.
+    for (let i = 0; i < 2; i++) {
+      detectQueue.push(fullBodyLandmarks())
+      swingQueue.push(makeSyntheticSwing(i + 1))
+    }
+    const onSwing = vi.fn<(s: StreamedSwing) => void>()
+    const { result } = renderHook(() =>
+      useLiveCapture({ onSwing, targetDetectionFps: 15 }),
+    )
+    const video = makeVideoEl()
+    await act(async () => {
+      await result.current.start(video)
+    })
+    for (let i = 0; i < 2; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(TICK_MS)
+        await flushMicrotasks()
+      })
+    }
+    expect(batchExtractMock).not.toHaveBeenCalled()
+    expect(onSwing).not.toHaveBeenCalled()
   })
 })

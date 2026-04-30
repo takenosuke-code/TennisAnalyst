@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import type { StreamedSwing } from '@/lib/liveSwingDetector'
+import type { PoseFrame } from '@/lib/supabase'
 
 // We don't need TTS to fire in this suite — stub the synth / queue so the
 // hook can mount in jsdom without a real speechSynthesis surface.
@@ -18,7 +19,25 @@ vi.mock('@/lib/liveTts', () => {
   }
 })
 
+// buildAngleSummary is real-pure-function but our minimal test frames don't
+// have joint_angles populated. Mock it so tests aren't coupled to the
+// formatter and so empty joint_angles don't produce surprising output.
+vi.mock('@/lib/jointAngles', async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>
+  return {
+    ...actual,
+    buildAngleSummary: () => 'fake-angle-summary',
+  }
+})
+
 import { useLiveCoach } from '@/hooks/useLiveCoach'
+
+// Phase E: useLiveCoach skips swings with empty frames. The awaitInFlight
+// suite predates that change and needs at least one frame per swing for
+// the batch to fire. timestamp_ms is non-zero (on-device fallback shape).
+function makeFrame(ms: number): PoseFrame {
+  return { frame_index: 0, timestamp_ms: ms, landmarks: [], joint_angles: {} }
+}
 
 function makeSwing(i: number): StreamedSwing {
   return {
@@ -28,7 +47,7 @@ function makeSwing(i: number): StreamedSwing {
     peakFrameIndex: i * 10 + 5,
     startMs: i * 1000,
     endMs: i * 1000 + 900,
-    frames: [],
+    frames: [makeFrame(i * 1000 + 100), makeFrame(i * 1000 + 133)],
   }
 }
 

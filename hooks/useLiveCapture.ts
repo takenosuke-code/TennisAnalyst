@@ -1,11 +1,33 @@
 'use client'
 
+// Phase E refactor: this hook no longer runs RTMPose at full target FPS.
+// On-device inference now drives ONLY the gates (body-presence, camera-
+// angle, swing trigger) at ~5fps, freeing the bulk of the inference
+// budget. When the swing detector emits swings, we accumulate up to
+// `LIVE_EXTRACTION_BATCH_SIZE` (default 4) and then ship the swing
+// windows to Modal via lib/liveSwingBatchExtractor.ts. Modal returns
+// server-extracted keypoints which replace each swing's `frames` field
+// before the swing is forwarded to the consumer via `onSwing`. On
+// per-swing failure (or whole-batch failure) we keep the on-device
+// frames as a fallback so the live-coach loop still has angle data.
+//
+// Public surface kept identical: callers still receive swings via
+// `onSwing(swing)` and the StreamedSwing shape is unchanged. The
+// difference is internal: `swing.frames` is now (when the network
+// cooperates) high-quality server-extracted keypoints rather than the
+// gappy on-device output that 15fps phone inference produced before.
+
 import { useCallback, useRef, useState } from 'react'
 import { createPoseDetector, type PoseDetector, type PoseDetectStats } from '@/lib/browserPose'
 import { computeJointAngles } from '@/lib/jointAngles'
 import { isBodyVisible, isFrameConfident, smoothFrames } from '@/lib/poseSmoothing'
 import { classifyCameraAngle } from '@/lib/cameraAngle'
 import { LiveSwingDetector, type StreamedSwing } from '@/lib/liveSwingDetector'
+import {
+  extractBatchedSwingKeypoints,
+  type BatchExtractSwingInput,
+} from '@/lib/liveSwingBatchExtractor'
+import { pingModalWarmup, startWarmupHeartbeat } from '@/lib/liveModalWarmup'
 import type { PoseFrame, Landmark, KeypointsJson } from '@/lib/supabase'
 
 export type LiveCaptureStatus =
@@ -140,6 +162,28 @@ function pickMimeType(): string | null {
 // player gone. Matches the Phase 3 spec "no-body if no detection for ~1s".
 const NO_BODY_TIMEOUT_MS = 1000
 
+// Phase E — gate-only inference budget. Body-presence, camera-angle,
+// and the swing-detector trigger don't need 15fps; coarse motion at
+// 4–6fps is plenty (per the plan, "Where on-device inference still
+// runs"). 5fps is a 3x reduction in on-device load vs. the 15fps the
+// hook used pre-Phase-E and is still well above the swing-detector's
+// ingestion needs (warmup + activity smoothing window are both
+// frame-count-based, not time-based, so the detector is just as happy
+// at 5fps as 15fps — it just sees fewer baseline frames per second).
+const GATE_DETECTION_FPS = 5
+
+// Phase E — batch size for the Modal swing-extraction pipeline. Mirrors
+// the live coach's `maxSwingsPerBatch = 4` so one batch extraction
+// feeds one LLM batch (the cost amortization argument in the plan's
+// "Why batched-per-LLM-batch" section).
+const LIVE_EXTRACTION_BATCH_SIZE = 4
+
+// Phase E — fire a partial-batch extraction this long after the most
+// recent swing if no further swings arrive. Matches useLiveCoach's
+// `idleTimeoutMs` so the two cadences stay aligned and the model gets
+// what it needs to talk to the player even on slow rallies.
+const LIVE_EXTRACTION_IDLE_MS = 10_000
+
 export function useLiveCapture(
   options: UseLiveCaptureOptions = {},
 ): UseLiveCaptureReturn {
@@ -198,6 +242,37 @@ export function useLiveCapture(
   // up frames).
   const inflightRef = useRef<boolean>(false)
 
+  // Phase E — pending swings awaiting the next Modal batch. When this
+  // fills to LIVE_EXTRACTION_BATCH_SIZE (or LIVE_EXTRACTION_IDLE_MS has
+  // elapsed since the last swing), we splice the recorded chunks for
+  // these windows and ask Modal for clean keypoints. The on-device
+  // frames the detector emitted live in `swing.frames`; we hold off on
+  // calling onSwing until after the swap.
+  const pendingSwingsRef = useRef<StreamedSwing[]>([])
+  // Wall-clock of the most-recent swing pushed to `pendingSwingsRef`.
+  // Drives the idle-timeout fire path (fire even with a partial batch
+  // if 10s has passed since the last swing).
+  const lastSwingPushedAtRef = useRef<number>(0)
+  // Idle-fire timer. Re-armed on every swing push; if it fires before
+  // the queue reaches LIVE_EXTRACTION_BATCH_SIZE, we ship whatever's
+  // pending so the live coach isn't waiting forever on a slow rally.
+  const idleExtractTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Stop function returned by startWarmupHeartbeat. Called on cleanup
+  // so heartbeats stop firing once the session ends.
+  const warmupHeartbeatStopRef = useRef<(() => void) | null>(null)
+  // Used by the batch trigger to compose the `BatchExtractRequest`. The
+  // chunk buffer is read directly from `chunksRef` (same ref the
+  // recorder writes into) and the recorder's mimeType lives in
+  // `pickedMimeType` state. This ref tracks the wall-clock anchor
+  // (mediaTime, in ms) of chunks[0] for the splice. It's set when the
+  // recorder starts and never re-set within a session.
+  const blobStartMsRef = useRef<number>(0)
+  // Tracks the highest swingIndex we've already emitted via onSwing so
+  // we can never emit the same swing twice (the batch path replaces
+  // frames in-place and then emits, while the synchronous path used to
+  // emit immediately).
+  const emittedSwingIndexRef = useRef<number>(0)
+
   const setStatus = useCallback(
     (next: LiveCaptureStatus) => {
       setStatusState(next)
@@ -221,6 +296,14 @@ export function useLiveCapture(
     if (fallbackIntervalRef.current != null) {
       clearInterval(fallbackIntervalRef.current)
       fallbackIntervalRef.current = null
+    }
+    if (idleExtractTimerRef.current != null) {
+      clearTimeout(idleExtractTimerRef.current)
+      idleExtractTimerRef.current = null
+    }
+    if (warmupHeartbeatStopRef.current) {
+      try { warmupHeartbeatStopRef.current() } catch { /* ignore */ }
+      warmupHeartbeatStopRef.current = null
     }
   }, [])
 
@@ -283,6 +366,18 @@ export function useLiveCapture(
     lastQualityRef.current = null
     lastDetectionAtRef.current = 0
     inflightRef.current = false
+    pendingSwingsRef.current = []
+    lastSwingPushedAtRef.current = 0
+    blobStartMsRef.current = 0
+    emittedSwingIndexRef.current = 0
+    if (idleExtractTimerRef.current != null) {
+      clearTimeout(idleExtractTimerRef.current)
+      idleExtractTimerRef.current = null
+    }
+    if (warmupHeartbeatStopRef.current) {
+      try { warmupHeartbeatStopRef.current() } catch { /* ignore */ }
+      warmupHeartbeatStopRef.current = null
+    }
     detectorRef.current = new LiveSwingDetector()
 
     setStatus('requesting-permissions')
@@ -324,6 +419,15 @@ export function useLiveCapture(
       // getSettings() throws on a few mobile browsers — keep requestedFacingMode
     }
     setFacingMode(grantedFacingMode)
+
+    // Phase E — start the Modal warmup as soon as we know we have a
+    // camera. Fire-and-forget; failures are non-fatal (the helper logs
+    // an info-level line and never throws). The heartbeat keeps the
+    // container warm across mid-session pauses too — Modal's 30s
+    // scaledown can otherwise put the second batch back into cold-start
+    // territory if the player thinks for a moment between rallies.
+    void pingModalWarmup()
+    warmupHeartbeatStopRef.current = startWarmupHeartbeat()
 
     setStatus('initializing')
 
@@ -387,6 +491,12 @@ export function useLiveCapture(
     // (frameMediaTime - mediaTimeStartSec) * 1000 so they align with the
     // recorded blob's `<video>.currentTime` axis at review time.
     mediaTimeStartSecRef.current = videoEl.currentTime
+    // Phase E — anchor for the splice helper. Swing windows expressed as
+    // (startMs, endMs) on the recorded blob's mediaTime axis are mapped
+    // through `blobStartMs` to figure out which chunks intersect each
+    // swing. Recording starts at mediaTime = mediaTimeStartSecRef.current,
+    // so `blobStartMs = 0` on the swing's session-relative axis.
+    blobStartMsRef.current = 0
 
     const canvas = document.createElement('canvas')
     canvas.width = videoEl.videoWidth || 640
@@ -400,12 +510,157 @@ export function useLiveCapture(
       return
     }
 
-    const minFrameGapMs = 1000 / targetDetectionFps
+    // Phase E — `targetDetectionFps` is now an upper bound. The actual
+    // rate is clamped to GATE_DETECTION_FPS (default 5fps) because we
+    // only need RTMPose for the gates (body-presence, camera-angle,
+    // swing trigger) — not for the live skeleton or coaching keypoints.
+    // Modal handles the heavy lifting on the swing-window batch.
+    const effectiveDetectionFps = Math.min(targetDetectionFps, GATE_DETECTION_FPS)
+    const minFrameGapMs = 1000 / effectiveDetectionFps
 
     const emitQuality = (q: PoseQuality) => {
       if (lastQualityRef.current === q) return
       lastQualityRef.current = q
       onPoseQuality?.(q)
+    }
+
+    // Phase E — Modal batch fire path.
+    //
+    // When the swing detector emits a swing we push it onto
+    // `pendingSwingsRef` instead of forwarding to onSwing immediately.
+    // Once the queue reaches LIVE_EXTRACTION_BATCH_SIZE (or the idle
+    // timer fires after LIVE_EXTRACTION_IDLE_MS) we splice the swing
+    // windows out of the chunk buffer, ship them to Modal via E2's
+    // library, swap each swing's `frames` for the server-extracted
+    // result, and THEN forward each swing to `onSwing` in original
+    // order. On a per-swing extraction failure the on-device frames
+    // remain in place as a fallback so the live coach still has angle
+    // data to grade off — degraded but not absent.
+    //
+    // TODO(cache-key): E1 flagged that Modal's per-clip cache is keyed
+    // on sha256(content[:256KB]) + ":fps=" + sample_fps. Two batches in
+    // the same session that begin with similar MOOV-header bytes could
+    // collide and return the wrong keypoints. The blob-path uniqueness
+    // (`live/swings/${Date.now()}-batch.${ext}` in
+    // lib/liveSwingBatchExtractor.ts) doesn't help — Modal hashes
+    // content, not URL. Mitigations to verify on real devices:
+    //   1. fMP4 chunks vary their first 256KB across batches because
+    //      the swing-window content lands inside that prefix; the
+    //      MOOV header is small. If verification shows otherwise,
+    //      we'll need to either (a) extend the lib's API to accept a
+    //      `cacheBustSalt` (out of scope here, blocked file), or (b)
+    //      pad the spliced sub-clip with a per-batch nonce header.
+    //   2. If real-device testing surfaces collisions, file an E2
+    //      follow-up to widen the hash window or salt the upload path
+    //      from the server side. We deliberately ship the safer
+    //      path-uniqueness only and note this for verification.
+    const fireBatch = async () => {
+      if (idleExtractTimerRef.current != null) {
+        clearTimeout(idleExtractTimerRef.current)
+        idleExtractTimerRef.current = null
+      }
+      const queued = pendingSwingsRef.current
+      if (queued.length === 0) return
+      // Drain — any new swings from this point land in a fresh batch.
+      pendingSwingsRef.current = []
+
+      const captureGeneration = generation
+      const batchSwings = queued.slice()
+      const swingInputs: BatchExtractSwingInput[] = batchSwings.map((s) => ({
+        swingIndex: s.swingIndex,
+        startMs: s.startMs,
+        endMs: s.endMs,
+      }))
+      // Snapshot the chunk buffer at fire time. Recorder keeps writing
+      // into the live ref; we want a stable view for the splice. It's
+      // safe to share Blob refs (Blob is immutable in the browser).
+      const blobChunks = chunksRef.current.slice()
+      const recorderMime =
+        recorderRef.current?.mimeType ?? mimeType ?? 'video/webm'
+
+      // Fire the extraction. Failures are caught and translated into
+      // per-swing fallbacks below. We never let extraction failures
+      // block emitting the swings — the live coach must still see them.
+      const emitWithFrames = (swing: StreamedSwing) => {
+        // Idempotency: never emit the same swingIndex twice. If for
+        // some reason this swing has already been forwarded (e.g. a
+        // late-arriving extraction result raced a stop()), drop it.
+        if (swing.swingIndex <= emittedSwingIndexRef.current) return
+        emittedSwingIndexRef.current = swing.swingIndex
+        swingsRef.current.push(swing)
+        onSwing?.(swing)
+      }
+
+      try {
+        const result = await extractBatchedSwingKeypoints({
+          swings: swingInputs,
+          blobChunks,
+          blobMimeType: recorderMime,
+          blobStartMs: blobStartMsRef.current,
+        })
+        if (generationRef.current !== captureGeneration) {
+          // Session torn down while extraction was in flight; drop the
+          // result on the floor. The on-device swings are already in
+          // `swingsRef.current`'s on-device-emit fallback path? — no,
+          // we deliberately deferred that emit. Don't emit post-stop.
+          return
+        }
+        // Build a swingIndex → server-frames map (or null on failure).
+        const perSwingMap = new Map<number, PoseFrame[] | null>()
+        for (const r of result.perSwing) {
+          perSwingMap.set(
+            r.swingIndex,
+            r.failureReason || r.frames.length === 0 ? null : r.frames,
+          )
+        }
+        for (const swing of batchSwings) {
+          const serverFrames = perSwingMap.get(swing.swingIndex) ?? null
+          if (serverFrames) {
+            // Replace on-device frames with server-extracted ones. The
+            // detector's StreamedSwing fields (startMs, endMs,
+            // peakFrameIndex, frame indices) stay on the original axis;
+            // the lib re-anchors timestamp_ms to swing-relative which
+            // matches what the coach + review path expect.
+            emitWithFrames({ ...swing, frames: serverFrames })
+          } else {
+            // Per-swing failure: keep the on-device frames so the live
+            // coach has something to grade off. Degraded but not absent.
+            emitWithFrames(swing)
+          }
+        }
+      } catch {
+        if (generationRef.current !== captureGeneration) return
+        // Whole-batch failure: emit every swing with on-device frames
+        // intact. extractBatchedSwingKeypoints returns failures via
+        // per-swing failureReason rather than throwing, but we belt-
+        // and-brace anyway — a thrown error here would otherwise drop
+        // the whole batch silently.
+        for (const swing of batchSwings) {
+          emitWithFrames(swing)
+        }
+      }
+    }
+
+    const armIdleExtractTimer = () => {
+      if (idleExtractTimerRef.current != null) {
+        clearTimeout(idleExtractTimerRef.current)
+      }
+      idleExtractTimerRef.current = setTimeout(() => {
+        idleExtractTimerRef.current = null
+        if (generationRef.current !== generation) return
+        if (pendingSwingsRef.current.length === 0) return
+        void fireBatch()
+      }, LIVE_EXTRACTION_IDLE_MS)
+    }
+
+    const enqueueSwing = (swing: StreamedSwing) => {
+      pendingSwingsRef.current.push(swing)
+      lastSwingPushedAtRef.current = performance.now()
+      if (pendingSwingsRef.current.length >= LIVE_EXTRACTION_BATCH_SIZE) {
+        void fireBatch()
+      } else {
+        armIdleExtractTimer()
+      }
     }
 
     // `mediaTimeSec` is the video-element timeline position of the frame
@@ -512,8 +767,10 @@ export function useLiveCapture(
 
         const emitted = detectorRef.current?.feed(frame) ?? null
         if (emitted) {
-          swingsRef.current.push(emitted)
-          onSwing?.(emitted)
+          // Phase E — defer the onSwing forward until the Modal batch
+          // returns. The on-device frames live on `emitted.frames`
+          // and become the fallback if Modal fails for this swing.
+          enqueueSwing(emitted)
         }
       } catch {
         // A single bad frame should never kill the loop
@@ -563,6 +820,24 @@ export function useLiveCapture(
 
     setStatus('stopping')
     teardownLoop()
+
+    // Phase E — drain any swings that were waiting on a Modal batch
+    // when Stop fired. These haven't been onSwing'd yet, but they
+    // belong in the saved session result either way (post-Stop the
+    // existing Modal pipeline in LiveCapturePanel runs against the
+    // full recorded blob and will backfill cleaner keypoints into
+    // keypoints_json regardless). Keep on-device frames as the
+    // fallback shape so the live-coach awaitInFlight + final batch
+    // path sees the same swing surface either way.
+    if (pendingSwingsRef.current.length > 0) {
+      for (const swing of pendingSwingsRef.current) {
+        if (swing.swingIndex <= emittedSwingIndexRef.current) continue
+        emittedSwingIndexRef.current = swing.swingIndex
+        swingsRef.current.push(swing)
+        try { onSwing?.(swing) } catch { /* never let consumer errors block stop */ }
+      }
+      pendingSwingsRef.current = []
+    }
 
     const finalBlob = await new Promise<Blob>((resolve) => {
       const finalize = () => {
@@ -614,7 +889,7 @@ export function useLiveCapture(
     cleanup()
     setStatus('idle')
     return result
-  }, [cleanup, setStatus, targetDetectionFps, teardownLoop])
+  }, [cleanup, onSwing, setStatus, targetDetectionFps, teardownLoop])
 
   return {
     start,

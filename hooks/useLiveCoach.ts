@@ -45,10 +45,40 @@ export interface UseLiveCoachReturn {
   awaitInFlight: (timeoutMs: number) => Promise<void>
 }
 
+// Per-swing source flag for the sourceMix telemetry on the batch request.
+// 'server' = swing.frames came from Modal-extracted keypoints via E3's batch
+// extractor (clean, /analyze-quality). 'fallback' = the per-swing batch
+// extraction failed and E3 filled swing.frames with on-device frames.
+type SwingSource = 'server' | 'fallback'
+
 type InternalSwing = {
   angleSummary: string
   startMs: number
   endMs: number
+  source: SwingSource
+}
+
+// Heuristic to distinguish server-extracted from on-device-fallback swings.
+//
+// E2's batch extractor re-anchors per-swing timestamps so swing.frames[0]
+// always lands at timestamp_ms === 0 (and re-indexes frame_index from 0).
+// On-device fallback retains the session-relative timestamps assigned by
+// useLiveCapture, where timestamp_ms is "ms since recorder.start()" and is
+// effectively never exactly 0 except for the literal first frame of the
+// recording. This is a heuristic — the very first swing of a session COULD
+// (in theory) have timestamp_ms === 0 in the on-device path too, which
+// would mis-classify it as 'server'. The mis-classification only affects
+// telemetry aggregates (sourceMix counters), not the angleSummary the model
+// reads, so the cost is bounded.
+//
+// TODO(E3): once E3 lands, ask it to set an explicit `swing.source:
+// 'server' | 'on-device'` field on StreamedSwing so we can replace this
+// heuristic with a clean signal. Until then, ship with this and accept
+// the bounded telemetry skew on the very first swing of a session.
+function detectSwingSource(swing: StreamedSwing): SwingSource {
+  const first = swing.frames[0]
+  if (!first) return 'fallback'
+  return first.timestamp_ms === 0 ? 'server' : 'fallback'
 }
 
 /**
@@ -196,6 +226,27 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
       ? producedAt - sessionStartMsRef.current
       : 0
 
+    // Per-batch source mix for downstream telemetry. Counts how many of the
+    // swings in this batch were sourced from server-extracted keypoints
+    // (the Phase E happy path) vs on-device fallback (per-swing extraction
+    // failed). The /api/live-coach route doesn't read this field yet — it's
+    // forward-only, so when E5 wires telemetry consumption the data is
+    // already being collected.
+    const sourceMix = { server: 0, fallback: 0 }
+    for (const s of swings) {
+      sourceMix[s.source]++
+    }
+    // Strip the per-swing `source` field from the wire payload. The route
+    // currently validates only { angleSummary, startMs, endMs }; sending
+    // extra fields wouldn't break it (they're ignored), but keeping the
+    // wire shape minimal avoids the appearance that the server is
+    // consuming a field it isn't.
+    const wireSwings = swings.map(({ angleSummary, startMs, endMs }) => ({
+      angleSummary,
+      startMs,
+      endMs,
+    }))
+
     // Pull the last 3 transcript lines as session memory for the model. Read
     // via getState() so we don't bake transcript identity into fireBatch's
     // dependencies — that would re-create the timer-driven callback every
@@ -218,10 +269,11 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             shotType: shotTypeRef.current,
-            recentSwings: swings,
+            recentSwings: wireSwings,
             recentCues,
             batchIndex,
             sessionDurationMs,
+            sourceMix,
           }),
         })
         if (!res.ok) return { kind: 'fail' }
@@ -305,16 +357,32 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
 
   const pushSwing = useCallback(
     (swing: StreamedSwing) => {
+      // swing.frames is the source of truth for angleSummary. Per Phase E,
+      // it may be server-extracted (clean, populated by E3's batch extractor
+      // from Modal keypoints) or an on-device fallback (when per-swing batch
+      // extraction failed). Both shapes are valid PoseFrame[] consumable by
+      // buildAngleSummary, so we don't branch on which one — we just read.
+      //
+      // If frames is empty (extraction failed AND on-device fallback also
+      // produced nothing), skip this swing's batch contribution. The LLM
+      // coach call is best-effort; one missing swing shouldn't drop the
+      // batch entirely. Mark wall-clock arrival regardless so downstream
+      // timers (idle / grace) still see "the player just hit something".
+      lastSwingWallMsRef.current = Date.now()
+      if (swing.frames.length === 0) {
+        console.info('[useLiveCoach] swing has empty frames, skipping its batch contribution', {
+          swingIndex: swing.swingIndex,
+        })
+        return
+      }
       const angleSummary = buildAngleSummary(swing.frames)
+      const source = detectSwingSource(swing)
       pendingRef.current.push({
         angleSummary,
         startMs: swing.startMs,
         endMs: swing.endMs,
+        source,
       })
-      // Mark the wall-clock arrival time so fireBatch's grace check has
-      // something to compare against. The detector's startMs/endMs are
-      // session-relative, not wall-clock.
-      lastSwingWallMsRef.current = Date.now()
       if (pendingRef.current.length >= maxSwingsPerBatch) {
         // fireBatch enforces the post-swing grace itself; if we're still in
         // the grace window it will reschedule via scheduleGraceTimer.
