@@ -1,7 +1,4 @@
-'use client'
-
 import Link from 'next/link'
-import { useRef } from 'react'
 import HeroRally from '@/components/HeroRally'
 
 // Tiny tennis-themed line glyphs. Single-stroke, hand-drawn feel —
@@ -84,62 +81,49 @@ const STRIPE_BG: Record<'clay' | 'hard-court' | 'green', string> = {
 }
 
 export default function HomePage() {
-  // Headline ref — the rally component reads its bounding rect to know
-  // where the ball should bounce. Plain ref, populated on mount.
-  const headlineRef = useRef<HTMLHeadingElement | null>(null)
   return (
     <div>
-      {/* Hero — green wash. The figure plays a continuous rally on
-          the right side of the section, and the ball physically
-          bounces off the H1 bounding rect. The rally SVG is an
-          absolutely-positioned overlay (lg+ only) so the ball can
-          travel between the text column and the figure column in one
-          coordinate space. */}
-      <section className="bg-green-wash text-ink relative overflow-hidden">
-        <div className="max-w-6xl mx-auto px-5 sm:px-8 pt-16 pb-20 lg:pt-24 lg:pb-28 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center relative">
-          <div className="lg:col-span-7">
-            <p className="text-[11px] sm:text-xs uppercase tracking-[0.18em] text-ink/70 mb-5">
-              AI Pose Tracking · For Tennis
-            </p>
-            <h1
-              ref={headlineRef}
-              className="font-display font-extrabold text-ink leading-[0.95] tracking-tight text-[44px] sm:text-[64px] lg:text-[88px] mb-6"
-            >
-              Beat Your<br />Last Swing.
-            </h1>
-            <p className="text-ink/75 text-base sm:text-lg max-w-xl mb-8 leading-relaxed">
-              Drop a video. We read your joint angles, save your best day, and tell
-              you what drifted in plain English. No clipboards, no stopwatches,
-              no jargon.
-            </p>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <Link
-                href="/analyze"
-                className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-sm font-semibold tracking-wide transition-colors"
-              >
-                Analyze My Swing
-              </Link>
-              <Link
-                href="/baseline"
-                className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-cream hover:bg-cream-soft text-ink text-sm font-semibold tracking-wide transition-colors"
-              >
-                My Baselines
-              </Link>
-            </div>
-          </div>
+      {/* Hero — green wash, full-section "tennis court" with two
+          figures rallying across a net. The headline copy is centered
+          horizontally and reads on top of the court graphic. The
+          rally lives in an absolutely-positioned HeroRally overlay
+          that draws the court lines, net, and both figures + ball.
+          The text is purely decorative now — the ball doesn't collide
+          with it. */}
+      <section className="bg-green-wash text-cream relative overflow-hidden">
+        {/* Rally + court overlay — drawn behind the text. */}
+        <HeroRally />
 
-          {/* Right column reserves layout space for the rally figure
-              (so the headline doesn't stretch full-width on desktop).
-              The figure itself lives in the absolute-positioned
-              HeroRally below, NOT inside this div. */}
-          <div className="hidden lg:block lg:col-span-5">
-            <div className="aspect-[9/16] w-full max-w-sm ml-auto" />
+        {/* Centered hero copy. Sits on top of the court but the
+            buttons remain clickable because the overlay above is
+            pointer-events-none. */}
+        <div className="relative max-w-3xl mx-auto px-5 sm:px-8 pt-20 pb-24 lg:pt-32 lg:pb-36 text-center">
+          <p className="text-[11px] sm:text-xs uppercase tracking-[0.18em] text-cream/70 mb-5">
+            AI Pose Tracking · For Tennis
+          </p>
+          <h1 className="font-display font-extrabold text-cream leading-[0.95] tracking-tight text-[44px] sm:text-[64px] lg:text-[88px] mb-6">
+            Beat Your<br />Last Swing.
+          </h1>
+          <p className="text-cream/80 text-base sm:text-lg max-w-xl mx-auto mb-8 leading-relaxed">
+            Drop a video. We read your joint angles, save your best day, and tell
+            you what drifted in plain English. No clipboards, no stopwatches,
+            no jargon.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+            <Link
+              href="/analyze"
+              className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-sm font-semibold tracking-wide transition-colors"
+            >
+              Analyze My Swing
+            </Link>
+            <Link
+              href="/baseline"
+              className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-cream hover:bg-cream-soft text-ink text-sm font-semibold tracking-wide transition-colors"
+            >
+              My Baselines
+            </Link>
           </div>
         </div>
-
-        {/* Rally overlay — covers the entire hero section. The component
-            internally hides itself on mobile via `hidden lg:block`. */}
-        <HeroRally headlineRef={headlineRef} />
       </section>
 
       {/* Feature grid — pastel panels with a colored top stripe per card.

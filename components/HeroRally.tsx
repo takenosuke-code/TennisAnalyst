@@ -3,35 +3,17 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
 
 /*
- * HeroRally — figure plays a continuous rally; ball bounces off the
- * headline copy.
+ * HeroRally — two figures rally across a net on a tennis court, with
+ * the headline copy centered between them.
  *
- * v3 of the hero animation (replaces v2 HeroSwingTracer's 3-cycle-and-
- * settle pattern). The ball is the protagonist: it travels left, hits
- * the H1's bounding box, returns, the figure swings, ball reverses,
- * loop forever. The figure's swing fires *because* the ball arrived
- * — there's no idle / settled state.
+ * The right figure (the "you" figure, with angle pills) and a mirrored
+ * left figure (the "opponent") trade shots. Each figure has its own
+ * state machine, anticipates the incoming ball, swings AT it, and the
+ * ball reverses on contact-phase. Court lines + net are static SVG
+ * decoration.
  *
- * Architectural shape:
- *   - This component is positioned-absolute over the entire hero
- *     section so figure + ball share one coordinate space.
- *   - The H1's bounding rect is read via a forwarded ref + ResizeObserver
- *     (Plan §3 path a) so the ball collides against the actual rendered
- *     text, not a hard-coded x.
- *   - Figure FK math (skeleton building, angle interpolation) is the
- *     same as v2's HeroSwingTracer — the keyframes, warpPhase, and
- *     buildSkeleton functions are re-derived here so the v2 component
- *     can stay in tree as a fallback during iteration.
- *   - SVG viewBox is the hero section's pixel dimensions in CSS units.
- *     Resize updates the viewBox so the layout stays pixel-aligned.
- *
- * Plan defaults (see /Users/neil/.claude/plans/okay-so-i-put-cuddly-church.md):
- *   - Forehand only (no backhand mirror this round).
- *   - Figure rooted at one spot — only the swing animates.
- *   - Full H1 bounding box as the wall (single rect, both lines).
- *   - No angle pills, no ball trail in v1.
- *   - On scroll-out / scroll-in the rally restarts from rest.
- *   - Reduced-motion: static figure with ball parked at racket.
+ * No collision with the headline copy — the words are visual only,
+ * the ball just flies between the figures.
  */
 
 // ---------- Joint structure ----------
@@ -76,8 +58,6 @@ type KeyframeAngles = {
   racket: number; racketLen: number
 }
 
-// 9-keyframe forehand sequence — same numbers as HeroSwingTracer v2
-// (computed via atan2 from the original position keyframes).
 const KEYFRAME_ANGLES: KeyframeAngles[] = [
   { t: 0.0, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -90.0,
     uArmL: 112.9, fArmL: 109.8, uArmR: 67.1, fArmR: 70.2,
@@ -145,45 +125,25 @@ const JOINT_KEYS: (keyof Joints)[] = [
 
 // ---------- Animation parameters ----------
 
-// The figure's bounding rectangle (in normalized 0-1 keyframe space)
-// gets scaled into pixels via FIGURE_PX_HEIGHT. The figure renders
-// anchored at FIGURE_RIGHT_PX from the right edge of the hero. The
-// figure's X is locked; only Y can drift to track the incoming ball
-// (FIGURE_Y_TRACK_AMPLITUDE_PX caps the lean range).
-const FIGURE_PX_HEIGHT = 480
+const FIGURE_PX_HEIGHT = 380
 const FIGURE_PX_WIDTH = FIGURE_PX_HEIGHT * (9 / 16)
-const FIGURE_RIGHT_PADDING = 32
-const FIGURE_Y_TRACK_LERP = 0.07         // soft tracking — 0=frozen, 1=instant
-const FIGURE_Y_TRACK_AMPLITUDE_PX = 100  // max +/- shift from rest Y
+const FIGURE_EDGE_PADDING = 28
+const FIGURE_Y_TRACK_LERP = 0.07
+const FIGURE_Y_TRACK_AMPLITUDE_PX = 70
 
-// Ball
 const BALL_RADIUS = 7
-const BALL_SPEED = 540 // px/sec — feels like a rally tempo, not Pong
+const BALL_SPEED = 540
 
-// Swing
 const SWING_MS = 700
 const RACKET_HIT_RADIUS = 50
-
-// The keyframes' contact frame is at t=0.65, but warpPhase squishes
-// the timing. We solve numerically: warpPhase(u) = u²·(3-2u) = 0.65 →
-// u ≈ 0.604. So contact happens at SWING_MS · 0.604 ≈ 423ms after the
-// swing starts. We fire the swing this many ms BEFORE the ball reaches
-// the racket's contact-frame X — so the racket sweeps through the
-// strike zone exactly as the ball arrives. Pong-like timing.
 const SWING_TO_CONTACT_MS = 423
 const SWING_CONTACT_PHASE = 0.65
-
-// In the keyframes, the racket head at contact is at normalized
-// (0.326, 0.508) — across the body, slightly below center. The figure
-// must aim this point at the incoming ball, not its hipCenter.
 const RACKET_CONTACT_NORM_X = 0.326
 const RACKET_CONTACT_NORM_Y = 0.508
 
-// Angle pills — 4 pills surfaced on the figure to match the screenshot
-// reference. Each pill labels the joint angle (in degrees) at one of
-// the body's main hinges. ANGLE_PILLS[i].joint is where the pill
-// anchors; .parent and .child define the angle (parent → joint →
-// child). offsetX/offsetY in pixels relative to the joint.
+// Angle pills — only on the right (the "you") figure. The opponent
+// is decorative; pills there would clutter and dilute the diagnostic
+// signal of the right figure.
 const ANGLE_PILLS: Array<{
   joint: keyof Joints
   parent: keyof Joints
@@ -191,13 +151,9 @@ const ANGLE_PILLS: Array<{
   offsetX: number
   offsetY: number
 }> = [
-  // Right (dominant) elbow — pill outboard right
   { joint: 'right_elbow', parent: 'right_shoulder', child: 'right_wrist', offsetX: 30, offsetY: -8 },
-  // Left elbow — pill outboard left
   { joint: 'left_elbow', parent: 'left_shoulder', child: 'left_wrist', offsetX: -54, offsetY: -8 },
-  // Right knee — pill outboard right
   { joint: 'right_knee', parent: 'right_hip', child: 'right_ankle', offsetX: 22, offsetY: 6 },
-  // Left knee — pill outboard left
   { joint: 'left_knee', parent: 'left_hip', child: 'left_ankle', offsetX: -54, offsetY: 6 },
 ]
 const PILL_W = 44
@@ -300,6 +256,19 @@ function buildSkeleton(phase: number): { joints: Joints; racketHead: Pt } {
   }
 }
 
+function angleAtPx(a: Pt, b: Pt, c: Pt): number {
+  const v1x = a[0] - b[0]
+  const v1y = a[1] - b[1]
+  const v2x = c[0] - b[0]
+  const v2y = c[1] - b[1]
+  const dot = v1x * v2x + v1y * v2y
+  const m1 = Math.hypot(v1x, v1y)
+  const m2 = Math.hypot(v2x, v2y)
+  if (m1 === 0 || m2 === 0) return 0
+  const cos = Math.max(-1, Math.min(1, dot / (m1 * m2)))
+  return Math.round((Math.acos(cos) * 180) / Math.PI)
+}
+
 // ---------- prefers-reduced-motion ----------
 
 function subscribeReducedMotion(cb: () => void): () => void {
@@ -316,39 +285,23 @@ function getServerReducedMotion(): boolean {
   return false
 }
 
-// ---------- Component ----------
+// ---------- Per-figure rendering helpers ----------
 
-interface Props {
-  /** Ref to the H1 the ball should bounce off of. */
-  headlineRef: React.RefObject<HTMLElement | null>
-}
-
-interface ElRefs {
+interface FigureRefs {
   bones: (SVGLineElement | null)[]
   joints: (SVGCircleElement | null)[]
   racketHead: SVGCircleElement | null
   racketGrip: SVGLineElement | null
-  ball: SVGCircleElement | null
-  pills: Array<{ rect: SVGRectElement | null; text: SVGTextElement | null } | null>
 }
 
-// Compute the angle in degrees at vertex b given three points a, b, c
-// in pixel space. Output is clamped to [0, 180] (we only care about
-// magnitude — coaching angles never exceed 180°).
-function angleAtPx(a: Pt, b: Pt, c: Pt): number {
-  const v1x = a[0] - b[0]
-  const v1y = a[1] - b[1]
-  const v2x = c[0] - b[0]
-  const v2y = c[1] - b[1]
-  const dot = v1x * v2x + v1y * v2y
-  const m1 = Math.hypot(v1x, v1y)
-  const m2 = Math.hypot(v2x, v2y)
-  if (m1 === 0 || m2 === 0) return 0
-  const cos = Math.max(-1, Math.min(1, dot / (m1 * m2)))
-  return Math.round((Math.acos(cos) * 180) / Math.PI)
+interface PillRefs {
+  rect: SVGRectElement | null
+  text: SVGTextElement | null
 }
 
-export default function HeroRally({ headlineRef }: Props) {
+// ---------- Component ----------
+
+export default function HeroRally() {
   const reducedMotion = useSyncExternalStore(
     subscribeReducedMotion,
     getReducedMotion,
@@ -356,50 +309,76 @@ export default function HeroRally({ headlineRef }: Props) {
   )
   const containerRef = useRef<HTMLDivElement | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
-  const refs = useRef<ElRefs>({
+
+  // Two sets of figure refs — right (you) and left (opponent).
+  const rightRefs = useRef<FigureRefs>({
     bones: [],
     joints: [],
     racketHead: null,
     racketGrip: null,
-    ball: null,
-    pills: ANGLE_PILLS.map(() => ({ rect: null, text: null })),
   })
+  const leftRefs = useRef<FigureRefs>({
+    bones: [],
+    joints: [],
+    racketHead: null,
+    racketGrip: null,
+  })
+  const pillRefs = useRef<PillRefs[]>(ANGLE_PILLS.map(() => ({ rect: null, text: null })))
+  const ballRef = useRef<SVGCircleElement | null>(null)
+  const courtRef = useRef<SVGGElement | null>(null)
 
   useEffect(() => {
     const container = containerRef.current
     const svg = svgRef.current
-    const headline = headlineRef.current
-    if (!container || !svg || !headline) return
+    if (!container || !svg) return
 
-    // Geometry — recomputed on resize.
     let containerRect = container.getBoundingClientRect()
-    let headlineLocal = computeHeadlineLocal(headline, container)
-    let figureBaseX = containerRect.width - FIGURE_PX_WIDTH / 2 - FIGURE_RIGHT_PADDING
-    let figureBaseY = containerRect.height / 2
 
-    function paintAtSwingPhase(phase: number) {
+    function setSvgSize() {
+      svg!.setAttribute('viewBox', `0 0 ${containerRect.width} ${containerRect.height}`)
+      svg!.setAttribute('width', String(containerRect.width))
+      svg!.setAttribute('height', String(containerRect.height))
+    }
+    setSvgSize()
+
+    // Figure positions — pinned to the edges of the section.
+    let rightBaseX = containerRect.width - FIGURE_PX_WIDTH / 2 - FIGURE_EDGE_PADDING
+    let leftBaseX = FIGURE_PX_WIDTH / 2 + FIGURE_EDGE_PADDING
+    let figureRestY = containerRect.height / 2
+    let rightBaseY = figureRestY
+    let leftBaseY = figureRestY
+
+    // toPx converts normalized keyframe coords to pixel coords. The
+    // `mirrored` flag flips the X axis so the left figure renders as
+    // a mirror-image of the right (its racket sweeps the opposite
+    // direction, contact zone is on its right side / net side).
+    function toPx(p: Pt, baseX: number, baseY: number, mirrored: boolean): Pt {
+      const dx = (p[0] - 0.5) * FIGURE_PX_WIDTH
+      return [baseX + (mirrored ? -dx : dx), baseY + (p[1] - 0.5) * FIGURE_PX_HEIGHT]
+    }
+
+    function paintFigure(
+      phase: number,
+      refs: FigureRefs,
+      baseX: number,
+      baseY: number,
+      mirrored: boolean,
+      withPills: boolean,
+    ): Pt {
       const { joints, racketHead } = buildSkeleton(phase)
-      // Convert normalized [0,1] keyframe coords to pixel coords centered on figureBase.
-      const toPx = (p: Pt): Pt => [
-        figureBaseX + (p[0] - 0.5) * FIGURE_PX_WIDTH,
-        figureBaseY + (p[1] - 0.5) * FIGURE_PX_HEIGHT,
-      ]
-      // Cache joint pixel coords once — pills re-use them.
       const px: Record<keyof Joints, Pt> = {} as Record<keyof Joints, Pt>
       for (const key of JOINT_KEYS) {
-        px[key] = toPx(joints[key])
+        px[key] = toPx(joints[key], baseX, baseY, mirrored)
       }
-      // Joints
       JOINT_KEYS.forEach((key, idx) => {
-        const dot = refs.current.joints[idx]
+        const dot = refs.joints[idx]
         if (!dot) return
         const [x, y] = px[key]
         dot.setAttribute('cx', String(x))
         dot.setAttribute('cy', String(y))
       })
-      // Bones
       BONES.forEach(([from, to], idx) => {
-        const line = refs.current.bones[idx]
+        const line = refs.bones[idx]
         if (!line) return
         const [x1, y1] = px[from]
         const [x2, y2] = px[to]
@@ -408,221 +387,194 @@ export default function HeroRally({ headlineRef }: Props) {
         line.setAttribute('x2', String(x2))
         line.setAttribute('y2', String(y2))
       })
-      // Racket
       const wristPx = px.right_wrist
-      const headPx = toPx(racketHead)
-      const headEl = refs.current.racketHead
+      const headPx = toPx(racketHead, baseX, baseY, mirrored)
+      const headEl = refs.racketHead
       if (headEl) {
         headEl.setAttribute('cx', String(headPx[0]))
         headEl.setAttribute('cy', String(headPx[1]))
       }
-      const grip = refs.current.racketGrip
+      const grip = refs.racketGrip
       if (grip) {
         grip.setAttribute('x1', String(wristPx[0]))
         grip.setAttribute('y1', String(wristPx[1]))
         grip.setAttribute('x2', String(headPx[0]))
         grip.setAttribute('y2', String(headPx[1]))
       }
-      // Angle pills — compute angle, position pill near the joint, write text.
-      ANGLE_PILLS.forEach((pill, idx) => {
-        const slot = refs.current.pills[idx]
-        if (!slot || !slot.rect || !slot.text) return
-        const angle = angleAtPx(px[pill.parent], px[pill.joint], px[pill.child])
-        const cx = px[pill.joint][0] + pill.offsetX
-        const cy = px[pill.joint][1] + pill.offsetY
-        slot.rect.setAttribute('x', String(cx - PILL_W / 2))
-        slot.rect.setAttribute('y', String(cy - PILL_H / 2))
-        slot.text.setAttribute('x', String(cx))
-        slot.text.setAttribute('y', String(cy + 4))
-        slot.text.textContent = `${angle}°`
-      })
+      // Angle pills only on right figure.
+      if (withPills) {
+        ANGLE_PILLS.forEach((pill, idx) => {
+          const slot = pillRefs.current[idx]
+          if (!slot || !slot.rect || !slot.text) return
+          const angle = angleAtPx(px[pill.parent], px[pill.joint], px[pill.child])
+          const cx = px[pill.joint][0] + pill.offsetX
+          const cy = px[pill.joint][1] + pill.offsetY
+          slot.rect.setAttribute('x', String(cx - PILL_W / 2))
+          slot.rect.setAttribute('y', String(cy - PILL_H / 2))
+          slot.text.setAttribute('x', String(cx))
+          slot.text.setAttribute('y', String(cy + 4))
+          slot.text.textContent = `${angle}°`
+        })
+      }
       return headPx
     }
 
-    // Get the racket head pixel coord at a given phase without painting.
-    function racketHeadAtPhase(phase: number): Pt {
+    // Racket-head pixel position at a phase, without painting.
+    function racketHeadAtPhase(phase: number, baseX: number, baseY: number, mirrored: boolean): Pt {
       const { racketHead } = buildSkeleton(phase)
-      return [
-        figureBaseX + (racketHead[0] - 0.5) * FIGURE_PX_WIDTH,
-        figureBaseY + (racketHead[1] - 0.5) * FIGURE_PX_HEIGHT,
-      ]
+      return toPx(racketHead, baseX, baseY, mirrored)
     }
 
-    // After a racket hit, pick a vy that guarantees the ball:
-    //   1. lands within the headline's vertical band (so it actually
-    //      bounces off the words, not over/under them)
-    //   2. returns to the racket plane within the figure's reachable
-    //      Y range (so the figure can track and hit it on the next cycle)
-    // No air bounces — the ball must be captured by the words on the
-    // way out and by the racket on the way back; otherwise it would
-    // escape, which the user explicitly disallowed.
-    function pickReturnVy(ballX: number, ballY: number): number {
-      const dist = ballX - headlineLocal.right
+    // Pick a vy that lands the ball in the opponent's reachable Y
+    // band so they can hit it back. No words to clamp against now;
+    // only constraint is "land where the other figure can swing."
+    function pickReturnVy(ballX: number, ballY: number, opponentX: number): number {
+      const dist = Math.abs(opponentX - ballX)
       if (dist <= 8) return 0
       const t = dist / BALL_SPEED
-      const buffer = 10
-      // Outbound — must hit the headline rect on the way out.
-      const minOut = (headlineLocal.top + buffer - ballY) / t
-      const maxOut = (headlineLocal.bottom - buffer - ballY) / t
-      // Inbound — after bouncing off the words, ball returns 2t later.
-      // Must land within figure's reachable band centered on rest Y.
-      const figRestY = containerRect.height / 2
-      const figMinY = figRestY - FIGURE_Y_TRACK_AMPLITUDE_PX
-      const figMaxY = figRestY + FIGURE_Y_TRACK_AMPLITUDE_PX
-      const minIn = (figMinY - ballY) / (2 * t)
-      const maxIn = (figMaxY - ballY) / (2 * t)
-      const lo = Math.max(minOut, minIn)
-      const hi = Math.min(maxOut, maxIn)
-      if (lo > hi) return 0
-      return lo + Math.random() * (hi - lo)
+      const figRest = containerRect.height / 2
+      const figMin = figRest - FIGURE_Y_TRACK_AMPLITUDE_PX
+      const figMax = figRest + FIGURE_Y_TRACK_AMPLITUDE_PX
+      const minVy = (figMin - ballY) / t
+      const maxVy = (figMax - ballY) / t
+      return minVy + Math.random() * (maxVy - minVy)
     }
-
-    const svgEl = svg
-    function setSvgSize() {
-      svgEl.setAttribute('viewBox', `0 0 ${containerRect.width} ${containerRect.height}`)
-      svgEl.setAttribute('width', String(containerRect.width))
-      svgEl.setAttribute('height', String(containerRect.height))
-    }
-
-    setSvgSize()
 
     // Initial paint.
-    const restRacket = racketHeadAtPhase(0)
-    paintAtSwingPhase(0)
-    const ballEl = refs.current.ball
-    if (ballEl) {
-      ballEl.setAttribute('cx', String(restRacket[0] - 60))
-      ballEl.setAttribute('cy', String(restRacket[1]))
+    paintFigure(0, rightRefs.current, rightBaseX, rightBaseY, false, true)
+    paintFigure(0, leftRefs.current, leftBaseX, leftBaseY, true, false)
+    const restRacketRight = racketHeadAtPhase(0, rightBaseX, rightBaseY, false)
+    if (ballRef.current) {
+      ballRef.current.setAttribute('cx', String(restRacketRight[0] - 60))
+      ballRef.current.setAttribute('cy', String(restRacketRight[1]))
     }
 
     if (reducedMotion) return
 
-    // Rally state.
-    type State = 'preswing' | 'swinging'
-    let state: State = 'preswing'
-    let swingStart = 0
-    let hitRegistered = false  // ensures we reverse the ball exactly once per swing
-    let figureBaseYRest = containerRect.height / 2
-    figureBaseY = figureBaseYRest
-    // Ball — start near the racket, traveling toward the headline (left).
-    // Initial vy chosen so the very first shot also lands on the words.
-    const initialBallX = restRacket[0] - 80
-    const initialBallY = restRacket[1]
-    let ball = {
-      x: initialBallX,
-      y: initialBallY,
+    // Per-figure rally state.
+    type FigState = { mode: 'preswing' | 'swinging'; swingStart: number; hitRegistered: boolean }
+    const right: FigState = { mode: 'preswing', swingStart: 0, hitRegistered: false }
+    const left: FigState = { mode: 'preswing', swingStart: 0, hitRegistered: false }
+
+    // Ball — start near right figure heading left.
+    const racketYOffsetFromHip = (RACKET_CONTACT_NORM_Y - 0.5) * FIGURE_PX_HEIGHT
+    const ball = {
+      x: restRacketRight[0] - 80,
+      y: restRacketRight[1],
       vx: -BALL_SPEED,
-      vy: 0,
+      vy: pickReturnVy(restRacketRight[0] - 80, restRacketRight[1], leftBaseX),
     }
-    ball.vy = pickReturnVy(initialBallX, initialBallY)
+
     let lastTime = performance.now()
     let rafId = 0
     let cancelled = false
-
-    // Pre-derived constants.
-    const racketYOffsetFromHip = (RACKET_CONTACT_NORM_Y - 0.5) * FIGURE_PX_HEIGHT
 
     function step(now: number) {
       if (cancelled) return
       const dt = Math.min(0.05, (now - lastTime) / 1000)
       lastTime = now
 
-      // Determine swing phase.
-      let swingPhase = 0
-      if (state === 'swinging') {
-        const u = Math.min(1, (now - swingStart) / SWING_MS)
-        swingPhase = warpPhase(u)
+      // Resolve each figure's swing phase.
+      let rightPhase = 0
+      if (right.mode === 'swinging') {
+        const u = Math.min(1, (now - right.swingStart) / SWING_MS)
+        rightPhase = warpPhase(u)
         if (u >= 1) {
-          state = 'preswing'
-          hitRegistered = false
+          right.mode = 'preswing'
+          right.hitRegistered = false
+        }
+      }
+      let leftPhase = 0
+      if (left.mode === 'swinging') {
+        const u = Math.min(1, (now - left.swingStart) / SWING_MS)
+        leftPhase = warpPhase(u)
+        if (u >= 1) {
+          left.mode = 'preswing'
+          left.hitRegistered = false
         }
       }
 
-      // ─── Pre-swing logic: anticipate, track, fire ─────────────────────
-      // The figure must START swinging BEFORE the ball arrives so the
-      // racket sweeps through the strike zone exactly as the ball gets
-      // there — that's the Pong-feel the user asked for. We compute
-      // time-to-contact from the ball's current trajectory, then:
-      //   (a) while we have time, soft-track figureBaseY toward the
-      //       predicted ball Y (the figure leans to meet the shot).
-      //   (b) when time-to-contact drops to SWING_TO_CONTACT_MS, snap
-      //       figureBaseY to the exact target so the racket lands on
-      //       the ball, and fire the swing.
-      if (state === 'preswing' && ball.vx > 0) {
-        // The racket's contact-frame X is across the body (left of
-        // center) — that's where we want the ball at contact time.
-        const racketContactX =
-          figureBaseX + (RACKET_CONTACT_NORM_X - 0.5) * FIGURE_PX_WIDTH
+      // ─── Per-figure preswing: track Y, fire when ball is close ───────
+      // Right figure: ball is incoming when vx > 0 (moving rightward).
+      if (right.mode === 'preswing' && ball.vx > 0) {
+        const racketContactX = rightBaseX + (RACKET_CONTACT_NORM_X - 0.5) * FIGURE_PX_WIDTH
         const tToContact = (racketContactX - ball.x) / ball.vx
-
         if (tToContact > 0) {
           const predBallY = ball.y + ball.vy * tToContact
           const targetY = Math.max(
-            figureBaseYRest - FIGURE_Y_TRACK_AMPLITUDE_PX,
-            Math.min(figureBaseYRest + FIGURE_Y_TRACK_AMPLITUDE_PX,
-              predBallY - racketYOffsetFromHip),
+            figureRestY - FIGURE_Y_TRACK_AMPLITUDE_PX,
+            Math.min(figureRestY + FIGURE_Y_TRACK_AMPLITUDE_PX, predBallY - racketYOffsetFromHip),
           )
-
           if (tToContact * 1000 <= SWING_TO_CONTACT_MS) {
-            // Time to fire. Snap so the contact frame lands on the ball.
-            figureBaseY = targetY
-            state = 'swinging'
-            swingStart = now
-            hitRegistered = false
+            rightBaseY = targetY
+            right.mode = 'swinging'
+            right.swingStart = now
+            right.hitRegistered = false
           } else {
-            // Soft track — figure leans toward where the ball will be.
-            figureBaseY += (targetY - figureBaseY) * FIGURE_Y_TRACK_LERP
+            rightBaseY += (targetY - rightBaseY) * FIGURE_Y_TRACK_LERP
+          }
+        }
+      }
+      // Left figure: ball is incoming when vx < 0 (moving leftward).
+      // The mirrored figure's racket-contact-X is to the RIGHT of its
+      // base (toward the net), so we add instead of subtract the offset.
+      if (left.mode === 'preswing' && ball.vx < 0) {
+        const racketContactX = leftBaseX - (RACKET_CONTACT_NORM_X - 0.5) * FIGURE_PX_WIDTH
+        const tToContact = (racketContactX - ball.x) / ball.vx
+        if (tToContact > 0) {
+          const predBallY = ball.y + ball.vy * tToContact
+          const targetY = Math.max(
+            figureRestY - FIGURE_Y_TRACK_AMPLITUDE_PX,
+            Math.min(figureRestY + FIGURE_Y_TRACK_AMPLITUDE_PX, predBallY - racketYOffsetFromHip),
+          )
+          if (tToContact * 1000 <= SWING_TO_CONTACT_MS) {
+            leftBaseY = targetY
+            left.mode = 'swinging'
+            left.swingStart = now
+            left.hitRegistered = false
+          } else {
+            leftBaseY += (targetY - leftBaseY) * FIGURE_Y_TRACK_LERP
           }
         }
       }
 
-      // Ball physics (kinematic — no gravity).
+      // Ball physics.
       ball.x += ball.vx * dt
       ball.y += ball.vy * dt
 
-      // ─── Headline collision (only collision surface on the left) ─────
-      if (
-        ball.vx < 0 &&
-        ball.y >= headlineLocal.top - BALL_RADIUS &&
-        ball.y <= headlineLocal.bottom + BALL_RADIUS &&
-        ball.x - BALL_RADIUS <= headlineLocal.right
-      ) {
-        ball.vx = -ball.vx
-        ball.x = headlineLocal.right + BALL_RADIUS
-      }
-
-      // ─── Mid-swing contact: racket strikes the ball ───────────────────
-      // The figure committed to a target Y when the swing fired, so the
-      // racket head at SWING_CONTACT_PHASE should meet the ball within
-      // a small radius. Reverse the ball at the moment the swing crosses
-      // contact phase. The proximity guard catches edge cases where the
-      // ball trajectory was perturbed (resize, etc.) — if it's still
-      // close, we hit; if not, the ball flies past.
-      if (state === 'swinging' && !hitRegistered && swingPhase >= SWING_CONTACT_PHASE) {
-        const racketPx = racketHeadAtPhase(SWING_CONTACT_PHASE)
+      // ─── Right figure contact ────────────────────────────────────────
+      if (right.mode === 'swinging' && !right.hitRegistered && rightPhase >= SWING_CONTACT_PHASE) {
+        const racketPx = racketHeadAtPhase(SWING_CONTACT_PHASE, rightBaseX, rightBaseY, false)
         const dx = ball.x - racketPx[0]
         const dy = ball.y - racketPx[1]
         if (dx * dx + dy * dy <= (RACKET_HIT_RADIUS * 1.5) ** 2) {
-          ball.vx = -Math.abs(ball.vx)  // ensure leftward
-          ball.vy = pickReturnVy(ball.x, ball.y)
-          // Snap ball to racket head so the visual is "racket meets
-          // ball" rather than "ball reverses near racket."
+          ball.vx = -Math.abs(ball.vx)  // send leftward
+          ball.vy = pickReturnVy(ball.x, ball.y, leftBaseX)
           ball.x = racketPx[0]
           ball.y = racketPx[1]
         }
-        hitRegistered = true
+        right.hitRegistered = true
+      }
+      // ─── Left figure contact ─────────────────────────────────────────
+      if (left.mode === 'swinging' && !left.hitRegistered && leftPhase >= SWING_CONTACT_PHASE) {
+        const racketPx = racketHeadAtPhase(SWING_CONTACT_PHASE, leftBaseX, leftBaseY, true)
+        const dx = ball.x - racketPx[0]
+        const dy = ball.y - racketPx[1]
+        if (dx * dx + dy * dy <= (RACKET_HIT_RADIUS * 1.5) ** 2) {
+          ball.vx = Math.abs(ball.vx)  // send rightward
+          ball.vy = pickReturnVy(ball.x, ball.y, rightBaseX)
+          ball.x = racketPx[0]
+          ball.y = racketPx[1]
+        }
+        left.hitRegistered = true
       }
 
-      // No top/bottom air walls. The ball can ONLY bounce off the words
-      // (left) and the figure's racket (right). pickReturnVy keeps every
-      // trajectory in-bounds; if anything escapes (resize edge case), the
-      // ball flies past the figure rather than teleporting back into play.
-
-      // Paint figure + ball.
-      paintAtSwingPhase(swingPhase)
-      if (refs.current.ball) {
-        refs.current.ball.setAttribute('cx', String(ball.x))
-        refs.current.ball.setAttribute('cy', String(ball.y))
+      // Paint everything.
+      paintFigure(rightPhase, rightRefs.current, rightBaseX, rightBaseY, false, true)
+      paintFigure(leftPhase, leftRefs.current, leftBaseX, leftBaseY, true, false)
+      if (ballRef.current) {
+        ballRef.current.setAttribute('cx', String(ball.x))
+        ballRef.current.setAttribute('cy', String(ball.y))
       }
 
       rafId = requestAnimationFrame(step)
@@ -632,25 +584,21 @@ export default function HeroRally({ headlineRef }: Props) {
       step(t)
     })
 
-    // Resize handling.
     const ro = new ResizeObserver(() => {
       containerRect = container.getBoundingClientRect()
-      headlineLocal = computeHeadlineLocal(headline, container)
-      figureBaseX = containerRect.width - FIGURE_PX_WIDTH / 2 - FIGURE_RIGHT_PADDING
-      figureBaseYRest = containerRect.height / 2
-      // Don't snap figureBaseY — let the lerp pull it back toward the
-      // new rest line over the next frames so resize doesn't jolt.
+      rightBaseX = containerRect.width - FIGURE_PX_WIDTH / 2 - FIGURE_EDGE_PADDING
+      leftBaseX = FIGURE_PX_WIDTH / 2 + FIGURE_EDGE_PADDING
+      figureRestY = containerRect.height / 2
       setSvgSize()
     })
     ro.observe(container)
-    ro.observe(headline)
 
     return () => {
       cancelled = true
       cancelAnimationFrame(rafId)
       ro.disconnect()
     }
-  }, [headlineRef, reducedMotion])
+  }, [reducedMotion])
 
   return (
     <div
@@ -663,52 +611,123 @@ export default function HeroRally({ headlineRef }: Props) {
         className="w-full h-full"
         preserveAspectRatio="xMidYMid meet"
       >
-        {/* Bones */}
+        {/* Court — single-stroke cream lines at low opacity. Drawn as
+            percentages of the viewBox so they scale with the section.
+            Layout (top-down convention even though the figures are
+            side-views — designed inconsistency for a stylized hero):
+              - 4 horizontal lines = top/bottom singles + doubles sidelines
+              - 2 vertical service lines (1/4 and 3/4 from each baseline)
+              - 1 horizontal center service line
+              - Net at the exact center vertical */}
+        <g ref={courtRef} stroke="var(--cream)" strokeOpacity="0.30" strokeWidth="1.5" fill="none">
+          {/* Top doubles + singles sidelines */}
+          <line x1="3%" y1="22%" x2="97%" y2="22%" />
+          <line x1="3%" y1="32%" x2="97%" y2="32%" />
+          {/* Bottom singles + doubles sidelines */}
+          <line x1="3%" y1="68%" x2="97%" y2="68%" />
+          <line x1="3%" y1="78%" x2="97%" y2="78%" />
+          {/* Baselines (left + right ends) */}
+          <line x1="3%" y1="22%" x2="3%" y2="78%" />
+          <line x1="97%" y1="22%" x2="97%" y2="78%" />
+          {/* Service lines */}
+          <line x1="28%" y1="32%" x2="28%" y2="68%" />
+          <line x1="72%" y1="32%" x2="72%" y2="68%" />
+          {/* Center service line — the "T" */}
+          <line x1="28%" y1="50%" x2="72%" y2="50%" />
+        </g>
+
+        {/* Net — vertical post line + tape, centered. Slight droop in the
+            middle so it doesn't read as a hard rectangle. */}
+        <g pointerEvents="none">
+          {/* Net mesh — series of vertical lines for cross-hatch suggestion */}
+          <g stroke="var(--ink)" strokeOpacity="0.45" strokeWidth="1">
+            {Array.from({ length: 8 }).map((_, i) => {
+              const yPct = 22 + i * 8
+              return <line key={`n${i}`} x1="50%" y1={`${yPct}%`} x2="50%" y2={`${yPct + 6}%`} />
+            })}
+          </g>
+          {/* Net top tape — cream bar */}
+          <rect x="49.5%" y="20%" width="1%" height="2%" fill="var(--cream)" opacity="0.9" />
+          {/* Net body */}
+          <rect x="49.5%" y="22%" width="1%" height="56%" fill="var(--ink)" opacity="0.35" />
+          {/* Net posts (ink dots top + bottom) */}
+          <circle cx="50%" cy="20%" r="4" fill="var(--ink)" />
+          <circle cx="50%" cy="80%" r="4" fill="var(--ink)" />
+        </g>
+
+        {/* Right figure — bones, racket, joint dots, angle pills. */}
         {BONES.map((_, idx) => (
           <line
-            key={`bone-${idx}`}
-            ref={(el) => { refs.current.bones[idx] = el }}
+            key={`r-bone-${idx}`}
+            ref={(el) => { rightRefs.current.bones[idx] = el }}
             stroke="var(--cream)"
             strokeOpacity="0.95"
             strokeWidth="2.5"
             strokeLinecap="round"
           />
         ))}
-
-        {/* Racket grip */}
         <line
-          ref={(el) => { refs.current.racketGrip = el }}
+          ref={(el) => { rightRefs.current.racketGrip = el }}
           stroke="var(--cream)"
           strokeOpacity="0.95"
           strokeWidth="2.25"
           strokeLinecap="round"
         />
-
-        {/* Racket head */}
         <circle
-          ref={(el) => { refs.current.racketHead = el }}
+          ref={(el) => { rightRefs.current.racketHead = el }}
           r="7"
           fill="var(--clay)"
         />
-
-        {/* Joint dots */}
         {JOINT_KEYS.map((key, idx) => (
           <circle
-            key={`joint-${idx}`}
-            ref={(el) => { refs.current.joints[idx] = el }}
+            key={`r-joint-${idx}`}
+            ref={(el) => { rightRefs.current.joints[idx] = el }}
             r={key === 'nose' ? 8 : 5.5}
             fill="var(--cream)"
           />
         ))}
 
-        {/* Angle pills — render last so they sit on top of bones/joints.
-            Match the screenshot reference: dark rect with cream text,
-            the angle dynamically computed each frame. */}
+        {/* Left (opponent) figure — same drawing, no pills. Slightly
+            lower opacity to suggest it's the secondary actor. */}
+        {BONES.map((_, idx) => (
+          <line
+            key={`l-bone-${idx}`}
+            ref={(el) => { leftRefs.current.bones[idx] = el }}
+            stroke="var(--cream)"
+            strokeOpacity="0.85"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+          />
+        ))}
+        <line
+          ref={(el) => { leftRefs.current.racketGrip = el }}
+          stroke="var(--cream)"
+          strokeOpacity="0.85"
+          strokeWidth="2.25"
+          strokeLinecap="round"
+        />
+        <circle
+          ref={(el) => { leftRefs.current.racketHead = el }}
+          r="7"
+          fill="var(--clay)"
+          opacity="0.95"
+        />
+        {JOINT_KEYS.map((key, idx) => (
+          <circle
+            key={`l-joint-${idx}`}
+            ref={(el) => { leftRefs.current.joints[idx] = el }}
+            r={key === 'nose' ? 8 : 5.5}
+            fill="var(--cream)"
+            opacity="0.95"
+          />
+        ))}
+
+        {/* Angle pills — right figure only. */}
         {ANGLE_PILLS.map((_, idx) => (
           <g key={`pill-${idx}`}>
             <rect
               ref={(el) => {
-                const slot = refs.current.pills[idx]
+                const slot = pillRefs.current[idx]
                 if (slot) slot.rect = el
               }}
               width={PILL_W}
@@ -720,7 +739,7 @@ export default function HeroRally({ headlineRef }: Props) {
             />
             <text
               ref={(el) => {
-                const slot = refs.current.pills[idx]
+                const slot = pillRefs.current[idx]
                 if (slot) slot.text = el
               }}
               fill="var(--cream)"
@@ -735,10 +754,9 @@ export default function HeroRally({ headlineRef }: Props) {
           </g>
         ))}
 
-        {/* Tennis ball — clay with a faint cream seam. The seam is a
-            thin arc, drawn here as a stroke-only path. */}
+        {/* Tennis ball */}
         <circle
-          ref={(el) => { refs.current.ball = el }}
+          ref={ballRef}
           r={BALL_RADIUS}
           fill="var(--clay)"
           stroke="var(--cream)"
@@ -748,18 +766,4 @@ export default function HeroRally({ headlineRef }: Props) {
       </svg>
     </div>
   )
-}
-
-function computeHeadlineLocal(
-  headline: HTMLElement,
-  container: HTMLElement,
-): { left: number; right: number; top: number; bottom: number } {
-  const h = headline.getBoundingClientRect()
-  const c = container.getBoundingClientRect()
-  return {
-    left: h.left - c.left,
-    right: h.right - c.left,
-    top: h.top - c.top,
-    bottom: h.bottom - c.top,
-  }
 }
