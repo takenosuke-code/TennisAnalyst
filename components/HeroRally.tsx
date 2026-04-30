@@ -675,9 +675,11 @@ export default function HeroRally() {
           </g>
           {/* Net top tape — cream bar across the top of the net */}
           <rect x="49.5%" y="6%" width="1%" height="2%" fill="var(--cream)" opacity="0.9" />
-          {/* Net body — translucent ink */}
-          <rect x="49.5%" y="8%" width="1%" height="86%" fill="var(--ink)" opacity="0.35" />
-          {/* Net posts */}
+          {/* Net body — translucent ink, sits between the two tapes */}
+          <rect x="49.5%" y="8%" width="1%" height="84%" fill="var(--ink)" opacity="0.35" />
+          {/* Net bottom tape — cream bar mirroring the top */}
+          <rect x="49.5%" y="92%" width="1%" height="2%" fill="var(--cream)" opacity="0.9" />
+          {/* Net posts (ink dots at the very ends, framing both tapes) */}
           <circle cx="50%" cy="6%" r="4" fill="var(--ink)" />
           <circle cx="50%" cy="94%" r="4" fill="var(--ink)" />
         </g>
