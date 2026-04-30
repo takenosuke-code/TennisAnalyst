@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { upload } from '@vercel/blob/client'
 import { useLiveCapture, type LiveSessionResult, type PoseQuality } from '@/hooks/useLiveCapture'
@@ -8,8 +8,8 @@ import { useLiveCoach } from '@/hooks/useLiveCoach'
 import { useLiveStore, type LiveStatus } from '@/store/live'
 import { usePoseStore } from '@/store'
 import { renderPose } from './PoseRenderer'
-import { getFrameAtTime } from './VideoCanvas'
-import { createStreamingLandmarkSmoother } from '@/lib/poseSmoothing'
+import { getInterpolatedFrameAtTime } from './VideoCanvas'
+import { createStreamingLandmarkSmoother, smoothFrames } from '@/lib/poseSmoothing'
 import { JOINT_GROUPS, type JointGroup } from '@/lib/jointAngles'
 import type { PoseFrame, KeypointsJson } from '@/lib/supabase'
 import {
@@ -220,6 +220,42 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   const [extractProgress, setExtractProgress] = useState<number | null>(null)
   const [extractedKeypoints, setExtractedKeypoints] = useState<KeypointsJson | null>(null)
   const [usingFallback, setUsingFallback] = useState(false)
+  // Phase C: when Modal extraction fails we pause on the review screen
+  // and offer Retry / Continue with on-device. `attempts` includes the
+  // initial automatic attempt; we cap manual retries at 2 (so attempts
+  // can reach 3 total before the Retry button hides).
+  const [extractFailure, setExtractFailure] = useState<{
+    reason: string | null
+    attempts: number
+  } | null>(null)
+  // Saved-session context held across the retry/continue choice. Without
+  // this we'd have to re-run the upload + session-create steps on retry,
+  // which would burn another Vercel Blob entry and create a duplicate row.
+  const [pendingHandoff, setPendingHandoff] = useState<{
+    sessionId: string
+    blobUrl: string
+    result: LiveSessionResult
+    saveShotType: string
+  } | null>(null)
+  const [retryInFlight, setRetryInFlight] = useState(false)
+  const MAX_EXTRACT_RETRIES = 2
+  // Phase B: smoothed copy of the server-extracted keypoints, used only
+  // for the review-screen overlay. Modal samples >2min clips at 8fps;
+  // a One Euro pass here removes per-frame jitter that becomes visible
+  // when getInterpolatedFrameAtTime synthesizes positions between those
+  // 125ms-spaced samples on 30fps playback. Live fallback frames
+  // (pendingResult.keypoints.frames) are already smoothed at stop time
+  // by useLiveCapture, so they don't get a second pass. We deliberately
+  // do NOT mutate `extractedKeypoints` itself or `extractedFrames` —
+  // those flow to /analyze and `joint_angles` would go stale because
+  // smoothFrames doesn't recompute angles. The render path
+  // (getInterpolatedFrameAtTime) recomputes angles from interpolated
+  // landmarks, so smoothed-landmark + recomputed-angle is consistent
+  // there but only there.
+  const smoothedExtractedFrames = useMemo(() => {
+    if (!extractedKeypoints?.frames || extractedKeypoints.frames.length === 0) return null
+    return smoothFrames(extractedKeypoints.frames)
+  }, [extractedKeypoints])
   // Empirical skeleton-delay knob for the review screen. Positive value =
   // delay the rendered skeleton by N ms (i.e., look up PoseFrames N ms
   // earlier than `video.currentTime`). Surfaced as +/- buttons so the
@@ -582,6 +618,46 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
   //      into keypoints_json. Hydrate the store with the LIVE frames so
   //      /analyze still works (chunkier tracers, but functional). The
   //      fallback note is surfaced inline in the review screen.
+  // Phase C: shared post-extract handoff. Hydrates usePoseStore with
+  // whichever frames we settled on (server-extracted or live fallback)
+  // and navigates to /analyze. Pulled out of runSaveFlow so the
+  // retry-after-failure path and the continue-with-fallback path land
+  // on the same final state without re-running upload + session-create.
+  const completeHandoff = useCallback((args: {
+    result: LiveSessionResult
+    sessionId: string
+    blobUrl: string
+    handoffFrames: PoseFrame[]
+    saveShotType: string
+    didFallBack: boolean
+  }) => {
+    if (args.didFallBack) {
+      setUsingFallback(true)
+    }
+    void clearOrphanedSession()
+    const objectUrl = URL.createObjectURL(args.result.blob)
+    poseSetFramesData(args.handoffFrames)
+    poseSetBlobUrl(args.blobUrl)
+    poseSetLocalVideoUrl(objectUrl)
+    poseSetSessionId(args.sessionId)
+    poseSetShotType(args.saveShotType)
+    setUploadStatus(null)
+    setExtractProgress(null)
+    setExtractFailure(null)
+    setPendingHandoff(null)
+    setStatus('complete')
+    setReviewPhase('done')
+    router.replace('/analyze')
+  }, [
+    poseSetBlobUrl,
+    poseSetFramesData,
+    poseSetLocalVideoUrl,
+    poseSetSessionId,
+    poseSetShotType,
+    router,
+    setStatus,
+  ])
+
   const runSaveFlow = useCallback(async (
     result: LiveSessionResult,
     saveShotType: string,
@@ -592,6 +668,8 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     setExtractProgress(null)
     setExtractedKeypoints(null)
     setUsingFallback(false)
+    setExtractFailure(null)
+    setPendingHandoff(null)
 
     // 1. Upload the blob.
     let blobUrl: string
@@ -717,43 +795,37 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       console.warn('sessions/live/finalize threw', err)
     }
 
-    // Success — clear any prior orphan (this session is safely persisted).
-    void clearOrphanedSession()
-
-    // Decide which frames hydrate /analyze: server-extracted if Railway
-    // succeeded; live fallback otherwise. usePoseStore is shape-agnostic
-    // — it just stores PoseFrame[].
-    const handoffFrames = extractedFrames ?? result.keypoints.frames
+    // Phase C: on extract failure we PAUSE on the review screen so the
+    // user can retry against the same uploaded blob (no re-record, no
+    // duplicate row) or accept the on-device fallback. The Phase 6
+    // contract is preserved: finalize was already called with
+    // outcome='server-failed' above, so the row is durably settled even
+    // if the user closes the tab here. Retry success doesn't need to
+    // re-finalize — extractPoseViaRailway writes keypoints_json itself
+    // when Modal returns clean data.
     if (!extractedFrames) {
+      console.info('Live save: Railway extraction unavailable, paused for retry/continue', extractFailureReason)
       setUsingFallback(true)
-      // Keep the failure reason in the error message but DON'T flip
-      // reviewPhase to 'error': the session still saved, /analyze will
-      // still open. We just want the user to know they're seeing the
-      // chunkier tracers.
-      console.info('Live save: Railway extraction unavailable, using fallback', extractFailureReason)
+      setExtractFailure({ reason: extractFailureReason, attempts: 1 })
+      setPendingHandoff({ sessionId, blobUrl, result, saveShotType })
+      setUploadStatus(null)
+      // reviewPhase stays at 'uploading' so the source pill keeps
+      // rendering its diagnostic states; the retry/continue UI inside
+      // the review screen reads extractFailure to decide what to show.
+      return
     }
 
-    // Hydrate usePoseStore so /analyze picks this session up identically to
-    // an uploaded clip.
-    const objectUrl = URL.createObjectURL(result.blob)
-    poseSetFramesData(handoffFrames)
-    poseSetBlobUrl(blobUrl)
-    poseSetLocalVideoUrl(objectUrl)
-    poseSetSessionId(sessionId)
-    poseSetShotType(saveShotType)
-
-    setUploadStatus(null)
-    setExtractProgress(null)
-    setStatus('complete')
-    setReviewPhase('done')
-    router.replace('/analyze')
+    // Happy path — extract succeeded, hand off to /analyze.
+    completeHandoff({
+      result,
+      sessionId,
+      blobUrl,
+      handoffFrames: extractedFrames,
+      saveShotType,
+      didFallBack: false,
+    })
   }, [
-    poseSetBlobUrl,
-    poseSetFramesData,
-    poseSetLocalVideoUrl,
-    poseSetSessionId,
-    poseSetShotType,
-    router,
+    completeHandoff,
     setErrorMessage,
     setStatus,
     transcript,
@@ -810,8 +882,8 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     if (!ctx) return
 
     const frames =
-      extractedKeypoints?.frames && extractedKeypoints.frames.length > 0
-        ? extractedKeypoints.frames
+      smoothedExtractedFrames && smoothedExtractedFrames.length > 0
+        ? smoothedExtractedFrames
         : pendingResult.keypoints.frames
     if (frames.length === 0) return
 
@@ -843,7 +915,10 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
       // timestamps and the recorded blob's PTS axis without us having
       // to identify the exact cause first.
       const lookupTimeSec = video.currentTime - skeletonDelayMs / 1000
-      const frame = getFrameAtTime(frames, lookupTimeSec)
+      // Phase B: interpolate between bracketing samples so an 8fps server
+      // keypoint stream (Modal's adaptive sampling for >2min clips) flows
+      // smoothly across 30fps playback instead of snapping every ~125ms.
+      const frame = getInterpolatedFrameAtTime(frames, lookupTimeSec)
       if (frame && logicalW > 0 && logicalH > 0) {
         renderPose(ctx, frame, logicalW, logicalH, {
           visible: ALL_JOINT_GROUPS_VISIBLE,
@@ -884,7 +959,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
         try { video.cancelVideoFrameCallback(rvfcHandle) } catch { /* ignore */ }
       }
     }
-  }, [pendingResult, reviewPhase, reviewVideoUrl, extractedKeypoints, skeletonDelayMs])
+  }, [pendingResult, reviewPhase, reviewVideoUrl, smoothedExtractedFrames, skeletonDelayMs])
 
   // Aggregate session-quality summary used for the review-screen pill.
   // Computed once per pendingResult — averages the keypoint visibility
@@ -967,6 +1042,9 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     setExtractProgress(null)
     setExtractedKeypoints(null)
     setUsingFallback(false)
+    setExtractFailure(null)
+    setPendingHandoff(null)
+    setRetryInFlight(false)
     swingCountRef.current = 0
     setSwingCount(0)
   }, [setErrorMessage, setStatus, setSwingCount])
@@ -982,6 +1060,68 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
     setErrorMessage(null)
     await runSaveFlow(pendingResult, shotType)
   }, [pendingResult, runSaveFlow, setErrorMessage, shotType])
+
+  // Phase C: re-run JUST the Modal extraction step against the already-
+  // uploaded blob and existing session row. Unlike handleRetrySave, this
+  // does not re-upload, does not create a duplicate row, and does not
+  // call finalize (the row is already finalized as 'server-failed';
+  // a successful retry will overwrite keypoints_json via Railway's
+  // own write path). Capped at MAX_EXTRACT_RETRIES additional attempts.
+  const handleExtractRetry = useCallback(async () => {
+    if (!pendingHandoff || !extractFailure) return
+    if (extractFailure.attempts > MAX_EXTRACT_RETRIES) return
+    setRetryInFlight(true)
+    setUploadStatus('Retrying server analysis…')
+    setExtractProgress(25)
+    try {
+      const extractResult = await extractPoseViaRailway({
+        sessionId: pendingHandoff.sessionId,
+        blobUrl: pendingHandoff.blobUrl,
+        onProgress: (pct) => setExtractProgress(pct),
+      })
+      setExtractedKeypoints({
+        ...pendingHandoff.result.keypoints,
+        frames: extractResult.frames,
+        fps_sampled: extractResult.fps,
+      })
+      setUsingFallback(false)
+      setRetryInFlight(false)
+      // Hand off with the freshly extracted server frames.
+      completeHandoff({
+        result: pendingHandoff.result,
+        sessionId: pendingHandoff.sessionId,
+        blobUrl: pendingHandoff.blobUrl,
+        handoffFrames: extractResult.frames,
+        saveShotType: pendingHandoff.saveShotType,
+        didFallBack: false,
+      })
+    } catch (err) {
+      const reason = err instanceof RailwayExtractError ? err.reason : 'unknown'
+      setExtractFailure({
+        reason,
+        attempts: extractFailure.attempts + 1,
+      })
+      setExtractProgress(null)
+      setUploadStatus(null)
+      setRetryInFlight(false)
+    }
+  }, [
+    completeHandoff,
+    extractFailure,
+    pendingHandoff,
+  ])
+
+  const handleContinueWithFallback = useCallback(() => {
+    if (!pendingHandoff) return
+    completeHandoff({
+      result: pendingHandoff.result,
+      sessionId: pendingHandoff.sessionId,
+      blobUrl: pendingHandoff.blobUrl,
+      handoffFrames: pendingHandoff.result.keypoints.frames,
+      saveShotType: pendingHandoff.saveShotType,
+      didFallBack: true,
+    })
+  }, [completeHandoff, pendingHandoff])
 
   const handleResumeOrphan = useCallback(async () => {
     if (!orphan) return
@@ -1347,31 +1487,50 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
                 </div>
               ) : null}
               {/*
-                Diagnostic source pill — tells the user (and us) which
-                keypoint source is rendering right now. Three states:
-                  Server  → extractedKeypoints landed, Phase 6 happy path
-                  Live    → fallback path or Railway not yet finished
-                  Loading → uploading/extracting in flight, nothing yet
-                Includes pose_backend + frame count + fps so we can spot
-                whether the row was extracted on Modal vs Railway CPU,
-                and whether the source has the expected frame density.
+                Phase C: source pill widened to four explicit states so
+                the user knows (a) whether server analysis succeeded,
+                (b) whether they're seeing the chunkier on-device fallback,
+                (c) whether a retry is in progress, and (d) whether
+                extraction has failed terminally and needs their input.
+                  complete    → extractedKeypoints landed (happy path)
+                  in-progress → extracting / retrying, nothing yet
+                  unavailable → extractFailure latched, awaiting retry/continue
+                  live        → fallback path post-continue
+                Detail line keeps the diagnostic suffix (frames, fps,
+                backend) so we don't lose the existing observability.
               */}
               {(() => {
                 const isServer =
                   extractedKeypoints?.frames && extractedKeypoints.frames.length > 0
                 const liveFrames = pendingResult?.keypoints?.frames?.length ?? 0
                 const serverFrames = extractedKeypoints?.frames?.length ?? 0
-                const inFlight = reviewPhase === 'uploading' && !isServer && !usingFallback
-                const label = inFlight
-                  ? 'Loading server keypoints…'
-                  : isServer
-                    ? 'Server keypoints'
-                    : 'Live keypoints'
-                const dotClass = inFlight
-                  ? 'bg-sky-400'
-                  : isServer
+                const inFlight =
+                  retryInFlight ||
+                  (reviewPhase === 'uploading' && !isServer && !usingFallback && !extractFailure)
+                const failed = extractFailure != null && !isServer && !inFlight
+                const sourceState: 'complete' | 'in-progress' | 'unavailable' | 'live' = isServer
+                  ? 'complete'
+                  : inFlight
+                    ? 'in-progress'
+                    : failed
+                      ? 'unavailable'
+                      : 'live'
+                const label =
+                  sourceState === 'complete'
+                    ? 'Server analysis: complete'
+                    : sourceState === 'in-progress'
+                      ? 'Server analysis: in progress…'
+                      : sourceState === 'unavailable'
+                        ? 'Server analysis: unavailable'
+                        : 'On-device tracking'
+                const dotClass =
+                  sourceState === 'complete'
                     ? 'bg-emerald-400'
-                    : 'bg-amber-400'
+                    : sourceState === 'in-progress'
+                      ? 'bg-sky-400'
+                      : sourceState === 'unavailable'
+                        ? 'bg-red-400'
+                        : 'bg-amber-400'
                 const fps =
                   (isServer ? extractedKeypoints?.fps_sampled : pendingResult?.keypoints?.fps_sampled) ?? null
                 const backendField = (extractedKeypoints as { pose_backend?: string } | null)
@@ -1382,7 +1541,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
                 return (
                   <div
                     data-testid="keypoints-source-pill"
-                    data-source={isServer ? 'server' : inFlight ? 'loading' : 'live'}
+                    data-source={sourceState}
                     className="absolute top-3 right-3 inline-flex items-center gap-1.5 rounded-full bg-black/60 backdrop-blur px-2.5 py-1 text-[11px] text-white/80"
                   >
                     <span aria-hidden className={`inline-block w-1.5 h-1.5 rounded-full ${dotClass}`} />
@@ -1476,6 +1635,42 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
                 Re-record
               </button>
             </div>
+          ) : extractFailure && !retryInFlight ? (
+            // Phase C — Modal extraction has failed and we paused on the
+            // review screen. Surface Retry and Continue with on-device.
+            // Retry attempts are capped at MAX_EXTRACT_RETRIES; once
+            // exhausted, only Continue is offered.
+            <div data-testid="extract-failure" className="space-y-3">
+              <p className="text-red-200 text-sm">
+                Server analysis didn't complete
+                {extractFailure.reason && extractFailure.reason !== 'unknown'
+                  ? ` (${extractFailure.reason})`
+                  : ''}
+                . You can retry, or continue with on-device tracking and
+                see the chunkier skeleton.
+              </p>
+              <div className="flex gap-3">
+                {extractFailure.attempts <= MAX_EXTRACT_RETRIES ? (
+                  <button
+                    onClick={handleExtractRetry}
+                    data-testid="extract-retry-button"
+                    className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl px-4 py-3 transition-all"
+                  >
+                    Retry server analysis
+                    {extractFailure.attempts > 1
+                      ? ` (${MAX_EXTRACT_RETRIES + 1 - extractFailure.attempts} left)`
+                      : ''}
+                  </button>
+                ) : null}
+                <button
+                  onClick={handleContinueWithFallback}
+                  data-testid="extract-continue-button"
+                  className="flex-1 bg-white/10 hover:bg-white/20 text-white font-medium rounded-xl px-4 py-3 transition-all"
+                >
+                  Continue with on-device
+                </button>
+              </div>
+            </div>
           ) : (
             // Phase 6 — Extracting… progress bar replaces the action
             // buttons during the uploading/extracting window. The bar
@@ -1486,7 +1681,9 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
             // a visible-but-non-shouty indicator that the extract step
             // never started.
             <div data-testid="extract-progress" className="space-y-2">
-              <p className="text-white/80 text-sm">Extracting…</p>
+              <p className="text-white/80 text-sm">
+                {retryInFlight ? 'Retrying server analysis…' : 'Extracting…'}
+              </p>
               <div
                 data-testid="extract-progress-bar"
                 role="progressbar"

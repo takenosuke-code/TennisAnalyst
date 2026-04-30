@@ -1,8 +1,9 @@
 'use client'
 
 import { useRef, useEffect, useCallback, useState } from 'react'
-import type { PoseFrame } from '@/lib/supabase'
+import type { PoseFrame, Landmark } from '@/lib/supabase'
 import type { JointGroup } from '@/lib/jointAngles'
+import { computeJointAngles } from '@/lib/jointAngles'
 import { renderPose, renderAngleLabels, normalizeLandmarks } from './PoseRenderer'
 import { SwingPathTracer } from './SwingPathTracer'
 
@@ -29,6 +30,79 @@ export function getFrameAtTime(frames: PoseFrame[], timeSec: number): PoseFrame 
       const dPrev = timeMs - prev.timestamp_ms
       const dNext = next.timestamp_ms - timeMs
       return dPrev <= dNext ? prev : next
+    }
+  }
+  return last
+}
+
+// Linear-interpolated lookup for the live review screen, where server
+// keypoints arrive at 8fps (Modal's adaptive sampling for >2min clips)
+// against a 30fps recorded video. Nearest-neighbor on that pairing
+// snaps the skeleton every ~125ms; this synthesizes positions between
+// bracketing samples so the overlay flows.
+//
+// /analyze still uses getFrameAtTime — its keypoints are typically at
+// the source FPS and snap-free, and an earlier interpolation experiment
+// there reintroduced a "skeleton ahead of body" artifact tied to a
+// separate predictive racket bug. Keep the two paths separate.
+//
+// Visibility is carried from the *nearer* frame rather than averaged —
+// confidence shouldn't be smeared. Joint angles are recomputed from the
+// interpolated landmarks rather than blended numerically (interpolating
+// angles directly mishandles the wrap at 0/360).
+export function getInterpolatedFrameAtTime(
+  frames: PoseFrame[],
+  timeSec: number,
+): PoseFrame | null {
+  if (!frames.length) return null
+  const timeMs = timeSec * 1000
+  if (timeMs <= frames[0].timestamp_ms) return frames[0]
+  const last = frames[frames.length - 1]
+  if (timeMs >= last.timestamp_ms) return last
+  for (let i = 1; i < frames.length; i++) {
+    if (frames[i].timestamp_ms > timeMs) {
+      const prev = frames[i - 1]
+      const next = frames[i]
+      const span = next.timestamp_ms - prev.timestamp_ms
+      // Identical timestamps would zero the denominator. The post-clamp
+      // path above already handles times at-or-past either bound, so
+      // span === 0 here is only possible with degenerate input — fall
+      // back to the earlier sample.
+      if (span <= 0) return prev
+      const t = (timeMs - prev.timestamp_ms) / span
+      const nearer = t < 0.5 ? prev : next
+      const lerped: Landmark[] = []
+      // Iterate the nearer frame's landmark list so we keep a stable id
+      // ordering. If prev/next disagree on landmark count (shouldn't
+      // happen with our 33-entry BlazePose output, but defensive),
+      // missing entries fall through to the nearer frame's value.
+      const a = prev.landmarks
+      const b = next.landmarks
+      for (let j = 0; j < nearer.landmarks.length; j++) {
+        const la = a[j]
+        const lb = b[j]
+        if (!la || !lb) {
+          lerped.push(nearer.landmarks[j])
+          continue
+        }
+        lerped.push({
+          id: la.id,
+          name: la.name,
+          x: la.x + (lb.x - la.x) * t,
+          y: la.y + (lb.y - la.y) * t,
+          z: la.z + (lb.z - la.z) * t,
+          visibility: nearer.landmarks[j].visibility,
+        })
+      }
+      return {
+        frame_index: nearer.frame_index,
+        timestamp_ms: timeMs,
+        landmarks: lerped,
+        joint_angles: computeJointAngles(lerped),
+        // racket_head, when present, is sample-aligned with the nearer
+        // frame (we don't synthesize racket positions between samples).
+        ...(nearer.racket_head ? { racket_head: nearer.racket_head } : {}),
+      }
     }
   }
   return last

@@ -473,4 +473,74 @@ describe('LiveCapturePanel — post-stop review flow', () => {
       expect(v).toBeGreaterThanOrEqual(25)
     }, { timeout: 4000 })
   })
+
+  // Phase C — on Modal extraction failure, the review screen pauses
+  // with Retry / Continue buttons instead of silently navigating to
+  // /analyze with the fallback. The first-attempt failure path keeps
+  // the existing finalize-as-server-failed contract from Phase 6.
+  it('Phase C: Modal failure -> pauses with retry + continue buttons; pill says "unavailable"', async () => {
+    await simulateStop(makeLiveResult(2))
+    uploadMock.mockResolvedValueOnce({
+      url: 'https://blob.test.public.blob.vercel-storage.com/live/x.webm',
+    })
+    const { fetchMock, calls } = makeFetchMock({ extractStatus: 'error' })
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    })
+
+    // Wait for finalize so we know the failure path completed.
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith('/api/sessions/live/finalize'))).toBe(true)
+    }, { timeout: 4000 })
+
+    // Retry + Continue buttons are visible; the legacy progress bar is gone.
+    await waitFor(() => {
+      expect(screen.getByTestId('extract-failure')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId('extract-retry-button')).toBeInTheDocument()
+    expect(screen.getByTestId('extract-continue-button')).toBeInTheDocument()
+    expect(screen.queryByTestId('extract-progress-bar')).not.toBeInTheDocument()
+
+    // Source pill reports the unavailable state.
+    const pill = screen.getByTestId('keypoints-source-pill')
+    expect(pill.getAttribute('data-source')).toBe('unavailable')
+  })
+
+  it('Phase C: Continue with on-device hands off live keypoints + clears the orphan', async () => {
+    await simulateStop(makeLiveResult(2))
+    uploadMock.mockResolvedValueOnce({
+      url: 'https://blob.test.public.blob.vercel-storage.com/live/x.webm',
+    })
+    const { fetchMock, calls } = makeFetchMock({ extractStatus: 'error' })
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    })
+
+    // Wait for finalize so the failure path has completed and the
+    // retry/continue UI has rendered.
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith('/api/sessions/live/finalize'))).toBe(true)
+    }, { timeout: 4000 })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('extract-continue-button')).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('extract-continue-button'))
+    })
+
+    // Continue triggers the handoff: orphan is cleared, fallback flag is set.
+    await waitFor(() => {
+      expect(clearOrphanMock).toHaveBeenCalled()
+    }, { timeout: 2000 })
+    const review = screen.queryByTestId('review-screen')
+    if (review) {
+      expect(review.getAttribute('data-using-fallback')).toBe('true')
+    }
+  })
 })
