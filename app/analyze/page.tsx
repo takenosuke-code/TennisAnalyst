@@ -340,11 +340,11 @@ export default function AnalyzePage() {
   return (
     <div className="max-w-7xl mx-auto px-5 sm:px-8 py-12">
       <div className="mb-10">
-        <p className="text-[11px] uppercase tracking-[0.18em] text-cream/55 mb-3">Analyze</p>
-        <h1 className="font-display font-extrabold text-cream/90 text-4xl sm:text-5xl leading-[1.05] tracking-tight mb-3">
+        <p className="text-[11px] uppercase tracking-[0.18em] text-cream/60 mb-3">Analyze</p>
+        <h1 className="font-display font-extrabold text-cream text-4xl sm:text-5xl leading-[1.05] tracking-tight mb-3">
           Analyze Your Swing.
         </h1>
-        <p className="text-cream/65 text-sm sm:text-base max-w-xl leading-relaxed">
+        <p className="text-cream/70 text-sm sm:text-base max-w-xl leading-relaxed">
           Upload A Video To Extract Pose Landmarks And Get AI Coaching Feedback.
         </p>
       </div>

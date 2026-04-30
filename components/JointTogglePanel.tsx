@@ -41,14 +41,14 @@ export default function JointTogglePanel() {
   }
 
   return (
-    <div className="rounded-xl bg-cream/[0.06] border border-cream/15 p-4 space-y-3">
+    <div className="rounded-xl bg-white/5 border border-white/10 p-4 space-y-3">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-cream/90">Joint Visibility</h3>
+        <h3 className="text-sm font-semibold text-white">Joint Visibility</h3>
         <div className="flex items-center gap-2">
           {shotConfig && (
             <button
               onClick={handleShotFocus}
-              className="text-xs text-emerald-300/90 hover:text-emerald-200 transition-colors"
+              className="text-xs text-emerald-400 hover:text-emerald-300 transition-colors"
               title={`Show joints most relevant for ${shotConfig.label}`}
             >
               {shotConfig.label} focus
@@ -56,7 +56,7 @@ export default function JointTogglePanel() {
           )}
           <button
             onClick={() => setAllVisible(!allOn)}
-            className="text-xs text-cream/55 hover:text-cream/90 transition-colors"
+            className="text-xs text-white/50 hover:text-white transition-colors"
           >
             {allOn ? 'Hide all' : 'Show all'}
           </button>
@@ -70,13 +70,13 @@ export default function JointTogglePanel() {
             onClick={() => toggleJoint(group)}
             className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-all ${
               visible[group]
-                ? 'border-cream/25 bg-cream/10 text-cream/90'
-                : 'border-cream/10 bg-cream/0 text-cream/35'
+                ? 'border-white/20 bg-white/10 text-white'
+                : 'border-white/5 bg-white/0 text-white/30'
             }`}
           >
             <span
               className={`w-3 h-3 rounded-full flex-shrink-0 ${color} ${
-                visible[group] ? 'opacity-90' : 'opacity-20'
+                visible[group] ? 'opacity-100' : 'opacity-20'
               }`}
             />
             {label}
@@ -84,16 +84,16 @@ export default function JointTogglePanel() {
         ))}
       </div>
 
-      <div className="border-t border-cream/15 pt-3 space-y-2">
+      <div className="border-t border-white/10 pt-3 space-y-2">
         <button
           onClick={toggleSkeleton}
           className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-all ${
             showSkeleton
-              ? 'border-cream/25 bg-cream/10 text-cream/90'
-              : 'border-cream/10 bg-cream/0 text-cream/35'
+              ? 'border-white/20 bg-white/10 text-white'
+              : 'border-white/5 bg-white/0 text-white/30'
           }`}
         >
-          <span className="w-3 h-3 rounded-sm bg-cream/55 flex-shrink-0" />
+          <span className="w-3 h-3 rounded-sm bg-white/60 flex-shrink-0" />
           Skeleton Lines
         </button>
 
@@ -101,11 +101,11 @@ export default function JointTogglePanel() {
           onClick={toggleAngles}
           className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-all ${
             showAngles
-              ? 'border-cream/25 bg-cream/10 text-cream/90'
-              : 'border-cream/10 bg-cream/0 text-cream/35'
+              ? 'border-white/20 bg-white/10 text-white'
+              : 'border-white/5 bg-white/0 text-white/30'
           }`}
         >
-          <span className="w-3 h-3 rounded-sm bg-emerald-300/85 flex-shrink-0" />
+          <span className="w-3 h-3 rounded-sm bg-emerald-400 flex-shrink-0" />
           Joint Angles
         </button>
       </div>
