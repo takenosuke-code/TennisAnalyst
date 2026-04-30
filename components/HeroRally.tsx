@@ -134,14 +134,15 @@ const FIGURE_Y_TRACK_AMPLITUDE_PX = 70
 const BALL_RADIUS = 7
 const BALL_SPEED = 540
 
-// SWING_MS bumped from 700 -> 1100 per the perceptual research:
-// real pro forehands are 1.0-1.5s broadcast; 700ms read as twitchy.
-// 1100ms sits in the editorial-sport-hero band (slowed but not slow-mo).
-const SWING_MS = 1100
+// SWING_MS = 1600. Real pro forehands run 1.0-1.5s broadcast; this
+// is ~0.6x speed, so the swing reads as a deliberate replica of the
+// real motion rather than a slow-mo demo or a twitchy hero loop.
+// User feedback iteration: 700 -> 1100 -> 1600.
+const SWING_MS = 1600
 const RACKET_HIT_RADIUS = 50
 // At smootherstep5, solving `6u⁵ - 15u⁴ + 10u³ = 0.65` gives u ≈ 0.582,
-// so contact lands 0.582 * 1100 ≈ 640 ms after the swing fires.
-const SWING_TO_CONTACT_MS = 640
+// so contact lands 0.582 * 1600 ≈ 931 ms after the swing fires.
+const SWING_TO_CONTACT_MS = 931
 const SWING_CONTACT_PHASE = 0.65
 const RACKET_CONTACT_NORM_X = 0.326
 const RACKET_CONTACT_NORM_Y = 0.508
