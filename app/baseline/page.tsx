@@ -28,54 +28,63 @@ export default function BaselinePage() {
   }, [baselines])
 
   return (
-    <div className="max-w-3xl mx-auto px-4 py-8">
-      <div className="mb-8 flex items-start justify-between gap-4">
+    <div className="max-w-4xl mx-auto px-5 sm:px-8 py-12">
+      <div className="mb-10 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-black text-white mb-2">Your Baselines</h1>
-          <p className="text-white/50">
-            Your best-day swings, saved for long-term comparison. Upload a new swing and
-            we&apos;ll show you what&apos;s improved.
+          <p className="text-[11px] uppercase tracking-[0.18em] text-cream/60 mb-3">your baselines</p>
+          <h1 className="font-display font-extrabold text-cream text-4xl sm:text-5xl leading-[1.05] tracking-tight mb-4">
+            best-day swings,<br />saved for later.
+          </h1>
+          <p className="text-cream/70 max-w-xl text-sm sm:text-base leading-relaxed">
+            Upload a new swing and we&apos;ll show you what improved against the baseline you pinned.
           </p>
         </div>
         <Link
           href="/baseline/compare"
-          className="shrink-0 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-white font-semibold text-sm transition-colors"
+          className="shrink-0 px-5 py-2.5 rounded-full bg-clay hover:bg-[#c4633f] text-cream font-semibold text-sm tracking-wide transition-colors"
         >
-          Compare new swing
+          compare new swing
         </Link>
       </div>
 
       {error && (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 mb-6">
-          <p className="text-red-300 text-sm">{error}</p>
+        <div className="bg-cream p-4 mb-6 border-l-4 border-clay">
+          <p className="text-ink text-sm">{error}</p>
         </div>
       )}
 
       {loading && baselines.length === 0 && (
-        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-8 text-center">
-          <p className="text-white/50 text-sm">Loading baselines...</p>
+        <div className="bg-cream/10 p-8 text-center">
+          <p className="text-cream/60 text-sm">Loading baselines...</p>
         </div>
       )}
 
       {!loading && baselines.length === 0 && !error && (
-        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-12 text-center">
-          <div className="text-5xl mb-3">🎾</div>
-          <p className="text-white font-semibold mb-2">No baselines yet</p>
-          <p className="text-white/50 text-sm mb-6">
-            Analyze a swing and mark it as your baseline to start tracking progress.
-          </p>
-          <Link
-            href="/analyze"
-            className="inline-block px-6 py-3 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl transition-colors"
-          >
-            Analyze a swing
-          </Link>
+        <div className="bg-cream text-ink">
+          <div className="h-2 bg-clay" />
+          <div className="p-12 text-center">
+            {/* Tennis ball — same SVG glyph used in Nav. Replaces the 🎾 emoji. */}
+            <svg viewBox="0 0 24 24" className="w-10 h-10 mx-auto mb-4 text-clay" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M3.5 9c4 1 8 1 12 0M3.5 16c4-1 8-1 12 0" transform="translate(2,-1)" />
+            </svg>
+            <p className="font-display font-bold text-ink text-xl mb-2">No baselines yet</p>
+            <p className="text-ink/60 text-sm mb-6 max-w-sm mx-auto">
+              Analyze a swing and mark it as your baseline to start tracking progress.
+            </p>
+            <Link
+              href="/analyze"
+              className="inline-block px-6 py-3 rounded-full bg-ink hover:bg-ink-soft text-cream font-semibold text-sm tracking-wide transition-colors"
+            >
+              analyze a swing
+            </Link>
+          </div>
         </div>
       )}
 
       {active.length > 0 && (
-        <section className="space-y-4 mb-8">
-          <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wide">Active</h2>
+        <section className="space-y-3 mb-10">
+          <h2 className="text-[11px] font-semibold text-cream/60 uppercase tracking-[0.18em]">Active</h2>
           <div className="space-y-3">
             {active.map((b) => (
               <BaselineCard
@@ -90,8 +99,8 @@ export default function BaselinePage() {
       )}
 
       {history.length > 0 && (
-        <section className="space-y-4">
-          <h2 className="text-sm font-semibold text-white/70 uppercase tracking-wide">History</h2>
+        <section className="space-y-3">
+          <h2 className="text-[11px] font-semibold text-cream/60 uppercase tracking-[0.18em]">History</h2>
           <div className="space-y-3">
             {history.map((b) => (
               <BaselineCard

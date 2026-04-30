@@ -10,6 +10,19 @@ import type { VideoSegment } from '@/lib/supabase'
 const BASELINE_SHOTS = ['forehand', 'backhand', 'serve', 'volley', 'slice'] as const
 type BaselineShot = (typeof BASELINE_SHOTS)[number]
 
+// Shot-type → stripe color mapping. Five shot types share three stripe
+// colors so the grid reads as variegated instead of stripey-rainbow.
+// Forehand/volley = clay (warm), backhand/slice = hard-court (cool),
+// serve = lavender (vertical / overhead). Kept inline so we don't reach
+// into lib/ — the brief gates lib changes.
+const SHOT_STRIPE: Record<BaselineShot, string> = {
+  forehand: 'bg-clay',
+  backhand: 'bg-hard-court',
+  serve: 'bg-lavender-2',
+  volley: 'bg-clay',
+  slice: 'bg-hard-court',
+}
+
 function isBaselineShot(v: string | undefined | null): v is BaselineShot {
   return typeof v === 'string' && (BASELINE_SHOTS as readonly string[]).includes(v)
 }
@@ -159,117 +172,124 @@ export default function SegmentCard({
   }
 
   const cardSpan = expanded ? 'sm:col-span-2 lg:col-span-2' : ''
+  const stripe = SHOT_STRIPE[overrideShot]
 
   return (
-    <div className={`rounded-xl border border-white/10 bg-white/[0.03] p-3 flex flex-col gap-3 ${cardSpan}`}>
-      <div className="rounded-lg overflow-hidden bg-black aspect-video relative">
-        <video
-          ref={videoRef}
-          src={blobUrl}
-          preload="metadata"
-          muted
-          playsInline
-          className="w-full h-full object-contain"
-        />
-        {onToggleExpand && (
+    <div className={`bg-cream text-ink flex flex-col ${cardSpan}`}>
+      {/* Shot-type-tinted top stripe — visual identity per card. Updates
+          as the user changes the override dropdown so the stripe always
+          reflects what they'd actually save. */}
+      <div className={`h-2 ${stripe}`} />
+      <div className="p-3 flex flex-col gap-3">
+        <div className="overflow-hidden bg-ink aspect-video relative">
+          <video
+            ref={videoRef}
+            src={blobUrl}
+            preload="metadata"
+            muted
+            playsInline
+            className="w-full h-full object-contain"
+          />
+          {onToggleExpand && (
+            <button
+              type="button"
+              onClick={onToggleExpand}
+              className="absolute top-2 right-2 px-2.5 py-1 rounded-full bg-cream/90 hover:bg-cream text-ink text-[11px] font-semibold tracking-wide"
+              aria-label={expanded ? 'Shrink card' : 'Enlarge card'}
+              aria-pressed={expanded}
+            >
+              {expanded ? 'shrink' : 'enlarge'}
+            </button>
+          )}
           <button
             type="button"
-            onClick={onToggleExpand}
-            className="absolute top-2 right-2 px-2 py-1 rounded bg-black/70 hover:bg-black text-white text-xs font-medium"
-            aria-label={expanded ? 'Shrink card' : 'Enlarge card'}
-            aria-pressed={expanded}
+            onClick={playSegment}
+            className="absolute bottom-2 right-2 px-2.5 py-1 rounded-full bg-ink/80 hover:bg-ink text-cream text-[11px] font-semibold tracking-wide"
           >
-            {expanded ? 'Shrink' : 'Enlarge'}
+            Play this segment
           </button>
+        </div>
+
+        <div className="flex items-center justify-between text-xs text-ink/60">
+          <span>
+            #{segment.segment_index + 1} &middot; {startSec}s to {endSec}s ({durationSec}s)
+          </span>
+          {confidencePct !== null && (
+            <span className="text-ink/50">{confidencePct}% conf</span>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label className="text-[10px] uppercase tracking-[0.16em] text-ink/50">
+            shot type
+          </label>
+          <select
+            value={overrideShot}
+            onChange={(e) => {
+              setOverrideTouched(true)
+              setOverrideShot(e.target.value as BaselineShot)
+            }}
+            className="bg-cream-soft border border-ink/15 text-ink text-sm px-2 py-1.5"
+            aria-label="Shot type override"
+          >
+            {BASELINE_SHOTS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          {needsOverrideConfirmation && (
+            <p className="text-[11px] text-clay">
+              Classified as {classifierShot} — pick a shot type to save this as a baseline.
+            </p>
+          )}
+          {overrideDiffers && (
+            <p className="text-[11px] text-clay">
+              Classified as {classifierShot}, saving as {overrideShot}
+            </p>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <label className="text-[10px] uppercase tracking-[0.16em] text-ink/50">
+            label
+          </label>
+          <input
+            value={label}
+            onChange={(e) => {
+              setLabelDirty(true)
+              setLabel(e.target.value)
+            }}
+            className="bg-cream-soft border border-ink/15 text-ink text-sm px-2 py-1.5"
+            placeholder="Label"
+            maxLength={120}
+          />
+        </div>
+
+        {errorMessage && (
+          <p className="text-xs text-clay">{errorMessage}</p>
         )}
-        <button
-          type="button"
-          onClick={playSegment}
-          className="absolute bottom-2 right-2 px-2 py-1 rounded bg-black/70 hover:bg-black text-white text-xs font-medium"
-        >
-          Play this segment
-        </button>
-      </div>
+        {saved && (
+          <p className="text-xs text-ink/70">Saved as baseline.</p>
+        )}
 
-      <div className="flex items-center justify-between text-xs text-white/60">
-        <span>
-          #{segment.segment_index + 1} &middot; {startSec}s to {endSec}s ({durationSec}s)
-        </span>
-        {confidencePct !== null && (
-          <span className="text-white/50">{confidencePct}% conf</span>
+        {signedIn ? (
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={!canSave || saving || needsOverrideConfirmation}
+            className={`px-4 py-2 rounded-full text-xs font-semibold tracking-wide transition-colors ${
+              !canSave || saving || needsOverrideConfirmation
+                ? 'bg-ink/10 text-ink/40 cursor-not-allowed'
+                : 'bg-ink text-cream hover:bg-ink-soft'
+            }`}
+          >
+            {saving ? 'Saving...' : saved ? 'Saved' : 'Save as baseline'}
+          </button>
+        ) : (
+          <p className="text-xs text-ink/55">Sign in to save this as a baseline.</p>
         )}
       </div>
-
-      <div className="flex flex-col gap-1">
-        <label className="text-[11px] uppercase tracking-wide text-white/40">
-          Shot type
-        </label>
-        <select
-          value={overrideShot}
-          onChange={(e) => {
-            setOverrideTouched(true)
-            setOverrideShot(e.target.value as BaselineShot)
-          }}
-          className="bg-white/5 border border-white/10 text-white text-sm rounded px-2 py-1"
-          aria-label="Shot type override"
-        >
-          {BASELINE_SHOTS.map((s) => (
-            <option key={s} value={s} className="bg-neutral-900">
-              {s}
-            </option>
-          ))}
-        </select>
-        {needsOverrideConfirmation && (
-          <p className="text-[11px] text-amber-300/90">
-            Classified as {classifierShot} — pick a shot type to save this as a baseline.
-          </p>
-        )}
-        {overrideDiffers && (
-          <p className="text-[11px] text-amber-300/80">
-            Classified as {classifierShot}, saving as {overrideShot}
-          </p>
-        )}
-      </div>
-
-      <div className="flex flex-col gap-1">
-        <label className="text-[11px] uppercase tracking-wide text-white/40">
-          Label
-        </label>
-        <input
-          value={label}
-          onChange={(e) => {
-            setLabelDirty(true)
-            setLabel(e.target.value)
-          }}
-          className="bg-white/5 border border-white/10 text-white text-sm rounded px-2 py-1"
-          placeholder="Label"
-          maxLength={120}
-        />
-      </div>
-
-      {errorMessage && (
-        <p className="text-xs text-red-400">{errorMessage}</p>
-      )}
-      {saved && (
-        <p className="text-xs text-emerald-300">Saved as baseline.</p>
-      )}
-
-      {signedIn ? (
-        <button
-          type="button"
-          onClick={handleSave}
-          disabled={!canSave || saving || needsOverrideConfirmation}
-          className={`px-3 py-2 rounded-lg text-sm font-semibold transition-colors ${
-            !canSave || saving || needsOverrideConfirmation
-              ? 'bg-white/10 text-white/40 cursor-not-allowed'
-              : 'bg-emerald-500 hover:bg-emerald-400 text-white'
-          }`}
-        >
-          {saving ? 'Saving...' : saved ? 'Saved' : 'Save as baseline'}
-        </button>
-      ) : (
-        <p className="text-xs text-white/50">Sign in to save this as a baseline.</p>
-      )}
     </div>
   )
 }

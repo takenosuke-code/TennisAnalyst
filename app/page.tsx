@@ -1,136 +1,221 @@
 import Link from 'next/link'
 
-const FEATURES = [
+// Tiny tennis-themed line glyphs. Single-stroke, hand-drawn feel —
+// these replace the emoji feature icons (🎯🌊👁️📌🤖📐). Kept inline
+// so we don't add an icon-library dependency and the strokes inherit
+// `currentColor` for easy theme tinting.
+function Glyph({ d, className = '' }: { d: string; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 32 32"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d={d} />
+    </svg>
+  )
+}
+
+const FEATURES: Array<{
+  title: string
+  desc: string
+  stripe: 'clay' | 'hard-court' | 'lavender'
+  glyph: string
+}> = [
   {
-    icon: '🎯',
-    title: 'Joint Tracking',
-    desc: 'MediaPipe AI marks 33 body landmarks, shoulders, elbows, wrists, knees, on every frame.',
+    title: 'Joint tracking',
+    desc: 'Pose AI marks 33 body landmarks — shoulders, elbows, wrists, knees — on every frame.',
+    stripe: 'clay',
+    // Stick figure
+    glyph:
+      'M16 6.5a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM16 10.5v8m-5-5h10m-7 5l-3 7m5-7l3 7',
   },
   {
-    icon: '🌊',
-    title: 'Swing Path Trails',
-    desc: 'See your racket-hand motion path traced in real-time as a smooth Bezier curve.',
+    title: 'Swing path trails',
+    desc: 'Watch your racket-hand motion traced in real time as a smooth Bezier curve.',
+    stripe: 'hard-court',
+    // Curve
+    glyph: 'M5 22 C 10 8, 22 8, 27 22',
   },
   {
-    icon: '👁️',
-    title: 'Toggle Any Joint',
-    desc: 'Show or hide individual joint groups to focus on what matters for your shot.',
+    title: 'Toggle any joint',
+    desc: 'Show or hide individual joint groups so you can focus on what matters for your shot.',
+    stripe: 'lavender',
+    // Eye
+    glyph:
+      'M4 16c3-6 9-9 12-9s9 3 12 9c-3 6-9 9-12 9s-9-3-12-9zM16 12.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z',
   },
   {
-    icon: '📌',
-    title: 'Save a Baseline',
-    desc: 'Mark your best-day swing as a baseline. Compare every future session against it.',
+    title: 'Save a baseline',
+    desc: 'Mark your best-day swing as the reference. Compare every future session against it.',
+    stripe: 'clay',
+    // Pin
+    glyph: 'M16 4l5 5-3 2 2 6-4 4-4-4 2-6-3-2zM12 25l4-4',
   },
   {
-    icon: '🤖',
-    title: 'AI Coaching',
+    title: 'AI coaching',
     desc: 'Claude reads your joint angles vs your best day and tells you what held up and what drifted.',
+    stripe: 'hard-court',
+    // Tennis ball with stitching
+    glyph: 'M16 4a12 12 0 1 1 0 24 12 12 0 0 1 0-24zM5 11c4 1 8 1 12 0M5 21c4-1 8-1 12 0',
   },
   {
-    icon: '📐',
-    title: 'Side by Side',
+    title: 'Side by side',
     desc: 'Synchronized video playback. Scrub both swings in lockstep at any speed.',
+    stripe: 'lavender',
+    // Two panels
+    glyph: 'M5 7h10v18H5zM17 7h10v18H17z',
   },
 ]
 
+const STRIPE_BG: Record<'clay' | 'hard-court' | 'lavender', string> = {
+  clay: 'bg-clay',
+  'hard-court': 'bg-hard-court',
+  lavender: 'bg-lavender-2',
+}
+
 export default function HomePage() {
   return (
-    <div className="min-h-screen">
-      {/* Hero */}
-      <section className="relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-emerald-900/30 via-transparent to-blue-900/20" />
-        <div className="relative max-w-5xl mx-auto px-4 pt-24 pb-20 text-center">
-          <div className="inline-flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 rounded-full px-4 py-1.5 text-emerald-400 text-sm font-medium mb-8">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            AI-powered swing analysis
-          </div>
-
-          <h1 className="text-5xl md:text-7xl font-black text-white leading-tight mb-6">
-            Beat your
-            <br />
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">
-              last swing.
-            </span>
-          </h1>
-
-          <p className="text-white/60 text-xl max-w-2xl mx-auto mb-10 leading-relaxed">
-            AI pose tracking for every swing you record. See your technique get sharper,
-            more consistent, more powerful, week over week.
-          </p>
-
-          <div className="flex flex-col sm:flex-row gap-4 justify-center">
-            <Link
-              href="/analyze"
-              className="px-8 py-4 bg-emerald-500 hover:bg-emerald-400 text-white font-bold rounded-2xl text-lg transition-all hover:scale-105 hover:shadow-lg hover:shadow-emerald-500/25"
-            >
-              Analyze My Swing
-            </Link>
-            <Link
-              href="/baseline"
-              className="px-8 py-4 bg-white/10 hover:bg-white/15 text-white font-bold rounded-2xl text-lg transition-all border border-white/10"
-            >
-              My Baselines
-            </Link>
-          </div>
-        </div>
-      </section>
-
-      {/* Feature grid */}
-      <section className="max-w-6xl mx-auto px-4 py-20">
-        <h2 className="text-3xl font-bold text-white text-center mb-12">
-          Everything you need to level up
-        </h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {FEATURES.map((f) => (
-            <div
-              key={f.title}
-              className="rounded-2xl border border-white/5 bg-white/[0.03] p-6 hover:bg-white/[0.06] transition-colors"
-            >
-              <div className="text-3xl mb-3">{f.icon}</div>
-              <h3 className="text-white font-semibold text-lg mb-2">{f.title}</h3>
-              <p className="text-white/50 text-sm leading-relaxed">{f.desc}</p>
+    <div>
+      {/* Hero — lavender wash, asymmetric 2-col on desktop, stacked on mobile.
+          Editorial headline (Manrope 800, big), pill CTA, no animate-pulse,
+          no cyan-emerald gradient text. The visual on the right is a
+          deliberately simple "court line" panel with a tennis ball glyph —
+          we don't want stock photography or an emoji. */}
+      <section className="bg-lavender-wash text-ink">
+        <div className="max-w-6xl mx-auto px-5 sm:px-8 pt-16 pb-20 lg:pt-24 lg:pb-28 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
+          <div className="lg:col-span-7">
+            <p className="text-[11px] sm:text-xs uppercase tracking-[0.18em] text-ink/70 mb-5">
+              ai pose tracking · for tennis
+            </p>
+            <h1 className="font-display font-extrabold text-ink leading-[0.95] tracking-tight text-[44px] sm:text-[64px] lg:text-[88px] mb-6">
+              beat your<br />last swing.
+            </h1>
+            <p className="text-ink/75 text-base sm:text-lg max-w-xl mb-8 leading-relaxed">
+              Drop a video. We read your joint angles, save your best day, and tell
+              you what drifted in plain English. No clipboards, no stopwatches,
+              no jargon.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <Link
+                href="/analyze"
+                className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-sm font-semibold tracking-wide transition-colors"
+              >
+                analyze my swing
+              </Link>
+              <Link
+                href="/baseline"
+                className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-cream hover:bg-cream-soft text-ink text-sm font-semibold tracking-wide transition-colors"
+              >
+                my baselines
+              </Link>
             </div>
-          ))}
+          </div>
+
+          {/* Hero visual — a cream "card" with a court diagram + ball,
+              hard corners. Renders on lg+ as the asymmetric companion to
+              the headline; hidden on mobile so the type carries the hero. */}
+          <div className="hidden lg:block lg:col-span-5">
+            <div className="relative">
+              <div className="bg-cream aspect-[4/5] w-full max-w-md ml-auto p-6 flex flex-col">
+                <div className="h-2 bg-clay -mx-6 -mt-6" />
+                <div className="flex-1 flex items-center justify-center">
+                  {/* Tennis court diagram, single-stroke. */}
+                  <svg viewBox="0 0 200 280" className="w-full h-auto text-ink" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+                    <rect x="20" y="20" width="160" height="240" />
+                    <line x1="20" y1="140" x2="180" y2="140" />
+                    <line x1="100" y1="20" x2="100" y2="140" />
+                    <rect x="50" y="80" width="100" height="60" />
+                    <rect x="50" y="140" width="100" height="60" />
+                    <line x1="100" y1="200" x2="100" y2="260" />
+                    {/* Ball */}
+                    <circle cx="135" cy="105" r="6" fill="currentColor" stroke="none" />
+                  </svg>
+                </div>
+                <div className="pt-4 border-t border-ink/10 flex items-baseline justify-between">
+                  <span className="text-[11px] uppercase tracking-[0.18em] text-ink/60">today</span>
+                  <span className="font-display font-extrabold text-2xl text-ink">+4.2°</span>
+                </div>
+                <p className="text-xs text-ink/55 mt-1">elbow extension vs. baseline</p>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
-      {/* How it works */}
-      <section className="border-t border-white/5 py-20">
-        <div className="max-w-4xl mx-auto px-4 text-center">
-          <h2 className="text-3xl font-bold text-white mb-12">How it works</h2>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-            {[
-              { n: '1', label: 'Upload', desc: 'Drop your swing video (MP4/MOV)' },
-              { n: '2', label: 'Track', desc: 'AI extracts 33 joint landmarks from every frame' },
-              { n: '3', label: 'Pin a baseline', desc: 'Mark your best swing as the reference' },
-              { n: '4', label: 'Beat it', desc: 'Upload future swings and see what changed' },
-            ].map((step) => (
-              <div key={step.n} className="flex flex-col items-center gap-3">
-                <div className="w-12 h-12 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-black text-xl">
-                  {step.n}
+      {/* Feature grid — pastel panels with a colored top stripe per card.
+          Hard corners throughout. Stripe alternates clay/hard-court/lavender. */}
+      <section className="bg-cream text-ink">
+        <div className="max-w-6xl mx-auto px-5 sm:px-8 py-20 lg:py-24">
+          <div className="mb-12 max-w-2xl">
+            <p className="text-[11px] uppercase tracking-[0.18em] text-ink/60 mb-3">what&apos;s inside</p>
+            <h2 className="font-display font-extrabold text-3xl sm:text-4xl text-ink leading-tight">
+              everything you need to level up.
+            </h2>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+            {FEATURES.map((f) => (
+              <article key={f.title} className="bg-cream-soft flex flex-col">
+                <div className={`h-2 ${STRIPE_BG[f.stripe]}`} />
+                <div className="p-6 flex flex-col gap-4 flex-1">
+                  <Glyph d={f.glyph} className="w-7 h-7 text-ink" />
+                  <h3 className="font-display font-bold text-lg text-ink">{f.title}</h3>
+                  <p className="text-sm text-ink/65 leading-relaxed">{f.desc}</p>
                 </div>
-                <h3 className="text-white font-semibold">{step.label}</h3>
-                <p className="text-white/50 text-sm">{step.desc}</p>
-              </div>
+              </article>
             ))}
           </div>
         </div>
       </section>
 
-      {/* CTA */}
-      <section className="border-t border-white/5 py-20 text-center">
-        <div className="max-w-xl mx-auto px-4">
-          <h2 className="text-3xl font-bold text-white mb-4">
-            Ready to see the difference?
+      {/* How it works — court-ink section to break the rhythm. Numbered steps
+          render on a deep panel with cream type; squared corners throughout. */}
+      <section className="bg-ink text-cream">
+        <div className="max-w-5xl mx-auto px-5 sm:px-8 py-20 lg:py-24">
+          <div className="mb-12 max-w-2xl">
+            <p className="text-[11px] uppercase tracking-[0.18em] text-cream/60 mb-3">how it works</p>
+            <h2 className="font-display font-extrabold text-3xl sm:text-4xl leading-tight">
+              four steps, one cup of coffee.
+            </h2>
+          </div>
+          <ol className="grid grid-cols-1 md:grid-cols-4 gap-5">
+            {[
+              { n: '01', label: 'upload', desc: 'Drop your swing video — MP4 or MOV.' },
+              { n: '02', label: 'track', desc: 'AI extracts 33 joint landmarks from every frame.' },
+              { n: '03', label: 'pin a baseline', desc: 'Mark your best swing as the reference.' },
+              { n: '04', label: 'beat it', desc: 'Upload future swings and see what changed.' },
+            ].map((step) => (
+              <li key={step.n} className="bg-ink-soft p-5 flex flex-col gap-3">
+                <span className="font-display font-extrabold text-clay-soft text-2xl tracking-tight">
+                  {step.n}
+                </span>
+                <span className="font-display font-bold text-cream">{step.label}</span>
+                <span className="text-sm text-cream/60 leading-relaxed">{step.desc}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </section>
+
+      {/* Closing CTA — back to the lavender wash so the page bookends. */}
+      <section className="bg-lavender-wash text-ink">
+        <div className="max-w-3xl mx-auto px-5 sm:px-8 py-20 lg:py-24 text-center">
+          <h2 className="font-display font-extrabold text-3xl sm:text-5xl leading-tight mb-4">
+            ready to see the difference?
           </h2>
-          <p className="text-white/50 mb-8">
+          <p className="text-ink/70 text-base sm:text-lg mb-8">
             No sign-up required. Upload your video and get instant feedback.
           </p>
           <Link
             href="/analyze"
-            className="inline-block px-8 py-4 bg-emerald-500 hover:bg-emerald-400 text-white font-bold rounded-2xl text-lg transition-all hover:scale-105"
+            className="inline-flex items-center justify-center px-8 py-4 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-sm font-semibold tracking-wide transition-colors"
           >
-            Start Analyzing Free
+            start analyzing free
           </Link>
         </div>
       </section>

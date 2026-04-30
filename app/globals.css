@@ -1,15 +1,108 @@
 @import "tailwindcss";
 
+/*
+ * Tennis-themed palette. Five named tokens — these replace the old
+ * emerald/black scheme. Reach for them via CSS vars (var(--ink)) so
+ * the redesign stays grep-able and any future theme can swap one
+ * file. The Tailwind utility shortcuts below piggyback on the same
+ * tokens through the @theme block (Tailwind v4 syntax).
+ */
 :root {
-  --background: #0a0a0f;
-  --foreground: #f0f0f5;
+  /* Court ink — text + frame, near-black with a cool tilt. */
+  --ink: #171a23;
+  --ink-soft: #2a2d3a;
+
+  /* Court line — warm off-white, panel backgrounds. */
+  --cream: #f4f1ea;
+  --cream-soft: #ebe6da;
+
+  /* Lavender wash — hero gradient stops, evening sky. */
+  --lavender-1: #d6c5dc;
+  --lavender-2: #bea9c4;
+  --lavender-3: #8b7da3;
+  --lavender-4: #5d5570;
+
+  /* Pastel accents. Clay = sun-baked warmth (primary CTA family).
+     Hard-court = cool court-blue (secondary CTA family). */
+  --clay: #d97757;
+  --clay-soft: #e8a48a;
+  --hard-court: #7ba6c2;
+  --hard-court-soft: #a3c4d9;
+
+  /* App-wide background + foreground default to the lavender wash
+     with cream text — set once here, the page-level gradient lives
+     on the homepage hero. */
+  --background: var(--lavender-3);
+  --foreground: var(--cream);
+}
+
+/* Light-mode opt-in. The brief calls this out as preserved; we mirror
+   the dark tokens with light counterparts so any consumer reaching
+   for var(--background) or var(--foreground) gets something sensible
+   when [data-theme='light'] is set on <html> or a subtree. */
+[data-theme='light'] {
+  --background: var(--cream);
+  --foreground: var(--ink);
+}
+
+/* Tailwind v4 @theme — exposes the tokens as utility classes.
+   Use bg-ink / text-cream / border-clay etc. throughout the app
+   so we can grep the palette instead of hex codes. */
+@theme {
+  --color-ink: #171a23;
+  --color-ink-soft: #2a2d3a;
+  --color-cream: #f4f1ea;
+  --color-cream-soft: #ebe6da;
+  --color-lavender-1: #d6c5dc;
+  --color-lavender-2: #bea9c4;
+  --color-lavender-3: #8b7da3;
+  --color-lavender-4: #5d5570;
+  --color-clay: #d97757;
+  --color-clay-soft: #e8a48a;
+  --color-hard-court: #7ba6c2;
+  --color-hard-court-soft: #a3c4d9;
+
+  /* Editorial sans pulled in via <link> in app/layout.tsx. The display
+     weight is Manrope-800 for hero, the body uses 400/500. */
+  --font-sans:
+    'Manrope', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
+  --font-display:
+    'Manrope', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: var(--font-sans);
+  font-feature-settings: 'ss01', 'cv11';
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Hero gradient class — one source of truth. Applied to the homepage
+   hero section, can be reused on landing-style headers elsewhere. */
+.bg-lavender-wash {
+  background: linear-gradient(
+    160deg,
+    var(--lavender-1) 0%,
+    var(--lavender-2) 30%,
+    var(--lavender-3) 65%,
+    var(--lavender-4) 100%
+  );
+}
+
+/* Page background — same wash, slightly darker bias so cards on top
+   read clearly. Used as the body backdrop for dark routes. */
+.bg-app-shell {
+  background: linear-gradient(
+    180deg,
+    var(--lavender-3) 0%,
+    var(--lavender-4) 100%
+  );
+  background-attachment: fixed;
+  min-height: 100vh;
 }
 
 ::-webkit-scrollbar {
@@ -17,14 +110,14 @@ body {
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(23, 26, 35, 0.08);
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 3px;
+  background: rgba(23, 26, 35, 0.25);
+  border-radius: 0;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(23, 26, 35, 0.4);
 }
 
 input[type='range'] {

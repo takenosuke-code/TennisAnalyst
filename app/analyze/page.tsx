@@ -317,10 +317,13 @@ export default function AnalyzePage() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-black text-white mb-2">Analyze Your Swing</h1>
-        <p className="text-white/50">
+    <div className="max-w-7xl mx-auto px-5 sm:px-8 py-12">
+      <div className="mb-10">
+        <p className="text-[11px] uppercase tracking-[0.18em] text-cream/60 mb-3">analyze</p>
+        <h1 className="font-display font-extrabold text-cream text-4xl sm:text-5xl leading-[1.05] tracking-tight mb-3">
+          analyze your swing.
+        </h1>
+        <p className="text-cream/70 text-sm sm:text-base max-w-xl leading-relaxed">
           Upload a video to extract pose landmarks and get AI coaching feedback.
         </p>
       </div>
@@ -329,21 +332,24 @@ export default function AnalyzePage() {
         {/* Left: video + upload */}
         <div className="lg:col-span-2 space-y-6">
           {!done ? (
-            <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-6">
-              <h2 className="text-lg font-semibold text-white mb-4">Upload Video</h2>
-              <UploadZone onComplete={handleComplete} />
+            <div className="bg-cream text-ink">
+              <div className="h-2 bg-clay" />
+              <div className="p-6">
+                <h2 className="font-display font-bold text-lg text-ink mb-4">Upload video</h2>
+                <UploadZone onComplete={handleComplete} />
+              </div>
             </div>
           ) : (
             blobUrl && (
-              <div className="rounded-2xl border border-white/10 bg-black overflow-hidden">
-                <div className="p-3 border-b border-white/5 flex items-center justify-between">
+              <div className="bg-ink overflow-hidden">
+                <div className="p-3 border-b border-cream/10 flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-white">Your Swing</span>
+                    <span className="text-sm font-semibold text-cream">Your swing</span>
                     <BackendChip backend={extractorBackend} reason={fallbackReason} />
                   </div>
                   <button
                     onClick={() => setDone(false)}
-                    className="text-xs text-white/40 hover:text-white"
+                    className="text-xs text-cream/50 hover:text-cream"
                   >
                     Upload different video
                   </button>
@@ -423,20 +429,21 @@ export default function AnalyzePage() {
           {/* Advanced-tier players care most about drift-vs-baseline; surface the
               baseline save as the lead action and keep the coaching panel below. */}
           {done && isAdvanced && (
-            <div className="rounded-2xl border border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 to-emerald-500/[0.02] p-5">
-              <div className="flex items-start justify-between gap-4">
+            <div className="bg-cream text-ink">
+              <div className="h-2 bg-clay" />
+              <div className="p-5 flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <p className="text-white font-semibold text-base mb-1">
+                  <p className="font-display font-bold text-ink text-base mb-1">
                     Your real wins are drift-focused
                   </p>
-                  <p className="text-white/60 text-sm">
+                  <p className="text-ink/65 text-sm">
                     Save this and compare against future takes.
                   </p>
                   {baselineStatus === 'error' && baselineError && (
-                    <p className="text-red-400 text-xs mt-2">{baselineError}</p>
+                    <p className="text-clay text-xs mt-2">{baselineError}</p>
                   )}
                   {baselineStatus === 'saved' && (
-                    <p className="text-emerald-300 text-xs mt-2">
+                    <p className="text-ink/70 text-xs mt-2">
                       Saved. Future uploads will compare against this.
                     </p>
                   )}
@@ -444,14 +451,14 @@ export default function AnalyzePage() {
                 {!authLoading && !user ? (
                   <Link
                     href="/login?next=/analyze"
-                    className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
+                    className="px-4 py-2 bg-clay hover:bg-[#c4633f] text-cream text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0"
                   >
                     Sign in to save
                   </Link>
                 ) : baselineStatus === 'saved' ? (
                   <Link
                     href="/baseline/compare"
-                    className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
+                    className="px-4 py-2 bg-ink hover:bg-ink-soft text-cream text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0"
                   >
                     Compare new swing →
                   </Link>
@@ -459,10 +466,10 @@ export default function AnalyzePage() {
                   <button
                     onClick={saveAsBaseline}
                     disabled={!canSaveBaseline || baselineStatus === 'saving'}
-                    className={`px-4 py-2 text-sm font-semibold rounded-lg transition-colors flex-shrink-0 ${
+                    className={`px-4 py-2 text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0 ${
                       !canSaveBaseline || baselineStatus === 'saving'
-                        ? 'bg-white/10 text-white/40 cursor-not-allowed'
-                        : 'bg-emerald-500 hover:bg-emerald-400 text-white'
+                        ? 'bg-ink/10 text-ink/40 cursor-not-allowed'
+                        : 'bg-clay hover:bg-[#c4633f] text-cream'
                     }`}
                   >
                     {baselineStatus === 'saving' ? 'Saving...' : 'Save as baseline'}
@@ -476,9 +483,9 @@ export default function AnalyzePage() {
               button. Only rendered when an analysis is ready so it sits near
               the coaching output where the tailoring would apply. */}
           {done && showProfileHint && (
-            <p className="text-xs text-white/50">
+            <p className="text-xs text-cream/60">
               Not sure your level?{' '}
-              <Link href="/profile" className="underline hover:text-white/80">
+              <Link href="/profile" className="underline hover:text-cream">
                 Tell us for tailored advice →
               </Link>
             </p>
@@ -493,48 +500,51 @@ export default function AnalyzePage() {
               users because the drift-focused card above already wires the
               same save-as-baseline action. */}
           {done && !isAdvanced && (
-            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <p className="text-white font-medium text-sm">Is this your best day?</p>
-                <p className="text-white/50 text-xs">
-                  {!authLoading && !user
-                    ? 'Sign in to save this as a baseline and track progress across future swings.'
-                    : hasMultipleSwings && selectedSwing === null
-                      ? 'Pick a single swing above to save it as a baseline.'
-                      : baselineStatus === 'saved'
-                        ? 'Saved. Upload future swings on the baseline compare page to track progress.'
-                        : baselineStatus === 'error'
-                          ? baselineError ?? 'Failed to save baseline.'
-                          : 'Save this as a baseline and compare future swings against it.'}
-                </p>
+            <div className="bg-cream text-ink flex">
+              <div className="w-2 bg-hard-court" />
+              <div className="flex-1 p-4 flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="font-display font-bold text-ink text-sm">Is this your best day?</p>
+                  <p className="text-ink/60 text-xs mt-1 leading-relaxed">
+                    {!authLoading && !user
+                      ? 'Sign in to save this as a baseline and track progress across future swings.'
+                      : hasMultipleSwings && selectedSwing === null
+                        ? 'Pick a single swing above to save it as a baseline.'
+                        : baselineStatus === 'saved'
+                          ? 'Saved. Upload future swings on the baseline compare page to track progress.'
+                          : baselineStatus === 'error'
+                            ? baselineError ?? 'Failed to save baseline.'
+                            : 'Save this as a baseline and compare future swings against it.'}
+                  </p>
+                </div>
+                {!authLoading && !user ? (
+                  <Link
+                    href="/login?next=/analyze"
+                    className="px-4 py-2 bg-clay hover:bg-[#c4633f] text-cream text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0"
+                  >
+                    Sign in to save
+                  </Link>
+                ) : baselineStatus === 'saved' ? (
+                  <Link
+                    href="/baseline/compare"
+                    className="px-4 py-2 bg-ink hover:bg-ink-soft text-cream text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0"
+                  >
+                    Compare new swing →
+                  </Link>
+                ) : (
+                  <button
+                    onClick={saveAsBaseline}
+                    disabled={!canSaveBaseline || baselineStatus === 'saving'}
+                    className={`px-4 py-2 text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0 ${
+                      !canSaveBaseline || baselineStatus === 'saving'
+                        ? 'bg-ink/10 text-ink/40 cursor-not-allowed'
+                        : 'bg-clay hover:bg-[#c4633f] text-cream'
+                    }`}
+                  >
+                    {baselineStatus === 'saving' ? 'Saving...' : 'Set as baseline'}
+                  </button>
+                )}
               </div>
-              {!authLoading && !user ? (
-                <Link
-                  href="/login?next=/analyze"
-                  className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
-                >
-                  Sign in to save
-                </Link>
-              ) : baselineStatus === 'saved' ? (
-                <Link
-                  href="/baseline/compare"
-                  className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-white text-sm font-semibold rounded-lg transition-colors flex-shrink-0"
-                >
-                  Compare new swing →
-                </Link>
-              ) : (
-                <button
-                  onClick={saveAsBaseline}
-                  disabled={!canSaveBaseline || baselineStatus === 'saving'}
-                  className={`px-4 py-2 text-sm font-semibold rounded-lg transition-colors flex-shrink-0 ${
-                    !canSaveBaseline || baselineStatus === 'saving'
-                      ? 'bg-white/10 text-white/40 cursor-not-allowed'
-                      : 'bg-emerald-500 hover:bg-emerald-400 text-white'
-                  }`}
-                >
-                  {baselineStatus === 'saving' ? 'Saving...' : 'Set as baseline'}
-                </button>
-              )}
             </div>
           )}
 
@@ -564,44 +574,47 @@ export default function AnalyzePage() {
                 ? 0
                 : Math.round((confidentFrames / framesData.length) * 100)
             return (
-              <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-                <h3 className="text-sm font-semibold text-white mb-2">Analysis Stats</h3>
-                <div className="space-y-1.5 text-sm">
-                  <div className="flex justify-between text-white/60">
-                    <span>Frames analyzed</span>
-                    <span className="text-white font-mono">{framesData.length}</span>
+              <div className="bg-cream text-ink">
+                <div className="h-2 bg-hard-court" />
+                <div className="p-4">
+                  <h3 className="font-display font-bold text-sm text-ink mb-3">Analysis stats</h3>
+                  <div className="space-y-1.5 text-sm">
+                    <div className="flex justify-between text-ink/65">
+                      <span>Frames analyzed</span>
+                      <span className="text-ink font-mono">{framesData.length}</span>
+                    </div>
+                    <div className="flex justify-between text-ink/65">
+                      <span>Duration</span>
+                      <span className="text-ink font-mono">
+                        {((framesData[framesData.length - 1]?.timestamp_ms ?? 0) / 1000).toFixed(1)}s
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-ink/65">
+                      <span>Joint data</span>
+                      <span className="text-ink font-semibold">Ready</span>
+                    </div>
+                    <div className="flex justify-between text-ink/65">
+                      <span>Upper-body tracking</span>
+                      <span
+                        className={
+                          anglesPct >= 70
+                            ? 'text-ink font-mono'
+                            : 'text-clay font-mono'
+                        }
+                      >
+                        {anglesPct}%
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex justify-between text-white/60">
-                    <span>Duration</span>
-                    <span className="text-white font-mono">
-                      {((framesData[framesData.length - 1]?.timestamp_ms ?? 0) / 1000).toFixed(1)}s
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-white/60">
-                    <span>Joint data</span>
-                    <span className="text-emerald-400 font-medium">Ready</span>
-                  </div>
-                  <div className="flex justify-between text-white/60">
-                    <span>Upper-body tracking</span>
-                    <span
-                      className={
-                        anglesPct >= 70
-                          ? 'text-emerald-400 font-mono'
-                          : 'text-amber-400 font-mono'
-                      }
-                    >
-                      {anglesPct}%
-                    </span>
-                  </div>
+                  {anglesPct < 70 && (
+                    <p className="text-[11px] text-clay mt-3 leading-relaxed">
+                      Your upper body wasn&apos;t consistently visible in the
+                      frame. For best joint-angle analysis, film
+                      perpendicular to your baseline with your full body in
+                      view.
+                    </p>
+                  )}
                 </div>
-                {anglesPct < 70 && (
-                  <p className="text-[11px] text-amber-300/80 mt-2">
-                    Your upper body wasn&apos;t consistently visible in the
-                    frame. For best joint-angle analysis, film
-                    perpendicular to your baseline with your full body in
-                    view.
-                  </p>
-                )}
               </div>
             )
           })()}
