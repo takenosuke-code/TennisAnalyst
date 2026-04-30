@@ -300,6 +300,14 @@ def _extract_with_rtmpose(
     # running YOLO on it.
     prev_wrist_norm: tuple[float, float] | None = None
     racket_yolo_skipped = 0  # debug telemetry only
+    person_yolo_skipped = 0  # debug telemetry for the person-YOLO frame skip
+
+    # Cached frame dimensions from the most recent YOLO call. Used on
+    # coast frames (where person YOLO is skipped) so PersonTracker.update
+    # still receives a sensible (w, h) — these aren't load-bearing during
+    # coasting (the tracker just stores them) but passing 0,0 is unsafe
+    # if a future tracker change starts validating dimensions.
+    last_known_wh: tuple[int, int] | None = None
 
     # 16-frame chunks bound peak buffered memory (~16 * 1080p ≈ 100MB
     # worst case) while keeping the inference pool busy enough to
@@ -309,18 +317,34 @@ def _extract_with_rtmpose(
     # intra_op_num_threads=1 on each ORT session, 4 concurrent
     # inferences saturate the cores cleanly without scheduler thrash.
     POOL_WORKERS = 4
+    # Run person-YOLO every Nth chunk frame; the rest coast on the
+    # PersonTracker's smoothed bbox. The tracker already absorbs missed
+    # detections by holding the previous reference (see tracking.py
+    # PersonTracker.update — coast path returns the previous bbox when
+    # no candidates pass the IoU gate). On Modal T4 YOLO is ~25-40% of
+    # per-frame cost; at N=3 we run YOLO 33% of frames, saving ~17-27%
+    # wall time with no quality regression on a stable subject. K=3 also
+    # bounds the worst-case bbox drift to 3 frames, well below the
+    # PersonTracker's max_coast_frames default.
+    YOLO_DETECT_EVERY_N = 3
 
     def _process_chunk(
         chunk: list[tuple[int, int, np.ndarray]],
         pool: ThreadPoolExecutor,
     ) -> None:
         nonlocal processed_index, prev_wrist_norm, racket_yolo_skipped
+        nonlocal last_known_wh, person_yolo_skipped
 
-        # Stage 1: parallel YOLO across the chunk's frames.
-        yolo_futures = [
-            pool.submit(_yolo_person_candidates, fb)
-            for (_, _, fb) in chunk
-        ]
+        # Stage 1: parallel YOLO, but only on every Nth chunk frame.
+        # Skipped frames feed empty candidates to the PersonTracker on
+        # Stage 2 so it coasts on its previous reference bbox.
+        yolo_futures: list = []
+        for i, (_, _, fb) in enumerate(chunk):
+            if i % YOLO_DETECT_EVERY_N == 0:
+                yolo_futures.append(pool.submit(_yolo_person_candidates, fb))
+            else:
+                yolo_futures.append(None)
+                person_yolo_skipped += 1
 
         # Stage 2: sequential tracker.update in SUBMIT ORDER. The
         # tracker's IoU-association invariant requires this — frame N's
@@ -328,8 +352,26 @@ def _extract_with_rtmpose(
         # for each YOLO future in order rather than `as_completed`.
         bboxes: list = []
         for fut, (fidx, _, _) in zip(yolo_futures, chunk):
+            if fut is None:
+                # Coast frame: skip YOLO, pass empty candidates so the
+                # tracker coasts on its previous reference. Use cached
+                # frame dimensions — `last_known_wh` is set on the most
+                # recent successful YOLO result.
+                if last_known_wh is None:
+                    # Defensive: never coast before we've seen a frame.
+                    bboxes.append(None)
+                    continue
+                w, h = last_known_wh
+                try:
+                    bbox = person_tracker.update([], w, h)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[extract:rtmpose] tracker coast failed on frame {fidx}: {e}")
+                    bbox = None
+                bboxes.append(bbox)
+                continue
             try:
                 candidates, w, h = fut.result()
+                last_known_wh = (w, h)
             except Exception as e:  # noqa: BLE001
                 print(f"[extract:rtmpose] YOLO failed on frame {fidx}: {e}")
                 bboxes.append(None)

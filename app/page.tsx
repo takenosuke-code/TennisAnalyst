@@ -55,7 +55,7 @@ export default function HomePage() {
 
           <p className="text-white/60 text-xl max-w-2xl mx-auto mb-10 leading-relaxed">
             AI pose tracking for every swing you record. See your technique get sharper,
-            more consistent, more powerful — week over week.
+            more consistent, more powerful, week over week.
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center">

@@ -66,8 +66,15 @@ YOLO_INPUT_SIZE = 640  # matches racket_detector.INPUT_SIZE — both share yolo1
 # When "cuda", pose_rtmpose adds CUDAExecutionProvider to YOLO's ORT
 # providers list and passes device='cuda' to rtmlib's RTMPose so it
 # routes its inner session to GPU too.
-POSE_DEVICE = os.environ.get("POSE_DEVICE", "cpu").strip().lower()
-_USE_GPU = POSE_DEVICE in ("cuda", "gpu")
+#
+# IMPORTANT: this is read at session-build time, NOT module import time.
+# A previous regression cached the value at import (`_USE_GPU = …` at
+# module scope) which silently locked CPU when pose_rtmpose was imported
+# before the Modal handler set POSE_DEVICE=cuda — see the post-revert
+# research brief at /tmp/research-pose-speedup-v2.md. Don't reintroduce
+# that pattern.
+def _gpu_enabled() -> bool:
+    return os.environ.get("POSE_DEVICE", "cpu").strip().lower() in ("cuda", "gpu")
 
 # Bbox padding around the YOLO detection before we pass it to RTMPose.
 # RTMPose's preprocessing already adds a 1.25 padding factor on the
@@ -199,7 +206,7 @@ def _ensure_yolo() -> None:
             # available provider.
             providers = (
                 ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                if _USE_GPU
+                if _gpu_enabled()
                 else ["CPUExecutionProvider"]
             )
             sess = ort.InferenceSession(
@@ -249,7 +256,7 @@ def _ensure_rtmpose() -> None:
             # device='cpu' on Railway (no GPU); 'cuda' on Modal where
             # POSE_DEVICE=cuda is set in the function container. rtmlib
             # internally maps device='cuda' to CUDAExecutionProvider.
-            rtm_device = "cuda" if _USE_GPU else "cpu"
+            rtm_device = "cuda" if _gpu_enabled() else "cpu"
             with redirect_stdout(sys.stderr):
                 _rtm_session = RTMPose(
                     onnx_model=RTMPOSE_ONNX_URL,
@@ -276,7 +283,7 @@ def _ensure_rtmpose() -> None:
                     so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
                     rtm_providers = (
                         ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                        if _USE_GPU
+                        if _gpu_enabled()
                         else ["CPUExecutionProvider"]
                     )
                     _rtm_session.session = ort.InferenceSession(
@@ -290,6 +297,24 @@ def _ensure_rtmpose() -> None:
                 # rather than failing the whole pipeline. We just lose
                 # ~5-10% throughput, not correctness.
                 print(f"[pose_rtmpose] couldn't tune RTMPose session: {swap_err}", file=sys.stderr)
+
+            # TODO: CUDA Graph + IOBinding wrap (Action 5 from the
+            # post-revert speedup brief — /tmp/research-pose-speedup-v2.md).
+            # Per ORT docs, `enable_cuda_graph='1'` REQUIRES IOBinding —
+            # setting the flag alone fails at runtime if input/output
+            # tensor addresses change between calls. To realize the
+            # 30-50% per-call speedup safely, we'd need to:
+            #   1. Pre-allocate OrtValue.ortvalue_from_shape_and_type
+            #      ([1,3,256,192], np.float32, 'cuda', 0) for input.
+            #   2. Pre-allocate OrtValue for the SimCC output tensors.
+            #   3. Wrap rtmlib's session.run() with an IOBinding-aware
+            #      variant that copies the preprocessed crop into the
+            #      input OrtValue, runs via session.run_with_iobinding,
+            #      and reads outputs back.
+            #   4. Set provider_options=[{"enable_cuda_graph": "1"}].
+            # ~1 day of careful work; bit-exact at FP32 (pure kernel-
+            # launch fusion). Skipped this round because rtmlib
+            # internals are fragile to monkey-patch — see notes.
         except Exception as e:
             _rtm_init_error = e
             raise
