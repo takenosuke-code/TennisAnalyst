@@ -113,6 +113,51 @@ const BONES: [keyof Joints, keyof Joints][] = [
   ['right_knee', 'right_ankle'],
 ]
 
+// Per-bone taper widths in SVG units. Index matches BONES above.
+// `base` is the width at the proximal (declared-first) endpoint, `tip`
+// at the distal end — so an upper arm fattens at the shoulder and
+// tapers toward the elbow. Torso edges stay near-uniform; arm/leg
+// extremities taper most. These shape limb mass; without them every
+// bone is a uniform-width stick and the figure reads as wireframe.
+const BONE_TAPER: { base: number; tip: number }[] = [
+  { base: 4.5, tip: 4.5 }, // L_shoulder ↔ R_shoulder
+  { base: 4.5, tip: 4.5 }, // L_hip ↔ R_hip
+  { base: 5.5, tip: 5.0 }, // R_shoulder → R_hip (torso side)
+  { base: 5.5, tip: 5.0 }, // L_shoulder → L_hip (torso side)
+  { base: 4.0, tip: 3.2 }, // L upper arm
+  { base: 3.2, tip: 2.2 }, // L forearm
+  { base: 4.0, tip: 3.2 }, // R upper arm
+  { base: 3.2, tip: 2.2 }, // R forearm
+  { base: 4.5, tip: 3.6 }, // L thigh
+  { base: 3.6, tip: 2.6 }, // L shin
+  { base: 4.5, tip: 3.6 }, // R thigh
+  { base: 3.6, tip: 2.6 }, // R shin
+]
+
+// Build the SVG `points` attribute for a tapered trapezoid bone. Given
+// two pixel-space endpoints and base/tip widths, compute the four
+// corners of the quad. Used by paintFigure to push trapezoid geometry
+// into <polygon> elements each frame.
+function trapezoidPoints(
+  ax: number, ay: number, bx: number, by: number,
+  baseW: number, tipW: number,
+): string {
+  const dx = bx - ax
+  const dy = by - ay
+  const len = Math.hypot(dx, dy)
+  if (len < 0.5) return ''
+  // Unit perpendicular for offsetting the trapezoid edges.
+  const px = -dy / len
+  const py = dx / len
+  const fhw = baseW / 2
+  const thw = tipW / 2
+  const x1 = ax + px * fhw, y1 = ay + py * fhw
+  const x2 = ax - px * fhw, y2 = ay - py * fhw
+  const x3 = bx - px * thw, y3 = by - py * thw
+  const x4 = bx + px * thw, y4 = by + py * thw
+  return `${x1},${y1} ${x2},${y2} ${x3},${y3} ${x4},${y4}`
+}
+
 const JOINT_KEYS: (keyof Joints)[] = [
   'nose',
   'left_shoulder', 'right_shoulder',
@@ -372,7 +417,13 @@ function getServerReducedMotion(): boolean {
 // ---------- Per-figure rendering helpers ----------
 
 interface FigureRefs {
-  bones: (SVGLineElement | null)[]
+  // Translucent torso polygon drawn behind the bones — implies body
+  // mass so the figure reads as a person, not a wireframe.
+  silhouette: SVGPolygonElement | null
+  // Bones are filled trapezoid polygons (see BONE_TAPER) so each one
+  // can taper from base to tip. SVG <line> can't taper along its own
+  // length, so polygons are the cheap workaround.
+  bones: (SVGPolygonElement | null)[]
   joints: (SVGCircleElement | null)[]
   racketHead: SVGCircleElement | null
   racketGrip: SVGLineElement | null
@@ -395,12 +446,14 @@ export default function HeroRally() {
 
   // Two sets of figure refs — right (you) and left (opponent).
   const rightRefs = useRef<FigureRefs>({
+    silhouette: null,
     bones: [],
     joints: [],
     racketHead: null,
     racketGrip: null,
   })
   const leftRefs = useRef<FigureRefs>({
+    silhouette: null,
     bones: [],
     joints: [],
     racketHead: null,
@@ -461,15 +514,28 @@ export default function HeroRally() {
         dot.setAttribute('cx', String(x))
         dot.setAttribute('cy', String(y))
       })
+      // Torso silhouette — quad through L_shoulder → R_shoulder →
+      // R_hip → L_hip, drawn behind the bones at low alpha. Implies
+      // body mass without obscuring the underlying court color.
+      const sil = refs.silhouette
+      if (sil) {
+        const [lShx, lShy] = px.left_shoulder
+        const [rShx, rShy] = px.right_shoulder
+        const [lHipx, lHipy] = px.left_hip
+        const [rHipx, rHipy] = px.right_hip
+        sil.setAttribute(
+          'points',
+          `${lShx},${lShy} ${rShx},${rShy} ${rHipx},${rHipy} ${lHipx},${lHipy}`,
+        )
+      }
       BONES.forEach(([from, to], idx) => {
-        const line = refs.bones[idx]
-        if (!line) return
+        const poly = refs.bones[idx]
+        if (!poly) return
         const [x1, y1] = px[from]
         const [x2, y2] = px[to]
-        line.setAttribute('x1', String(x1))
-        line.setAttribute('y1', String(y1))
-        line.setAttribute('x2', String(x2))
-        line.setAttribute('y2', String(y2))
+        const taper = BONE_TAPER[idx]
+        const pts = trapezoidPoints(x1, y1, x2, y2, taper.base, taper.tip)
+        if (pts) poly.setAttribute('points', pts)
       })
       const wristPx = px.right_wrist
       const headPx = toPx(racketHead, baseX, baseY, mirrored)
@@ -802,15 +868,19 @@ export default function HeroRally() {
           <circle cx="50%" cy="94%" r="4" fill="var(--ink)" />
         </g>
 
-        {/* Right figure — bones, racket, joint dots. */}
+        {/* Right figure — silhouette, bones, racket, joint dots.
+            Silhouette renders first so it sits behind everything. */}
+        <polygon
+          ref={(el) => { rightRefs.current.silhouette = el }}
+          fill="var(--cream)"
+          fillOpacity="0.18"
+        />
         {BONES.map((_, idx) => (
-          <line
+          <polygon
             key={`r-bone-${idx}`}
             ref={(el) => { rightRefs.current.bones[idx] = el }}
-            stroke="var(--cream)"
-            strokeOpacity="0.95"
-            strokeWidth="2.5"
-            strokeLinecap="round"
+            fill="var(--cream)"
+            fillOpacity="0.95"
           />
         ))}
         <line
@@ -836,14 +906,17 @@ export default function HeroRally() {
 
         {/* Left (opponent) figure — same drawing. Slightly lower
             opacity to suggest it's the secondary actor. */}
+        <polygon
+          ref={(el) => { leftRefs.current.silhouette = el }}
+          fill="var(--cream)"
+          fillOpacity="0.16"
+        />
         {BONES.map((_, idx) => (
-          <line
+          <polygon
             key={`l-bone-${idx}`}
             ref={(el) => { leftRefs.current.bones[idx] = el }}
-            stroke="var(--cream)"
-            strokeOpacity="0.85"
-            strokeWidth="2.5"
-            strokeLinecap="round"
+            fill="var(--cream)"
+            fillOpacity="0.85"
           />
         ))}
         <line
