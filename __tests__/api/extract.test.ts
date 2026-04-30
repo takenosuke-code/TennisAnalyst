@@ -218,7 +218,7 @@ describe('POST /api/extract', () => {
       expect(headers).not.toHaveProperty('Authorization')
       expect(JSON.parse(reqInit.body as string)).toEqual({
         video_url: 'https://blob/x.mp4',
-        sample_fps: 30,
+        sample_fps: 15,
       })
     })
 
