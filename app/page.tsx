@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import HeroSwingTracer from '@/components/HeroSwingTracer'
 
 // Tiny tennis-themed line glyphs. Single-stroke, hand-drawn feel —
 // these replace the emoji feature icons (🎯🌊👁️📌🤖📐). Kept inline
@@ -125,17 +126,12 @@ export default function HomePage() {
               <div className="bg-cream aspect-[4/5] w-full max-w-md ml-auto p-6 flex flex-col">
                 <div className="h-2 bg-clay -mx-6 -mt-6" />
                 <div className="flex-1 flex items-center justify-center">
-                  {/* Tennis court diagram, single-stroke. */}
-                  <svg viewBox="0 0 200 280" className="w-full h-auto text-ink" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-                    <rect x="20" y="20" width="160" height="240" />
-                    <line x1="20" y1="140" x2="180" y2="140" />
-                    <line x1="100" y1="20" x2="100" y2="140" />
-                    <rect x="50" y="80" width="100" height="60" />
-                    <rect x="50" y="140" width="100" height="60" />
-                    <line x1="100" y1="200" x2="100" y2="260" />
-                    {/* Ball */}
-                    <circle cx="135" cy="105" r="6" fill="currentColor" stroke="none" />
-                  </svg>
+                  {/* Animated forehand-swing skeleton. Plays 3 cycles on
+                      scroll-into-view then settles on the follow-through
+                      pose. SSR + reduced-motion fallback paints the rest
+                      pose. See components/HeroSwingTracer.tsx + the four
+                      research briefs at /tmp/research-anim-*.md. */}
+                  <HeroSwingTracer />
                 </div>
                 <div className="pt-4 border-t border-ink/10 flex items-baseline justify-between">
                   <span className="text-[11px] uppercase tracking-[0.18em] text-ink/60">today</span>
