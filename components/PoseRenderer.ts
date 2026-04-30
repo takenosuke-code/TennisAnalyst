@@ -45,6 +45,97 @@ const JOINT_GROUP_COLORS: Record<JointGroup, string> = {
 // skeleton anchored through small detection dips.
 const VISIBILITY_CUTOFF = 0.5
 
+// Per-bone width multipliers, applied to the global `boneWidth` scalar.
+// `base` is the width at the proximal (declared-first) endpoint, `tip` at
+// the distal end — so an upper-arm bone (shoulder→elbow) is fatter at the
+// shoulder, a forearm (elbow→wrist) tapers further. Torso bones stay
+// uniform. Multipliers are unitless; they shape limb mass relative to
+// the size of the player in frame.
+//
+// Keys are constructed from SKELETON_CONNECTIONS' [from, to] pairs in
+// declaration order, so the proximal end is always the `from` landmark.
+const BONE_TAPER: Record<string, { base: number; tip: number }> = {
+  // Torso — uniform, slightly wider than limbs.
+  [`${LANDMARK_INDICES.LEFT_SHOULDER}-${LANDMARK_INDICES.RIGHT_SHOULDER}`]: { base: 1.5, tip: 1.5 },
+  [`${LANDMARK_INDICES.LEFT_SHOULDER}-${LANDMARK_INDICES.LEFT_HIP}`]:      { base: 1.7, tip: 1.6 },
+  [`${LANDMARK_INDICES.RIGHT_SHOULDER}-${LANDMARK_INDICES.RIGHT_HIP}`]:    { base: 1.7, tip: 1.6 },
+  [`${LANDMARK_INDICES.LEFT_HIP}-${LANDMARK_INDICES.RIGHT_HIP}`]:          { base: 1.5, tip: 1.5 },
+  // Arms — taper from torso outward.
+  [`${LANDMARK_INDICES.LEFT_SHOULDER}-${LANDMARK_INDICES.LEFT_ELBOW}`]:    { base: 1.1, tip: 0.85 },
+  [`${LANDMARK_INDICES.LEFT_ELBOW}-${LANDMARK_INDICES.LEFT_WRIST}`]:       { base: 0.85, tip: 0.55 },
+  [`${LANDMARK_INDICES.RIGHT_SHOULDER}-${LANDMARK_INDICES.RIGHT_ELBOW}`]:  { base: 1.1, tip: 0.85 },
+  [`${LANDMARK_INDICES.RIGHT_ELBOW}-${LANDMARK_INDICES.RIGHT_WRIST}`]:     { base: 0.85, tip: 0.55 },
+  // Legs — thigh fatter than shin, both taper outward.
+  [`${LANDMARK_INDICES.LEFT_HIP}-${LANDMARK_INDICES.LEFT_KNEE}`]:          { base: 1.3, tip: 1.05 },
+  [`${LANDMARK_INDICES.LEFT_KNEE}-${LANDMARK_INDICES.LEFT_ANKLE}`]:        { base: 1.05, tip: 0.75 },
+  [`${LANDMARK_INDICES.RIGHT_HIP}-${LANDMARK_INDICES.RIGHT_KNEE}`]:        { base: 1.3, tip: 1.05 },
+  [`${LANDMARK_INDICES.RIGHT_KNEE}-${LANDMARK_INDICES.RIGHT_ANKLE}`]:      { base: 1.05, tip: 0.75 },
+}
+
+// Draw one bone as a filled, tapered trapezoid plus a soft drop shadow.
+// `from` is proximal, `to` distal. `colorRgb` is parsed once by the caller
+// so we can apply alpha at both ends without re-parsing per bone. Returns
+// nothing — caller manages ctx.save/restore.
+function drawTaperedBone(
+  ctx: CanvasRenderingContext2D,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  baseW: number,
+  tipW: number,
+  colorRgb: { r: number; g: number; b: number },
+  alpha: number,
+): void {
+  const dx = to.x - from.x
+  const dy = to.y - from.y
+  const len = Math.hypot(dx, dy)
+  if (len < 0.5) return
+  // Unit perpendicular for offsetting the trapezoid edges.
+  const px = -dy / len
+  const py = dx / len
+  const fhw = baseW / 2
+  const thw = tipW / 2
+  const x1 = from.x + px * fhw, y1 = from.y + py * fhw
+  const x2 = from.x - px * fhw, y2 = from.y - py * fhw
+  const x3 = to.x   - px * thw, y3 = to.y   - py * thw
+  const x4 = to.x   + px * thw, y4 = to.y   + py * thw
+
+  // Linear gradient along the bone — full alpha at the proximal end,
+  // ~70% alpha at the distal end. Fakes form lighting (limbs fade into
+  // their joint dots) without picking a second color.
+  const grad = ctx.createLinearGradient(from.x, from.y, to.x, to.y)
+  const { r, g, b } = colorRgb
+  grad.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${alpha})`)
+  grad.addColorStop(1, `rgba(${r}, ${g}, ${b}, ${alpha * 0.7})`)
+
+  ctx.beginPath()
+  ctx.moveTo(x1, y1)
+  ctx.lineTo(x2, y2)
+  ctx.lineTo(x3, y3)
+  ctx.lineTo(x4, y4)
+  ctx.closePath()
+  ctx.fillStyle = grad
+  ctx.fill()
+}
+
+// Cheap CSS-color → {r, g, b} parser. Handles the two formats we feed in:
+// `#rrggbb` and `rgba(r, g, b, a)` / `rgb(r, g, b)`. Falls back to white
+// for anything else (e.g. exotic css var resolutions) so a parse miss
+// just means "no tint", not a render crash.
+function parseRgb(color: string): { r: number; g: number; b: number } {
+  if (color.startsWith('#') && color.length === 7) {
+    return {
+      r: parseInt(color.slice(1, 3), 16),
+      g: parseInt(color.slice(3, 5), 16),
+      b: parseInt(color.slice(5, 7), 16),
+    }
+  }
+  const m = color.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/)
+  if (m) {
+    return { r: parseInt(m[1], 10), g: parseInt(m[2], 10), b: parseInt(m[3], 10) }
+  }
+  return { r: 255, g: 255, b: 255 }
+}
+
 export function renderPose(
   ctx: CanvasRenderingContext2D,
   frame: PoseFrame,
@@ -61,24 +152,28 @@ export function renderPose(
     dominantHand = null,
   } = options
 
-  // Build a map of landmark id -> pixel coords. Low-confidence landmarks
-  // are dropped entirely so bones with an uncertain endpoint also drop out.
-  // When dominantHand is set, also drop the off-hand elbow and wrist so
-  // bones touching those endpoints (shoulder-elbow, elbow-wrist) disappear
-  // too without a separate bone filter.
+  // Build a map of landmark id -> pixel coords plus z and visibility.
+  // Z is needed to sort bones front-to-back so the far-side arm doesn't
+  // paint over the near-side torso. Visibility is used to dim bones whose
+  // endpoints the tracker is shaky on. Low-confidence landmarks are dropped
+  // entirely (consistent with the legacy behavior). When dominantHand is
+  // set, the off-hand elbow/wrist are dropped so bones touching them
+  // disappear without a separate bone filter.
   const offHandIds: number[] =
     dominantHand === 'right'
       ? [LANDMARK_INDICES.LEFT_ELBOW, LANDMARK_INDICES.LEFT_WRIST]
       : dominantHand === 'left'
         ? [LANDMARK_INDICES.RIGHT_ELBOW, LANDMARK_INDICES.RIGHT_WRIST]
         : []
-  const pixelMap = new Map<number, { x: number; y: number }>()
+  const pixelMap = new Map<number, { x: number; y: number; z: number; vis: number }>()
   for (const lm of frame.landmarks) {
     if (lm.visibility < VISIBILITY_CUTOFF) continue
     if (offHandIds.includes(lm.id)) continue
     pixelMap.set(lm.id, {
       x: lm.x * canvasWidth,
       y: lm.y * canvasHeight,
+      z: lm.z,
+      vis: lm.visibility,
     })
   }
 
@@ -97,36 +192,85 @@ export function renderPose(
   const dotCenterR = Math.max(1, 2 * playerScale)
   const boneWidth = Math.max(1.5, 3 * playerScale)
 
-  // Draw skeleton bones with halo (dark outline first, then colored stroke
-  // on top). Makes bones readable on both bright and dark backgrounds.
+  // Skeleton render. Three passes, all gated on showSkeleton:
+  //   (1) Translucent torso silhouette behind the bones — a four-point
+  //       polygon through L_shoulder → R_shoulder → R_hip → L_hip filled
+  //       at low alpha. This is the single biggest "wireframe → person"
+  //       shift; without it the bones read as data viz, with it they read
+  //       as a body being traced. Per the SOTA review (Pose Animator,
+  //       SwingVision, OnForm).
+  //   (2) Tapered bone trapezoids, sorted far-to-near by mean z so the
+  //       far arm doesn't draw over the near torso. Each bone's alpha is
+  //       multiplied by min(vis_a, vis_b) clamped to [0.4, 1.0] so the
+  //       lower-confidence side of the body recedes naturally. Drop
+  //       shadow grounds the figure on the video.
+  //   (3) Skipped here — joint dots still draw in the legacy block below.
   if (showSkeleton) {
-    ctx.save()
     const baseWidth = boneWidth
-    const strokeColor = skeletonColor ?? 'rgba(255,255,255,0.75)'
+    const strokeColor = skeletonColor ?? 'rgba(244, 241, 234, 0.95)'
+    const colorRgb = parseRgb(strokeColor)
 
+    // (1) Torso silhouette. Cream tinted, very low alpha so it implies
+    // mass without obscuring the underlying video.
+    const lSh = pixelMap.get(LANDMARK_INDICES.LEFT_SHOULDER)
+    const rSh = pixelMap.get(LANDMARK_INDICES.RIGHT_SHOULDER)
+    const lHip = pixelMap.get(LANDMARK_INDICES.LEFT_HIP)
+    const rHip = pixelMap.get(LANDMARK_INDICES.RIGHT_HIP)
+    if (lSh && rSh && lHip && rHip) {
+      ctx.save()
+      ctx.globalAlpha = 0.18 * scale
+      ctx.fillStyle = `rgb(${colorRgb.r}, ${colorRgb.g}, ${colorRgb.b})`
+      ctx.beginPath()
+      ctx.moveTo(lSh.x, lSh.y)
+      ctx.lineTo(rSh.x, rSh.y)
+      ctx.lineTo(rHip.x, rHip.y)
+      ctx.lineTo(lHip.x, lHip.y)
+      ctx.closePath()
+      ctx.fill()
+      ctx.restore()
+    }
+
+    // (2) Tapered bones, z-sorted with visibility-driven alpha.
+    type BoneDraw = {
+      from: { x: number; y: number; z: number; vis: number }
+      to:   { x: number; y: number; z: number; vis: number }
+      base: number
+      tip:  number
+      meanZ: number
+      alpha: number
+    }
+    const bones: BoneDraw[] = []
     for (const [fromId, toId] of SKELETON_CONNECTIONS) {
       const from = pixelMap.get(fromId)
       const to = pixelMap.get(toId)
       if (!from || !to) continue
+      const taper = BONE_TAPER[`${fromId}-${toId}`] ?? { base: 1.0, tip: 0.8 }
+      // Visibility gate: clamp to [0.4, 1.0] so a barely-visible joint
+      // ghosts but doesn't disappear (the existing VISIBILITY_CUTOFF=0.5
+      // already drops invisible ones). 0.4 is the floor so a bone is
+      // never quite imperceptible.
+      const conf = Math.max(0.4, Math.min(1, Math.min(from.vis, to.vis)))
+      bones.push({
+        from, to,
+        base: baseWidth * taper.base * 1.6,
+        tip:  baseWidth * taper.tip  * 1.6,
+        // BlazePose: smaller z = closer to camera. Sorting by z desc
+        // (far first) gives correct front-to-back painter ordering.
+        meanZ: (from.z + to.z) / 2,
+        alpha: 0.92 * conf * scale,
+      })
+    }
+    bones.sort((a, b) => b.meanZ - a.meanZ)
 
-      // Halo pass (darker, slightly wider, lower alpha for a clean edge)
-      ctx.globalAlpha = 0.7 * scale
-      ctx.strokeStyle = 'rgba(0,0,0,0.55)'
-      ctx.lineWidth = baseWidth + 2
-      ctx.beginPath()
-      ctx.moveTo(from.x, from.y)
-      ctx.lineTo(to.x, to.y)
-      ctx.stroke()
-
-      // Colored pass on top. Alpha bumped 0.6 → 0.85 so bones read
-      // crisply against court-surface backgrounds instead of washing out.
-      ctx.globalAlpha = 0.85 * scale
-      ctx.strokeStyle = strokeColor
-      ctx.lineWidth = baseWidth
-      ctx.beginPath()
-      ctx.moveTo(from.x, from.y)
-      ctx.lineTo(to.x, to.y)
-      ctx.stroke()
+    ctx.save()
+    // Subtle drop shadow grounds the limb on the video. shadowBlur
+    // fires for every fill that follows until reset, so we set it once.
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.55)'
+    ctx.shadowBlur = Math.max(4, 6 * playerScale)
+    ctx.shadowOffsetX = 0
+    ctx.shadowOffsetY = Math.max(1, 2 * playerScale)
+    for (const b of bones) {
+      drawTaperedBone(ctx, b.from, b.to, b.base, b.tip, colorRgb, b.alpha)
     }
     ctx.restore()
   }
