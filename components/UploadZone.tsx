@@ -1,6 +1,7 @@
 'use client'
 
 import { useRef, useState, useEffect } from 'react'
+import { upload as vercelBlobUpload } from '@vercel/blob/client'
 import { uploadVideoResumable, buildObjectPath, type UploadHandle } from '@/lib/supabaseUpload'
 import { canTranscode, shouldTranscode, sniffVideoSize, transcodeToH264_720p } from '@/lib/videoTranscode'
 import { usePoseStore } from '@/store'
@@ -15,6 +16,26 @@ import type { PoseFrame } from '@/lib/supabase'
 // upload flow keeps using in-browser MediaPipe exactly as before.
 const USE_RAILWAY_EXTRACT =
   process.env.NEXT_PUBLIC_USE_RAILWAY_EXTRACT === 'true'
+
+// Storage backend toggle. When true: tus → Supabase Storage (resumable,
+// survives tab close). When false / unset: legacy Vercel Blob multipart
+// (the path that worked before). Default OFF so a deploy without the
+// Supabase Storage migration applied (lib/db/011_videos_storage_bucket.sql)
+// doesn't 404 every upload. Flip to true once the bucket + RLS are in place.
+const USE_SUPABASE_TUS =
+  process.env.NEXT_PUBLIC_USE_SUPABASE_TUS === 'true'
+
+// Vercel Blob path mirrors the prior `safeBlobFilename` helper. Only
+// used when the tus path is gated off.
+function legacySafeBlobFilename(name: string): string {
+  return (
+    name
+      .split(/[\\/]/)
+      .pop()!
+      .replace(/[^a-zA-Z0-9._-]/g, '_')
+      .slice(0, 100) || 'upload'
+  )
+}
 
 const SHOT_TYPES = ['forehand', 'backhand', 'serve', 'volley'] as const
 
@@ -133,7 +154,9 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     if (opts.skipUpload && opts.cachedBlobUrl) {
       blobUrl = opts.cachedBlobUrl
       setBlobUrl(blobUrl)
-    } else {
+    } else if (USE_SUPABASE_TUS) {
+      // Resumable path — survives tab close, but requires the videos
+      // bucket + RLS from migration 011 to exist on Supabase.
       try {
         const objectPath = buildObjectPath(uploadFile.name)
         // Park the publicUrl in a closure since the Promise resolves
@@ -164,6 +187,28 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         setProcessing(false)
         setBusy(false)
         uploadHandleRef.current = null
+        return
+      }
+    } else {
+      // Legacy Vercel Blob path. No resumability across tabs, but
+      // unblocks testing while the Supabase Storage migration is
+      // pending. The transcode step above still runs first, so the
+      // upload is the smaller post-transcode payload either way.
+      try {
+        const blobPath = `videos/${Date.now()}-${legacySafeBlobFilename(uploadFile.name)}`
+        const blob = await vercelBlobUpload(blobPath, uploadFile, {
+          access: 'public',
+          handleUploadUrl: '/api/upload',
+          contentType: uploadFile.type,
+        })
+        blobUrl = blob.url
+        setBlobUrl(blobUrl)
+      } catch (err) {
+        console.error('[UploadZone] Vercel Blob upload failed:', err)
+        setStatusMsg('Upload failed. Please try again.')
+        setShowRetry(true)
+        setProcessing(false)
+        setBusy(false)
         return
       }
     }
