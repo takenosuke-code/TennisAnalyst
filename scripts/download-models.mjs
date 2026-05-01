@@ -40,6 +40,12 @@ import { pipeline } from 'node:stream/promises'
 import { inflateRawSync } from 'node:zlib'
 
 const MODELS_DIR = resolve('public/models')
+// Vercel persists `node_modules/` between builds, so anything we drop in
+// node_modules/.cache survives. We use that as a hop for the rtmpose
+// download — first build does the cross-Pacific fetch, subsequent
+// builds just copy the file. Keeps `next build` off the openmmlab.com
+// critical path on every deploy.
+const CACHE_DIR = resolve('node_modules/.cache/tennis-models')
 
 // Source URL for the RTMPose-m body7 256x192 ONNX. Pinned to match
 // railway-service/pose_rtmpose.py so live + analyze stay in lockstep on
@@ -261,6 +267,25 @@ async function downloadRtmpose() {
     return
   }
 
+  // Look for a copy in the persistent build cache (Vercel keeps
+  // node_modules/ between builds). If found and healthy, skip the
+  // openmmlab.com download entirely.
+  const cached = join(CACHE_DIR, 'rtmpose-m.onnx')
+  if (existsSync(cached)) {
+    try {
+      const sz = statSync(cached).size
+      if (sizeIsHealthy('rtmpose-m.onnx', sz)) {
+        copyFileSync(cached, dst)
+        console.log(
+          `[models] rtmpose-m.onnx: ${fmtSize(sz)} OK (build-cache hit)`,
+        )
+        return
+      }
+    } catch {
+      /* fall through to network download */
+    }
+  }
+
   const tmpZip = join(MODELS_DIR, 'rtmpose-m.zip.partial')
 
   console.log(`[models] rtmpose-m.onnx: downloading…`)
@@ -319,6 +344,16 @@ async function downloadRtmpose() {
     )
     return
   }
+
+  // Drop a copy in the persistent build cache so the next Vercel build
+  // skips the download. Best-effort — failures here aren't fatal.
+  try {
+    mkdirSync(CACHE_DIR, { recursive: true })
+    copyFileSync(dst, cached)
+  } catch {
+    /* ignore — we already have the file in public/models for this build */
+  }
+
   console.log(`[models] rtmpose-m.onnx: ${fmtSize(sz)} OK (downloaded + extracted)`)
 }
 
