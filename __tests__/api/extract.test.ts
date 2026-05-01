@@ -22,6 +22,36 @@ vi.mock('@/lib/supabase/server', () => ({
   }),
 }))
 
+// pose_cache hooks. Default to "miss" so all the existing tests that
+// don't set sha256 (or do but want the live extraction path) keep
+// working. Cache-specific tests below override per-call.
+const mockGetCachedPose = vi.fn<(sha: string, mv?: string) => Promise<unknown>>(
+  async () => null,
+)
+const mockSetCachedPose = vi.fn<() => Promise<void>>(async () => undefined)
+vi.mock('@/lib/poseCache', () => ({
+  getCachedPose: (sha: string, mv?: string) => mockGetCachedPose(sha, mv),
+  setCachedPose: () => mockSetCachedPose(),
+}))
+
+// supabaseAdmin mock for the cache-hit short-circuit path that writes
+// keypoints into the user_sessions row. Chain: from(...).update(...).eq(...).eq(...)
+// resolves to { error }. Default error=null so cache-hit tests can
+// rely on a successful write without per-test setup; the ownership-
+// mismatch case overrides this.
+type SessionUpdateResult = { error: { message: string } | null }
+const mockSessionEq2 = vi.fn<() => Promise<SessionUpdateResult>>(
+  async () => ({ error: null }),
+)
+const mockSessionEq1 = vi.fn(() => ({ eq: mockSessionEq2 }))
+const mockSessionUpdate = vi.fn(() => ({ eq: mockSessionEq1 }))
+vi.mock('@/lib/supabase', () => ({
+  supabase: {},
+  supabaseAdmin: {
+    from: vi.fn(() => ({ update: mockSessionUpdate })),
+  },
+}))
+
 function makeReq(body: unknown): NextRequest {
   return new NextRequest('http://localhost:3000/api/extract', {
     method: 'POST',
@@ -45,6 +75,17 @@ describe('POST /api/extract', () => {
     // Reset auth mock to signed-in default each test.
     mockGetUser.mockReset()
     mockGetUser.mockResolvedValue({ data: { user: { id: 'user-1' } } })
+    // Reset cache mocks — default to MISS so non-cache tests keep
+    // their pre-cache behavior.
+    mockGetCachedPose.mockReset()
+    mockGetCachedPose.mockResolvedValue(null)
+    mockSetCachedPose.mockReset()
+    mockSetCachedPose.mockResolvedValue(undefined)
+    // Reset session-update chain.
+    mockSessionEq2.mockReset()
+    mockSessionEq2.mockResolvedValue({ error: null })
+    mockSessionEq1.mockClear()
+    mockSessionUpdate.mockClear()
   })
 
   afterEach(() => {
@@ -146,6 +187,153 @@ describe('POST /api/extract', () => {
     expect(res.status).toBe(503)
     const body = await res.json()
     expect(body.error).toBe('railway-unreachable')
+  })
+
+  // ---------------------------------------------------------------------
+  // Phase E: SHA-256 content-hash cache (legacy/Railway path).
+  //
+  // When the client supplies a sha256 of the source bytes and the
+  // server has cached keypoints for that hash, the route writes the
+  // cached pose into the user_sessions row and short-circuits the
+  // Railway hop. The client's existing /api/sessions/[id] poll picks
+  // up status='complete' on the next tick — same contract.
+  // ---------------------------------------------------------------------
+
+  describe('content-hash cache (legacy path)', () => {
+    const VALID_SHA = 'a'.repeat(64)
+    const CACHED_POSE = {
+      fps_sampled: 30,
+      frame_count: 1,
+      frames: [
+        { frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} },
+      ],
+      schema_version: 3,
+    }
+
+    it('on cache HIT: writes keypoints into user_sessions, returns cache-hit status, skips Railway', async () => {
+      mockGetCachedPose.mockResolvedValueOnce(CACHED_POSE)
+      const mockFetch = vi.mocked(fetch)
+      const POST = await importRoute()
+      const res = await POST(
+        makeReq({
+          sessionId: 's1',
+          blobUrl: 'https://blob/x.mp4',
+          sha256: VALID_SHA,
+        }),
+      )
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.status).toBe('cache-hit')
+      expect(body.sessionId).toBe('s1')
+      // Critical: Railway must NOT be called on cache hit.
+      expect(mockFetch).not.toHaveBeenCalled()
+      // Session row updated with the cached keypoints + status=complete.
+      expect(mockSessionUpdate).toHaveBeenCalledWith({
+        status: 'complete',
+        keypoints_json: CACHED_POSE,
+      })
+    })
+
+    it('on cache MISS: forwards to Railway as usual', async () => {
+      mockGetCachedPose.mockResolvedValueOnce(null)
+      const mockFetch = vi.mocked(fetch)
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'queued' }), { status: 200 }),
+      )
+      const POST = await importRoute()
+      const res = await POST(
+        makeReq({
+          sessionId: 's1',
+          blobUrl: 'https://blob/x.mp4',
+          sha256: VALID_SHA,
+        }),
+      )
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.status).toBe('queued')
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+    })
+
+    it('without sha256 in body: skips cache lookup entirely', async () => {
+      const mockFetch = vi.mocked(fetch)
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'queued' }), { status: 200 }),
+      )
+      const POST = await importRoute()
+      const res = await POST(
+        makeReq({ sessionId: 's1', blobUrl: 'https://blob/x.mp4' }),
+      )
+      expect(res.status).toBe(200)
+      // getCachedPose must not be called when there's no hash to lookup.
+      expect(mockGetCachedPose).not.toHaveBeenCalled()
+    })
+
+    it('with malformed sha256 (wrong length): skips cache, falls through to Railway', async () => {
+      const mockFetch = vi.mocked(fetch)
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'queued' }), { status: 200 }),
+      )
+      const POST = await importRoute()
+      await POST(
+        makeReq({
+          sessionId: 's1',
+          blobUrl: 'https://blob/x.mp4',
+          sha256: 'too-short',
+        }),
+      )
+      expect(mockGetCachedPose).not.toHaveBeenCalled()
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+    })
+
+    it('cache lookup throw is non-fatal: falls through to Railway', async () => {
+      mockGetCachedPose.mockRejectedValueOnce(new Error('cache outage'))
+      const mockFetch = vi.mocked(fetch)
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'queued' }), { status: 200 }),
+      )
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const POST = await importRoute()
+        const res = await POST(
+          makeReq({
+            sessionId: 's1',
+            blobUrl: 'https://blob/x.mp4',
+            sha256: VALID_SHA,
+          }),
+        )
+        expect(res.status).toBe(200)
+        const body = await res.json()
+        expect(body.status).toBe('queued')
+      } finally {
+        errSpy.mockRestore()
+      }
+    })
+
+    it('cache hit + session update fails: still falls through to Railway (no user-facing error)', async () => {
+      mockGetCachedPose.mockResolvedValueOnce(CACHED_POSE)
+      mockSessionEq2.mockResolvedValueOnce({ error: { message: 'rls denied' } })
+      const mockFetch = vi.mocked(fetch)
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'queued' }), { status: 200 }),
+      )
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const POST = await importRoute()
+        const res = await POST(
+          makeReq({
+            sessionId: 's1',
+            blobUrl: 'https://blob/x.mp4',
+            sha256: VALID_SHA,
+          }),
+        )
+        // User still gets a queued response (Railway path took over).
+        expect(res.status).toBe(200)
+        const body = await res.json()
+        expect(body.status).toBe('queued')
+      } finally {
+        errSpy.mockRestore()
+      }
+    })
   })
 
   // ---------------------------------------------------------------------

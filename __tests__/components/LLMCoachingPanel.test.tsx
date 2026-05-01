@@ -45,13 +45,22 @@ function streamingResponse(chunks: string[], headers: Record<string, string> = {
   return new Response(body, { status: 200, headers })
 }
 
-const FIXTURE_THREE_SECTIONS = [
+const FIXTURE_FULL = [
+  '## Quick Read',
+  '- Contact stays a touch low through the strike.',
+  '- Hips fire late, costing you racket-head speed.',
+  '- Finish trims off before the shoulder line.',
+  '',
   '## Primary cue',
   'Stay low through contact and let the racket finish over your shoulder.',
   '',
   '## Other things I noticed',
   '- Your hip rotation kicked in slightly later than usual.',
   '- Front foot loaded a touch less.',
+  '',
+  '## Recommended drills',
+  '- Shadow swing ten reps focusing on the finish before your next rally.',
+  '- Mini-tennis from the service line, prioritizing rhythm over power.',
   '',
   '## Show your work',
   '- **Right elbow at contact**: 132° on baseline, 112° today (drifted 20°)',
@@ -142,12 +151,18 @@ describe('LLMCoachingPanel', () => {
     expect(screen.getByText('Re-analyze')).toBeInTheDocument()
   })
 
-  // --- Three-section parser ------------------------------------------------
+  // --- Section parser ------------------------------------------------------
 
-  it('renders all three sections from a complete fixture markdown string', () => {
-    mockAnalysisState.feedback = FIXTURE_THREE_SECTIONS
+  it('renders all five sections from a complete fixture markdown string', () => {
+    mockAnalysisState.feedback = FIXTURE_FULL
 
     render(<LLMCoachingPanel />)
+
+    // Quick Read at top
+    expect(screen.getByText('Quick Read')).toBeInTheDocument()
+    expect(
+      screen.getByText(/Contact stays a touch low through the strike/)
+    ).toBeInTheDocument()
 
     // Primary cue
     expect(screen.getByText('Primary cue')).toBeInTheDocument()
@@ -155,10 +170,17 @@ describe('LLMCoachingPanel', () => {
       screen.getByText(/Stay low through contact/)
     ).toBeInTheDocument()
 
-    // Other observations
-    expect(screen.getByText('Other things I noticed')).toBeInTheDocument()
+    // Other observations (header is rendered as title-case "Other Things I Noticed"
+    // for visual prominence per the new design).
+    expect(screen.getByText(/Other Things I Noticed/i)).toBeInTheDocument()
     expect(
       screen.getByText(/Your hip rotation kicked in slightly later/)
+    ).toBeInTheDocument()
+
+    // Recommended drills
+    expect(screen.getByText('Recommended drills')).toBeInTheDocument()
+    expect(
+      screen.getByText(/Shadow swing ten reps focusing on the finish/)
     ).toBeInTheDocument()
 
     // Show your work disclosure
@@ -171,7 +193,7 @@ describe('LLMCoachingPanel', () => {
   })
 
   it('renders bold inline markdown inside Show your work', () => {
-    mockAnalysisState.feedback = FIXTURE_THREE_SECTIONS
+    mockAnalysisState.feedback = FIXTURE_FULL
 
     render(<LLMCoachingPanel />)
 
@@ -180,14 +202,17 @@ describe('LLMCoachingPanel', () => {
     expect(strong.tagName).toBe('STRONG')
   })
 
-  it('progressive render: shows Primary cue before later sections arrive', () => {
+  it('progressive render: shows Quick Read before later sections arrive', () => {
     // Only the first section is in the buffer so far.
-    mockAnalysisState.feedback = '## Primary cue\nKeep your head still through contact.'
+    mockAnalysisState.feedback =
+      '## Quick Read\n- Keep your head still through contact.'
 
     render(<LLMCoachingPanel />)
 
-    expect(screen.getByText('Primary cue')).toBeInTheDocument()
-    expect(screen.queryByText('Other things I noticed')).not.toBeInTheDocument()
+    expect(screen.getByText('Quick Read')).toBeInTheDocument()
+    expect(screen.queryByText('Primary cue')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Other Things I Noticed/i)).not.toBeInTheDocument()
+    expect(screen.queryByText('Recommended drills')).not.toBeInTheDocument()
     expect(screen.queryByText('Show your work')).not.toBeInTheDocument()
   })
 
@@ -245,7 +270,7 @@ describe('LLMCoachingPanel', () => {
     mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
 
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-1' })
+      streamingResponse([FIXTURE_FULL], { 'X-Analysis-Event-Id': 'evt-1' })
     )
 
     render(<LLMCoachingPanel />)
@@ -261,7 +286,7 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-42' })
+      streamingResponse([FIXTURE_FULL], { 'X-Analysis-Event-Id': 'evt-42' })
     )
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
 
@@ -293,7 +318,7 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-hard' })
+      streamingResponse([FIXTURE_FULL], { 'X-Analysis-Event-Id': 'evt-hard' })
     )
     fetchMock.mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
 
@@ -320,7 +345,7 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-easy' })
+      streamingResponse([FIXTURE_FULL], { 'X-Analysis-Event-Id': 'evt-easy' })
     )
     fetchMock.mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
 
@@ -347,7 +372,7 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-ok' })
+      streamingResponse([FIXTURE_FULL], { 'X-Analysis-Event-Id': 'evt-ok' })
     )
     fetchMock.mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
 
@@ -371,7 +396,7 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-err' })
+      streamingResponse([FIXTURE_FULL], { 'X-Analysis-Event-Id': 'evt-err' })
     )
     fetchMock.mockResolvedValueOnce(new Response('nope', { status: 500 }))
 
@@ -398,7 +423,7 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-reset' })
+      streamingResponse([FIXTURE_FULL], { 'X-Analysis-Event-Id': 'evt-reset' })
     )
     fetchMock.mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
 

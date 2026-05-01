@@ -896,6 +896,17 @@ ${COACHING_EXAMPLES_BLOCK}
 ${TIER_ASSESSMENT_TRAILER}`
 }
 
+// Choose plain vs technical exemplar register for a player tier.
+//   advanced + competitive -> technical (skilled-player vocabulary)
+//   beginner + intermediate + null -> plain (beginner-friendly)
+// Lives here rather than per-route so multiple routes (analyze,
+// compare-strokes) can share one definition.
+export type Register = 'plain' | 'technical'
+export function registerForTier(tier: SkillTier | null): Register {
+  if (tier === 'advanced' || tier === 'competitive') return 'technical'
+  return 'plain'
+}
+
 // One-shot fetch of everything the coaching routes need from auth: the parsed
 // profile plus whether the user explicitly skipped onboarding. Keeps the
 // routes to a single getUser() round trip instead of calling getProfile()

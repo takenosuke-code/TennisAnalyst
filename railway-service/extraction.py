@@ -186,115 +186,408 @@ def _detect_racket_for_frame(
 # frames so the racket trail stays continuous.
 RACKET_MOTION_GATE_NORM = 0.005
 
-# Above this clip duration the cheap motion pre-pass kicks in so we
-# only pose-extract within motion windows instead of every sampled
-# frame of e.g. a 5-min match (most of which is the player walking
-# between points). Below the threshold the pre-pass overhead isn't
-# worth it.
-MOTION_PREPASS_MIN_DURATION_SEC = 90.0
+# Two-pass extraction kicks in for clips longer than this. Below the
+# threshold the pass-1 overhead isn't worth it — short clips just run
+# the heavy single-pass path directly. 30s matches the lib/poseExtraction
+# adaptive-sampling first-tier boundary, so the boundary is consistent
+# across browser and server paths.
+TWO_PASS_MIN_DURATION_SEC = 30.0
+
+# Pass 1 sample rate (fps). Lightweight YOLO + RTMPose-s wrist-only
+# inference. 8fps is well above the Nyquist limit for tennis swing
+# detection: a forehand contact event spans ~120-180ms of high wrist
+# velocity, and 8fps = 125ms/sample gives us 1-2 samples on the peak
+# even for the shortest swings. Going lower (5fps) starts to risk
+# aliasing the peak; going higher (15fps) doubles the pass-1 cost
+# without changing the candidate-window output meaningfully.
+PASS1_SAMPLE_FPS = 8
+
+# Stroke-detection refractory after a peak (ms). Two real strokes can't
+# happen closer than ~500ms in tennis (even rapid volleys at the net
+# pause briefly between hits). Used to suppress secondary peaks from a
+# single swing's wind-up + follow-through showing up as separate peaks.
+STROKE_REFRACTORY_MS = 500.0
+
+# Pre/post pad (ms) around each detected peak. The window must include
+# the wind-up before contact and the follow-through after. Tuned to
+# match `lib/jointAngles.ts:detectSwings` swing extents seen in
+# practice — backswing top is typically 800-1000ms before contact and
+# follow-through completes within ~500ms of contact.
+STROKE_PRE_PAD_MS = 1000.0
+STROKE_POST_PAD_MS = 500.0
+
+# Two-pass falls back to a full single-pass when fewer than this many
+# strokes are detected in pass 1. Small candidate counts mean the
+# overhead of a separate pass-1 + pass-2 outweighs the saved compute,
+# AND it's possible pass 1 missed strokes (low confidence wrist
+# tracking on a tough clip) — running the heavy model on everything
+# is the safe fallback.
+MIN_STROKES_FOR_TWO_PASS = 5
 
 
-def _detect_motion_windows(
+# ---------------------------------------------------------------------------
+# Pass 1: lightweight wrist-trajectory extraction
+# ---------------------------------------------------------------------------
+
+
+def _run_wrist_pass(
     video_path: str,
-    sample_fps: int = 5,
-    threshold_percentile: float = 70.0,
-    padding_sec: float = 1.0,
-    min_window_sec: float = 0.5,
-) -> list[tuple[int, int]] | None:
-    """Cheap motion-peak detection over the whole video.
+    pass1_fps: int = PASS1_SAMPLE_FPS,
+) -> tuple[list[float], list[tuple[float, float] | None], float, float]:
+    """Pass 1: lightweight YOLO + RTMPose-s wrist-trajectory extraction.
 
-    Goal: identify the frame ranges where the player is actively
-    swinging so the expensive YOLO+RTMPose pipeline only runs on those
-    windows. A 5-min match clip might be ~80% non-swing time (walking
-    between points, ball retrieval, talking to partner) — paying full
-    inference cost on those frames is wasted compute and the user
-    doesn't see skeletons there anyway, since the multi-shot grid
-    only surfaces detected swings.
+    Samples the video at `pass1_fps` (default 8fps), runs YOLO + RTMPose
+    on each sampled frame, and emits ONLY the dominant wrist's normalized
+    (x, y) position per frame. Skips:
 
-    Algorithm:
-      1. Sample frames at `sample_fps` (default 5fps).
-      2. Downsample each to 320x240 grayscale, frame-diff against the
-         previous, take mean abs-difference as the motion score.
-      3. Threshold at the `threshold_percentile` of motion scores.
-      4. Group consecutive above-threshold frames into windows with
-         `padding_sec` of slack on each side so a swing's wind-up and
-         follow-through (lower motion than peak contact) still land
-         inside the window.
+      * joint-angle compute (pure CPU, ~0.1ms/frame but not free at
+        scale)
+      * the racket detector + Kalman tracker (the racket head isn't
+        used by stroke detection)
+      * the COCO-17 → BlazePose-33 remap (pass 1 only needs ids 9/10
+        from the raw COCO-17 output — the dominant-wrist pick happens
+        directly on COCO scores)
 
-    Cost: ~1ms per sampled frame on CPU. A 5-min clip at 5fps motion
-    sampling is 1500 frames × ~1ms = ~1.5s of pre-pass overhead in
-    exchange for avoiding pose extraction on ~70% of frames.
+    Returns:
+      timestamps_ms — list of millisecond timestamps for each sampled
+        frame (regardless of whether wrist tracking succeeded)
+      wrists       — list of (x_norm, y_norm) tuples, or None when no
+        wrist landmark cleared the visibility gate
+      video_fps    — original video framerate (needed to convert
+        candidate windows to original-frame indices)
+      duration_sec — total video duration in seconds
 
-    Returns a list of (start_frame, end_frame) tuples in original-
-    video frame indices, or None when no usable motion was detected
-    (caller falls back to processing every frame). Returning None is
-    intentionally conservative — we'd rather over-process than
-    silently drop swings.
+    The function intentionally returns `None` for frames where wrist
+    tracking failed rather than dropping them, so the stroke detector
+    can use timestamp continuity to decide whether to interpolate or
+    skip a peak candidate.
     """
+    from pose_rtmpose import (
+        _yolo_person_candidates,
+        _ensure_rtmpose,
+        expand_bbox,
+    )
+    import pose_rtmpose
+
     cap = _open_video_autorotated(video_path)
     if not cap.isOpened():
-        return None
+        raise ValueError(f"Cannot open video: {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    sample_interval = max(1, int(fps / sample_fps))
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration_sec = total_frames / video_fps if video_fps > 0 else 0.0
 
-    motion_scores: list[tuple[int, float]] = []
-    prev_gray = None
+    sample_interval = max(1, int(round(video_fps / pass1_fps)))
+
+    timestamps_ms: list[float] = []
+    wrists: list[tuple[float, float] | None] = []
+
+    # Materialize the rtmlib session once before we loop. This is the
+    # lazy import that pulls onnxruntime; doing it here means cold-start
+    # overhead is paid once for both passes (the heavy pass reuses the
+    # same _rtm_session).
+    _ensure_rtmpose()
+
     frame_idx = 0
-
     try:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
             if frame_idx % sample_interval == 0:
-                small = cv2.resize(frame, (320, 240))
-                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-                if prev_gray is not None:
-                    diff = cv2.absdiff(gray, prev_gray)
-                    score = float(np.mean(diff))
-                    motion_scores.append((frame_idx, score))
-                prev_gray = gray
+                ts_ms = (frame_idx / video_fps) * 1000.0
+                timestamps_ms.append(ts_ms)
+
+                wrist = _extract_dominant_wrist(frame)
+                wrists.append(wrist)
             frame_idx += 1
     finally:
         cap.release()
 
-    if len(motion_scores) < 3:
+    return timestamps_ms, wrists, video_fps, duration_sec
+
+
+def _extract_dominant_wrist(
+    frame_bgr: np.ndarray,
+) -> tuple[float, float] | None:
+    """Run YOLO + RTMPose-s on a frame and return the dominant wrist's
+    normalized (x, y), or None if neither wrist passed the visibility gate.
+
+    Internally short-circuits the BlazePose-33 remap — we only need
+    COCO ids 9 (left wrist) and 10 (right wrist) and their scores. This
+    saves a tiny bit per frame but more importantly avoids the bbox
+    expansion/visibility-zeroing logic that the heavy path needs but
+    that we don't, for a wrist-only signal.
+    """
+    from pose_rtmpose import (
+        _yolo_person_candidates,
+        expand_bbox,
+    )
+    import pose_rtmpose
+
+    h, w = frame_bgr.shape[:2]
+
+    try:
+        candidates, _w, _h = _yolo_person_candidates(frame_bgr)
+    except Exception as e:  # noqa: BLE001
+        print(f"[extract:pass1] YOLO failed: {e}")
+        return None
+    if not candidates:
         return None
 
-    scores = np.array([s for _, s in motion_scores])
-    threshold_score = float(np.percentile(scores, threshold_percentile))
+    # Pick the highest-confidence person. Pass 1 doesn't need the
+    # PersonTracker's identity stickiness — wrist-trajectory peak
+    # detection is robust to occasional player-id flips, and skipping
+    # the tracker keeps pass 1 closer to "pure" lightweight cost.
+    bbox = max(candidates, key=lambda c: c[4])
+    expanded = expand_bbox(bbox, w, h)
 
-    # If the threshold itself is tiny, the video is essentially
-    # uniform-motion (camera shake, a static scene with no clear peaks)
-    # — don't filter. Process whole video.
-    if threshold_score < 1.0:
+    # Run RTMPose on the bbox. We use the existing session (already
+    # warmed by _ensure_rtmpose). This is the same model as pass 2
+    # currently — see `summary` doc / future_work for the upgrade path
+    # to RTMPose-S → RTMPose-M for pass 2.
+    session = pose_rtmpose._rtm_session
+    if session is None:
         return None
 
-    motion_frames = [f for f, s in motion_scores if s >= threshold_score]
-    if not motion_frames:
+    try:
+        keypoints, scores = session(frame_bgr, bboxes=[list(expanded)])
+    except Exception as e:  # noqa: BLE001
+        print(f"[extract:pass1] RTMPose failed: {e}")
         return None
 
-    pad = int(padding_sec * fps)
-    min_window_frames = int(min_window_sec * fps)
-    windows: list[tuple[int, int]] = []
-    cur_start = max(0, motion_frames[0] - pad)
-    cur_end = motion_frames[0] + pad
+    if keypoints is None or len(keypoints) == 0:
+        return None
 
-    for f in motion_frames[1:]:
-        if f - pad <= cur_end:
-            # Adjacent or overlapping — extend current window.
-            cur_end = f + pad
+    # COCO-17: id 9 = L wrist, id 10 = R wrist. Pick the higher-score
+    # one as dominant — same dominant-hand rule the racket detector uses.
+    kpts = keypoints[0]  # shape (17, 2) in image-pixel coords
+    sc = scores[0]       # shape (17,)
+    lw_score = float(sc[9])
+    rw_score = float(sc[10])
+
+    if lw_score < 0.1 and rw_score < 0.1:
+        return None
+
+    if rw_score >= lw_score:
+        x_px, y_px = kpts[10]
+    else:
+        x_px, y_px = kpts[9]
+
+    x_norm = float(np.clip(x_px / w, 0.0, 1.0))
+    y_norm = float(np.clip(y_px / h, 0.0, 1.0))
+    return (x_norm, y_norm)
+
+
+# ---------------------------------------------------------------------------
+# Stroke detection from wrist trajectory
+# ---------------------------------------------------------------------------
+
+
+def _detect_strokes_from_wrist(
+    timestamps_ms: list[float],
+    wrists: list[tuple[float, float] | None],
+    video_fps: float,
+    refractory_ms: float = STROKE_REFRACTORY_MS,
+    pre_pad_ms: float = STROKE_PRE_PAD_MS,
+    post_pad_ms: float = STROKE_POST_PAD_MS,
+    smoothing_window: int = 3,
+) -> list[tuple[int, int, int]]:
+    """Reimplementation of the JS wrist-velocity peak-pick logic.
+
+    The JS swing detector (lib/swingDetect*.ts, contracted via the
+    DetectedStroke shape) operates on the same wrist-trajectory signal,
+    so we reproduce the same algorithm in Python rather than round-trip
+    via JS:
+
+      1. Compute frame-to-frame wrist speed (||Δposition|| / Δt) where
+         both endpoints have a tracked wrist. Frames with missing wrist
+         on either side contribute speed=0.
+      2. Smooth the speed series with a small moving average.
+      3. Pick local peaks above an adaptive threshold (median + k *
+         (p90 - median)).
+      4. Apply a refractory: peaks within `refractory_ms` of a stronger
+         neighbor are suppressed (only the stronger one survives).
+      5. Pad each surviving peak to a window: peak - pre_pad_ms to
+         peak + post_pad_ms. Convert ms boundaries to original-video
+         frame indices using `video_fps`.
+
+    Returns a list of (start_frame, end_frame, peak_frame) tuples in
+    ORIGINAL-VIDEO frame indices (not pass-1 sample indices), sorted
+    by start_frame. Frame indices are clipped at 0 below; callers
+    clip at the upper bound (total frames) as needed.
+    """
+    n = len(timestamps_ms)
+    if n < 3:
+        return []
+    if len(wrists) != n:
+        raise ValueError("timestamps_ms and wrists must be same length")
+
+    # Step 1: frame-to-frame wrist speed in normalized-coords-per-second.
+    # Speed series has length n; speeds[0] = 0 by convention.
+    speeds: list[float] = [0.0] * n
+    for i in range(1, n):
+        a = wrists[i - 1]
+        b = wrists[i]
+        if a is None or b is None:
+            speeds[i] = 0.0
+            continue
+        dt_s = (timestamps_ms[i] - timestamps_ms[i - 1]) / 1000.0
+        if dt_s <= 0:
+            speeds[i] = 0.0
+            continue
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        speeds[i] = ((dx * dx + dy * dy) ** 0.5) / dt_s
+
+    # Step 2: smooth with a small moving average. smoothing_window=3
+    # smooths single-frame YOLO/RTMPose noise without flattening the
+    # peak.
+    half = max(0, smoothing_window // 2)
+    smoothed: list[float] = []
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        smoothed.append(sum(speeds[lo:hi]) / (hi - lo))
+
+    # Step 3: adaptive threshold. Combines two thresholds to handle
+    # the full range of realistic clips:
+    #
+    #   * relative_threshold = median + 0.5 * (p90 - median).
+    #     Sensitive to dynamic-but-busy clips where median speed is
+    #     well above zero (continuous rallying, fast hand movement
+    #     between shots). On a dense-motion clip this anchors the
+    #     threshold to the local activity floor.
+    #
+    #   * fraction_of_max = 0.3 * max(smoothed).
+    #     Critical for sparse clips where ~95% of frames are idle and
+    #     only a handful of strokes punctuate the timeline. On a sparse
+    #     clip the median+0.5*spread threshold collapses to ~p90 levels
+    #     because p90 itself is barely above noise (only the top 10%
+    #     of frames carry real motion); without the fraction-of-max
+    #     gate, we'd then accept dozens of noise-floor local maxima.
+    #
+    # `max(...)` of both takes the stricter floor — ensures a peak
+    # must clear BOTH "above the local activity floor" and "at least
+    # 30% of the loudest sample in the clip".
+    sorted_s = sorted(smoothed)
+    median = sorted_s[len(sorted_s) // 2]
+    p90 = sorted_s[min(len(sorted_s) - 1, int(len(sorted_s) * 0.9))]
+    spread = p90 - median
+    max_speed = max(smoothed)
+    if max_speed <= 0 or spread <= 0:
+        # Flat signal; no real motion. No strokes detected.
+        return []
+    relative_threshold = median + 0.5 * spread
+    fraction_of_max = 0.3 * max_speed
+    threshold = max(relative_threshold, fraction_of_max)
+
+    # Find local maxima above threshold. Require a strong local
+    # maximum: peak must dominate a 5-sample window (i±2). At pass-1
+    # 8fps this is ±250ms — well below any real swing duration so the
+    # true peak's smoothed value still tops the window, but enough to
+    # filter noise-floor wiggles that have a single-sample local max
+    # without persistent prominence.
+    peaks: list[tuple[int, float]] = []  # (sample_idx, speed)
+    for i in range(2, n - 2):
+        if smoothed[i] < threshold:
+            continue
+        if (
+            smoothed[i] >= smoothed[i - 1]
+            and smoothed[i] >= smoothed[i + 1]
+            and smoothed[i] >= smoothed[i - 2]
+            and smoothed[i] >= smoothed[i + 2]
+        ):
+            peaks.append((i, smoothed[i]))
+
+    if not peaks:
+        return []
+
+    # Step 4: refractory. Walk peaks in time order, keeping a peak only
+    # if no STRONGER peak has fired within the last `refractory_ms`. A
+    # stronger neighbor within the window suppresses this one entirely
+    # (mirrors the standard refractory-period algorithm from EMG onset
+    # detection — see liveSwingDetector for the JS-side equivalent).
+    peaks.sort(key=lambda p: p[0])
+    kept: list[tuple[int, float]] = []
+    for sample_idx, speed in peaks:
+        ts = timestamps_ms[sample_idx]
+        # Suppress this peak if any kept peak within refractory was
+        # stronger or equal. Conversely, if THIS peak is stronger than a
+        # recent kept peak, evict the kept one and replace it.
+        suppressed = False
+        i = len(kept) - 1
+        while i >= 0:
+            prev_idx, prev_speed = kept[i]
+            prev_ts = timestamps_ms[prev_idx]
+            if ts - prev_ts > refractory_ms:
+                break
+            if prev_speed >= speed:
+                suppressed = True
+                break
+            # This peak is stronger: evict the prior weaker peak.
+            kept.pop(i)
+            i -= 1
+        if not suppressed:
+            kept.append((sample_idx, speed))
+
+    # Step 5: pad each surviving peak to a (start, end, peak) window
+    # in ORIGINAL-VIDEO frame indices.
+    if video_fps <= 0:
+        video_fps = 30.0  # defensive — caller should always pass real fps
+
+    windows: list[tuple[int, int, int]] = []
+    for sample_idx, _speed in kept:
+        peak_ts_ms = timestamps_ms[sample_idx]
+        start_ms = max(0.0, peak_ts_ms - pre_pad_ms)
+        end_ms = peak_ts_ms + post_pad_ms
+
+        start_frame = int(round((start_ms / 1000.0) * video_fps))
+        end_frame = int(round((end_ms / 1000.0) * video_fps))
+        peak_frame = int(round((peak_ts_ms / 1000.0) * video_fps))
+        windows.append((max(0, start_frame), max(0, end_frame), max(0, peak_frame)))
+
+    return windows
+
+
+def _merge_windows(
+    windows: list[tuple[int, int, int]],
+    merge_gap_frames: int = 0,
+) -> list[tuple[int, int, int]]:
+    """Merge overlapping or adjacent stroke windows.
+
+    Two windows are merged if their frame ranges overlap OR if the gap
+    between them (start of next - end of prev) is <= `merge_gap_frames`.
+    The merged window's peak is the peak from whichever input window had
+    the LATER peak — closer to the end of the merged window, which gives
+    downstream pose-aware stroke quality scoring a more conservative
+    contact estimate.
+
+    Sorting + merging is critical before pass 2: without it, two wrist
+    velocity peaks ~600ms apart (overlapping post-pad of the first with
+    pre-pad of the second) would produce two windows whose frame ranges
+    overlap, and the heavy pose extraction would run YOLO + RTMPose on
+    the overlapping frames TWICE.
+
+    Returns a new list, sorted by start_frame, with no overlaps and no
+    gaps below `merge_gap_frames`.
+    """
+    if not windows:
+        return []
+
+    sorted_w = sorted(windows, key=lambda w: w[0])
+    merged: list[tuple[int, int, int]] = [sorted_w[0]]
+    for s, e, p in sorted_w[1:]:
+        last_s, last_e, last_p = merged[-1]
+        if s <= last_e + merge_gap_frames:
+            new_s = last_s
+            new_e = max(last_e, e)
+            # Prefer the LATER peak — see docstring.
+            new_p = p if p >= last_p else last_p
+            merged[-1] = (new_s, new_e, new_p)
         else:
-            # Gap — close current window if it meets the minimum length.
-            if cur_end - cur_start >= min_window_frames:
-                windows.append((cur_start, cur_end))
-            cur_start = max(0, f - pad)
-            cur_end = f + pad
-    if cur_end - cur_start >= min_window_frames:
-        windows.append((cur_start, cur_end))
-
-    return windows or None
+            merged.append((s, e, p))
+    return merged
 
 
 def _dominant_wrist_norm(landmarks: list[dict]) -> tuple[float, float] | None:
@@ -318,7 +611,10 @@ def _dominant_wrist_norm(landmarks: list[dict]) -> tuple[float, float] | None:
 
 
 def _extract_with_rtmpose(
-    video_path: str, sample_fps: int, max_seconds: float
+    video_path: str,
+    sample_fps: int,
+    max_seconds: float,
+    candidate_windows: list[tuple[int, int, int]] | None = None,
 ) -> dict:
     """Pose extraction via YOLO11n person crop + RTMPose-s.
 
@@ -350,6 +646,16 @@ def _extract_with_rtmpose(
     in aceca57) broke because it parallelized the tracker too —
     tracker.update saw frames out of order. This staged design fixes
     the structural problem.
+
+    `candidate_windows`, when provided, is a list of (start_frame,
+    end_frame, peak_frame) triples in original-video frame indices.
+    The heavy loop only processes frames whose ORIGINAL-VIDEO index
+    falls inside one of those windows. This is the pass-2 entry point
+    for two-pass orchestration: caller has already detected stroke
+    candidates from a cheap pass-1 wrist trajectory and merged
+    overlapping windows. When `None`, every sampled frame is processed
+    (single-pass behavior, used by the short-clip fast path and
+    pre-existing callers).
     """
     from pose_rtmpose import (
         _yolo_person_candidates,
@@ -374,40 +680,32 @@ def _extract_with_rtmpose(
     # sampling at lib/poseExtraction.ts:184-198.
     duration_sec_est = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / video_fps
 
-    # Motion pre-pass for long clips: detect motion windows up front so
-    # we only pose-extract within them. The cheap motion scan runs in
-    # ~1.5s for a 5-min clip and typically reduces the inference set to
-    # ~20-30% of the original frames (most match footage is non-swing
-    # dead time). For shorter clips the pre-pass overhead isn't worth
-    # it — the threshold matches the existing adaptive-sampling tier.
-    motion_windows: list[tuple[int, int]] | None = None
-    if duration_sec_est > MOTION_PREPASS_MIN_DURATION_SEC:
-        import time as _time
-        t_motion = _time.perf_counter()
-        # Release our cap so the motion-prepass cap doesn't fight for
-        # the same video file handle on platforms that gate concurrent
-        # opens (rare but observed on some FS combinations).
-        cap.release()
-        motion_windows = _detect_motion_windows(video_path)
-        motion_ms = round((_time.perf_counter() - t_motion) * 1000, 1)
-        if motion_windows:
-            total_window_frames = sum(e - s for s, e in motion_windows)
-            total_window_sec = total_window_frames / video_fps
-            print(
-                f"[extract:rtmpose] motion pre-pass ({motion_ms}ms): "
-                f"{len(motion_windows)} windows covering {total_window_sec:.1f}s "
-                f"of {duration_sec_est:.1f}s "
-                f"({100 * total_window_sec / duration_sec_est:.0f}%)"
-            )
-        else:
-            print(
-                f"[extract:rtmpose] motion pre-pass ({motion_ms}ms): "
-                f"no usable windows; processing all sampled frames"
-            )
-        # Reopen for the main loop.
-        cap = _open_video_autorotated(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Cannot reopen video after motion prepass: {video_path}")
+    # Frame-level filtering: when `candidate_windows` is provided, only
+    # process frames whose ORIGINAL-VIDEO index falls inside a window.
+    # Replaces the previous frame-difference motion pre-pass — the
+    # two-pass orchestrator passes pose-derived stroke windows here,
+    # which are tighter and more discriminative than raw motion peaks.
+    if candidate_windows:
+        # Extract just (start, end) for the in-window check; peak isn't
+        # used here.
+        check_windows: list[tuple[int, int]] = [
+            (s, e) for s, e, _p in candidate_windows
+        ]
+        total_window_frames = sum(e - s for s, e in check_windows)
+        total_window_sec = total_window_frames / video_fps if video_fps > 0 else 0
+        clip_pct = (
+            100 * total_window_sec / duration_sec_est
+            if duration_sec_est > 0
+            else 0.0
+        )
+        print(
+            f"[extract:rtmpose] pass 2 candidate windows: "
+            f"{len(check_windows)} windows covering {total_window_sec:.1f}s "
+            f"of {duration_sec_est:.1f}s "
+            f"({clip_pct:.0f}%)"
+        )
+    else:
+        check_windows = []
 
     if duration_sec_est > 120:
         effective_sample_fps = min(sample_fps, 8)
@@ -585,18 +883,19 @@ def _extract_with_rtmpose(
             })
             processed_index += 1
 
-    def _in_motion_window(idx: int) -> bool:
-        """True when `idx` is inside any pre-detected motion window
-        (or when no pre-pass ran, in which case every frame is in)."""
-        if motion_windows is None:
+    def _in_candidate_window(idx: int) -> bool:
+        """True when `idx` is inside any candidate stroke window (or
+        when no windows were provided, in which case every frame is
+        in — i.e. single-pass mode)."""
+        if not check_windows:
             return True
-        for s, e in motion_windows:
+        for s, e in check_windows:
             if s <= idx <= e:
                 return True
         return False
 
     chunk: list[tuple[int, int, np.ndarray]] = []
-    motion_skipped = 0
+    window_skipped = 0
     with ThreadPoolExecutor(max_workers=POOL_WORKERS) as pool:
         while cap.isOpened():
             ret, frame = cap.read()
@@ -606,8 +905,8 @@ def _extract_with_rtmpose(
                 break
 
             if frame_index % frame_interval == 0:
-                if not _in_motion_window(frame_index):
-                    motion_skipped += 1
+                if not _in_candidate_window(frame_index):
+                    window_skipped += 1
                     frame_index += 1
                     continue
                 timestamp_ms = int((frame_index / video_fps) * 1000)
@@ -623,9 +922,9 @@ def _extract_with_rtmpose(
         if chunk:
             _process_chunk(chunk, pool)
 
-    if motion_windows is not None:
+    if check_windows:
         print(
-            f"[extract:rtmpose] motion pre-pass skipped {motion_skipped} sampled frames "
+            f"[extract:rtmpose] pass-2 window filter skipped {window_skipped} sampled frames "
             f"({person_yolo_skipped} of the processed frames also skipped person YOLO)"
         )
 
@@ -654,11 +953,187 @@ def _extract_with_rtmpose(
 
 
 def extract_keypoints_from_video(
-    video_path: str, sample_fps: int = 30, max_seconds: float = 0
+    video_path: str,
+    sample_fps: int = 30,
+    max_seconds: float = 0,
+    two_pass: bool = True,
 ) -> dict:
     """Extract pose keypoints from a video file via YOLO11n + RTMPose-s.
 
     Args:
         max_seconds: Stop after this many seconds. 0 = process entire video.
+        two_pass: When True (default), use the two-pass orchestration on
+            long clips: a cheap pass-1 wrist-trajectory extraction at
+            PASS1_SAMPLE_FPS to detect candidate stroke windows, then a
+            heavy pass-2 pose extraction restricted to those windows.
+            For short clips (< TWO_PASS_MIN_DURATION_SEC) or when pass 1
+            finds too few candidate strokes, we transparently fall back
+            to a single-pass full extraction. Set False to force single-
+            pass on every clip (used by callers that already know the
+            input is short, like the live-coach batch extractor, or
+            tests that want deterministic single-pass behavior).
     """
-    return _extract_with_rtmpose(video_path, sample_fps, max_seconds)
+    if not two_pass:
+        return _extract_with_rtmpose(video_path, sample_fps, max_seconds)
+    return _two_pass_extract(video_path, sample_fps, max_seconds)
+
+
+def _two_pass_extract(
+    video_path: str,
+    sample_fps: int,
+    max_seconds: float,
+) -> dict:
+    """Two-pass orchestration: cheap pass-1 wrist trajectory → stroke
+    detection → heavy pass-2 on candidate windows only.
+
+    Goal: ~10-15× compute reduction on long match-tape clips. A 5-min
+    clip at 30fps has 9000 frames; the heavy YOLO+RTMPose pipeline runs
+    at ~30ms/frame on Modal T4, so single-pass = ~270s of inference,
+    over the 600s Modal timeout and well past the user's patience.
+    Real-world tennis tape is ~70-85% non-stroke time (walking between
+    points, ball pickup, talking) — running the heavy pipeline on those
+    frames is wasted compute and the user never sees skeletons there.
+
+    Pass 1: ~8fps wrist-only YOLO+RTMPose-s. ~75% cost reduction vs.
+        the heavy pass at the same fps (no joint angles, no racket
+        detector, no Kalman tracker, no remap), and ~73% vs. heavy
+        pass at the default 30fps tier (8fps vs 30fps × 1.0 cost).
+        For a 5-min clip: ~5min × 8fps × ~10ms = ~24s on T4.
+
+    Pass 2: existing chunked-parallel YOLO+RTMPose-s on ONLY the frames
+        inside candidate windows. Typical candidate-window coverage on
+        match tape: 15-25% of total clip duration. Same per-frame cost,
+        ~70-85% fewer frames.
+
+    Combined: ~24s pass 1 + ~50s pass 2 ≈ ~75s total, vs ~270s for
+    single pass. Real-world speedup ~3.5×, with the headroom to grow
+    (an RTMPose-S → -M upgrade for pass 2 would still come in under
+    single-pass timing).
+
+    Falls back to single-pass when:
+      * Clip duration < TWO_PASS_MIN_DURATION_SEC (overhead not worth it)
+      * Pass 1 detected fewer than MIN_STROKES_FOR_TWO_PASS strokes
+        (either a true low-stroke-count clip or pass 1 missed strokes;
+        either way, single-pass is the safe fallback)
+      * Pass 1 raised an exception (we log and continue with single-pass)
+    """
+    import time as _time
+
+    # Probe the video for duration. Same autorotate path the heavy
+    # extractor uses so the duration matches what _extract_with_rtmpose
+    # will see internally.
+    cap = _open_video_autorotated(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+    video_fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration_sec = total_frames / video_fps if video_fps > 0 else 0.0
+    cap.release()
+
+    # Short-clip fast path. The two-pass overhead (pass-1 model load
+    # + wrist scan + stroke detect) costs ~5-10s on cold Modal even on
+    # a tiny clip; that's a net loss if the clip itself is only 15s of
+    # heavy single-pass work. The boundary matches the lib/poseExtraction
+    # adaptive-sampling first tier so users see consistent behavior
+    # across browser and server paths.
+    if duration_sec < TWO_PASS_MIN_DURATION_SEC:
+        print(
+            f"[extract:two-pass] short clip ({duration_sec:.1f}s < "
+            f"{TWO_PASS_MIN_DURATION_SEC:.0f}s) — skipping pass 1, "
+            f"running single-pass directly"
+        )
+        result = _extract_with_rtmpose(video_path, sample_fps, max_seconds)
+        result["pass_summary"] = {
+            "mode": "single-pass-short-clip",
+            "duration_sec": round(duration_sec, 1),
+            "pass1_ms": 0,
+            "pass2_ms": None,  # captured by inference_ms in caller
+            "candidate_count": None,
+        }
+        return result
+
+    # Pass 1: wrist trajectory.
+    t_pass1 = _time.perf_counter()
+    try:
+        timestamps_ms, wrists, p1_video_fps, _p1_duration = _run_wrist_pass(
+            video_path,
+            pass1_fps=PASS1_SAMPLE_FPS,
+        )
+    except Exception as e:  # noqa: BLE001
+        # If pass 1 blew up (rare — usually a transient YOLO/RTMPose
+        # init failure), don't take the user down with us. Fall back to
+        # single-pass and log loudly.
+        print(f"[extract:two-pass] pass 1 failed: {e} — falling back to single-pass")
+        result = _extract_with_rtmpose(video_path, sample_fps, max_seconds)
+        result["pass_summary"] = {
+            "mode": "single-pass-pass1-failed",
+            "duration_sec": round(duration_sec, 1),
+            "pass1_error": str(e),
+        }
+        return result
+    pass1_ms = round((_time.perf_counter() - t_pass1) * 1000, 1)
+
+    # Detect candidate stroke windows from the wrist series.
+    candidate_windows = _detect_strokes_from_wrist(
+        timestamps_ms, wrists, video_fps=p1_video_fps
+    )
+    candidate_windows = _merge_windows(candidate_windows)
+
+    # Clip windows to the actual frame range (the detector pads peaks
+    # by pre/post_pad_ms which can extend beyond the video on edge
+    # peaks).
+    if total_frames > 0:
+        candidate_windows = [
+            (max(0, s), min(total_frames - 1, e), max(0, min(total_frames - 1, p)))
+            for s, e, p in candidate_windows
+            if s < total_frames
+        ]
+
+    candidate_count = len(candidate_windows)
+    print(
+        f"[extract:two-pass] pass 1 ({pass1_ms}ms): "
+        f"{candidate_count} candidate stroke windows"
+    )
+
+    # Few-strokes fallback. Either a true low-stroke clip (in which
+    # case single-pass cost on a ~30-60s clip is acceptable), or pass 1
+    # missed strokes. Either way, falling back to single-pass is the
+    # safer choice — we don't want to silently drop a real stroke
+    # because pass 1 mis-tracked the wrist on a tough clip.
+    if candidate_count < MIN_STROKES_FOR_TWO_PASS:
+        print(
+            f"[extract:two-pass] only {candidate_count} candidates "
+            f"(< {MIN_STROKES_FOR_TWO_PASS}) — falling back to single-pass"
+        )
+        result = _extract_with_rtmpose(video_path, sample_fps, max_seconds)
+        result["pass_summary"] = {
+            "mode": "single-pass-few-strokes",
+            "duration_sec": round(duration_sec, 1),
+            "pass1_ms": pass1_ms,
+            "candidate_count": candidate_count,
+        }
+        return result
+
+    # Pass 2: heavy extraction restricted to candidate windows. The
+    # ThreadPoolExecutor inside _extract_with_rtmpose batches frames
+    # 16 at a time across all candidate windows in a SINGLE invocation
+    # — sequential per-stroke calls would each pay the chunk-pool
+    # spin-up overhead, so we batch them.
+    t_pass2 = _time.perf_counter()
+    result = _extract_with_rtmpose(
+        video_path,
+        sample_fps,
+        max_seconds,
+        candidate_windows=candidate_windows,
+    )
+    pass2_ms = round((_time.perf_counter() - t_pass2) * 1000, 1)
+
+    result["pass_summary"] = {
+        "mode": "two-pass",
+        "duration_sec": round(duration_sec, 1),
+        "pass1_ms": pass1_ms,
+        "pass2_ms": pass2_ms,
+        "candidate_count": candidate_count,
+        "candidate_windows": candidate_windows,
+    }
+    return result

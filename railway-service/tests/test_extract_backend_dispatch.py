@@ -95,7 +95,12 @@ class TestRtmposeExtractWithStubs:
 
     def test_extract_keypoints_from_video_runs_rtmpose(self, monkeypatch):
         """The public entrypoint should always route to the rtmpose path —
-        no env-var dispatch any more."""
+        no env-var dispatch any more.
+
+        Passes `two_pass=False` to bypass the two-pass orchestrator (which
+        would otherwise probe the video file via cv2). The orchestrator
+        is exercised separately in test_two_pass_extract.py.
+        """
         import extraction
 
         called = {}
@@ -105,6 +110,8 @@ class TestRtmposeExtractWithStubs:
             return {"frame_count": 0, "frames": [], "schema_version": 3}
 
         monkeypatch.setattr(extraction, "_extract_with_rtmpose", fake_rtm)
-        out = extraction.extract_keypoints_from_video("/tmp/x.mp4", sample_fps=24, max_seconds=2)
+        out = extraction.extract_keypoints_from_video(
+            "/tmp/x.mp4", sample_fps=24, max_seconds=2, two_pass=False,
+        )
         assert called["rtm"] == ("/tmp/x.mp4", 24, 2)
         assert out["schema_version"] == 3

@@ -8,6 +8,7 @@ import { usePoseStore } from '@/store'
 import { usePoseExtractor } from '@/hooks/usePoseExtractor'
 import { createPoseDetector } from '@/lib/browserPose'
 import { extractPoseViaRailway, RailwayExtractError } from '@/lib/poseExtractionRailway'
+import { hashFileInWorker } from '@/lib/contentHash'
 import type { ExtractResult } from '@/lib/poseExtraction'
 import type { PoseFrame } from '@/lib/supabase'
 
@@ -141,6 +142,21 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     }
     setStatusMsg('Uploading video...')
 
+    // 0b. Kick off the SHA-256 content hash in a Web Worker, in
+    //     parallel with the upload below. The hash is over `uploadFile`
+    //     (the *post-transcode* bytes) so re-uploads of the same source
+    //     clip — which we'll transcode identically — share a cache key.
+    //     The Promise resolves while the upload is still in flight; we
+    //     await it just before /api/extract so the server can short-
+    //     circuit on a cache hit. A hashing failure (CSP, missing
+    //     subtle.crypto, OOM) is non-fatal: we continue with sha256
+    //     unset and the server falls through to a real extraction.
+    const sha256Promise: Promise<string | null> = hashFileInWorker(uploadFile)
+      .catch((err) => {
+        console.warn('[UploadZone] sha256 hash failed, cache disabled for this upload:', err)
+        return null
+      })
+
     // 1. Upload to Supabase Storage via the tus resumable protocol.
     //    tus persists progress to localStorage so a closed tab, locked
     //    phone, or dropped connection mid-upload resumes from the last
@@ -262,9 +278,15 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         pendingSessionId = pendingBody.sessionId
 
         setStatusMsg('Analyzing pose on the server...')
+        // Hand the sha256 (or null) to the Railway extractor so the
+        // /api/extract route can short-circuit on cache hit without
+        // talking to Railway. The hash usually lands well before the
+        // upload finishes — we just await whatever's resolved.
+        const sha256 = (await sha256Promise) ?? undefined
         result = await extractPoseViaRailway({
           sessionId: pendingSessionId!,
           blobUrl,
+          sha256,
           onProgress: (pct) => setOverallProgress(20 + Math.round((pct / 100) * 70)),
         })
         usedRailway = true

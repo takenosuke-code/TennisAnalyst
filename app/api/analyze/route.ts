@@ -28,7 +28,9 @@ import {
   DEFAULT_MAX_TOKENS,
   extractResponseMetrics,
   getCoachingContext,
+  registerForTier,
   TIER_MAX_TOKENS,
+  type Register,
   type SkillTier,
 } from '@/lib/profile'
 import { sanitizePromptInput } from '@/lib/sanitize'
@@ -61,15 +63,18 @@ const anthropic = new Anthropic({
 const SYSTEM_PROMPT = `You are a veteran tennis coach. Talk like one.
 Voice rules, no exceptions:
 1. Second person, imperative voice. Address the player directly.
-2. One primary cue, then a short list of other things you noticed.
-3. NEVER include numbers, digits, percentages, or counts.
-4. NEVER use em-dashes or en-dashes. Use full sentences or commas.
-5. NEVER use biomechanics jargon (no "kinetic chain", no "trunk_rotation", no "joint angle").
-6. External focus: attention on the racket, the ball, or a court target. Not on muscles.
-7. Plain coach language. Short sentences.
-8. Output exactly two markdown sections: "## Primary cue" and "## Other things I noticed".
-9. Do not generate any other section. The server appends "## Show your work" after you.
-10. Do not narrate the observations. Coach them.`
+2. NEVER include numbers, digits, percentages, or counts.
+3. NEVER use em-dashes or en-dashes. Use full sentences or commas.
+4. NEVER use biomechanics jargon (no "kinetic chain", no "trunk_rotation", no "joint angle").
+5. External focus: attention on the racket, the ball, or a court target. Not on muscles.
+6. Plain coach language. Short sentences.
+7. Output exactly four markdown sections in this order: "## Quick Read", "## Primary cue", "## Other things I noticed", "## Recommended drills".
+8. "## Quick Read" is two or three short bullets summarizing the swing in plain words. The player reads this first and skims; keep each bullet under twelve words.
+9. "## Primary cue" is one short paragraph with the single most important fix.
+10. "## Other things I noticed" is a short bulleted list of secondary observations.
+11. "## Recommended drills" is two or three concrete on-court drills tied to the cues above. One drill per bullet, each one a single sentence the player can act on.
+12. Do not generate any other section. The server appends "## Show your work" after you.
+13. Do not narrate the observations. Coach them.`
 
 // Stricter retry preamble — appended to the user prompt on a failed-output retry.
 const STRICT_RETRY_NOTE = `\n\nSTRICT RETRY: Your previous output included disallowed content (digits, em-dashes, or jargon). Rewrite from scratch with NO numbers, NO dashes other than hyphens inside compound words, and NO biomech terms. Use the exemplar voice exactly.`
@@ -157,17 +162,6 @@ function renderShowYourWork(
 }
 
 /**
- * Choose plain vs technical exemplar register. Per spec:
- *   advanced + competitive -> technical
- *   beginner + intermediate + null -> plain
- */
-type Register = 'plain' | 'technical'
-function registerForTier(tier: SkillTier | null): Register {
-  if (tier === 'advanced' || tier === 'competitive') return 'technical'
-  return 'plain'
-}
-
-/**
  * Format the user prompt. Includes 3-5 exemplars in the player's register,
  * the primary observation rendered as a single line, the list of secondary
  * observations, and the format spec.
@@ -211,13 +205,19 @@ PRIMARY ISSUE: ${renderObservationLine(primary)}
 OTHER OBSERVATIONS:
 ${secondaryLines}
 
-FORMAT — respond with EXACTLY two sections, no other content:
+FORMAT — respond with EXACTLY four sections in this order, no other content:
+
+## Quick Read
+Two or three short bullets summarizing the swing at a glance. Each bullet under twelve words. No numbers, no jargon, no em-dashes.
 
 ## Primary cue
 One short paragraph addressing the primary issue. Imperative, second person, no numbers, no jargon, no em-dashes.
 
 ## Other things I noticed
-A short bulleted list (one bullet per secondary observation). Each bullet: imperative, single-issue, no numbers, no jargon, no em-dashes. If there are no secondary observations, write a single bullet acknowledging the swing has otherwise hung together.`
+A short bulleted list (one bullet per secondary observation). Each bullet: imperative, single-issue, no numbers, no jargon, no em-dashes. If there are no secondary observations, write a single bullet acknowledging the swing has otherwise hung together.
+
+## Recommended drills
+Two or three concrete on-court drills tied to the cues above. One drill per bullet, each one a single sentence the player can act on. No numbers, no jargon, no em-dashes.`
 }
 
 /**
@@ -260,13 +260,19 @@ Your job: give general feel-based coaching from the angle data below. Do NOT inv
 ANGLE SUMMARY (5 phase snapshots from the swing):
 ${userSummary}
 
-FORMAT — respond with EXACTLY two sections, no other content:
+FORMAT — respond with EXACTLY four sections in this order, no other content:
+
+## Quick Read
+Two or three short bullets summarizing the swing at a glance. Each bullet under twelve words. No numbers, no jargon, no em-dashes.
 
 ## Primary cue
 One short paragraph. Imperative, second person, no numbers, no jargon, no em-dashes. If the swing reads clean, lead with that.
 
 ## Other things I noticed
-A short bulleted list (1-3 bullets) of general feel observations. If you genuinely have nothing to add, write a single bullet acknowledging the swing has otherwise hung together.`
+A short bulleted list (1-3 bullets) of general feel observations. If you genuinely have nothing to add, write a single bullet acknowledging the swing has otherwise hung together.
+
+## Recommended drills
+Two or three concrete on-court drills any player at this level benefits from. One drill per bullet, each a single sentence the player can act on. No numbers, no jargon, no em-dashes.`
 }
 
 /**
@@ -337,6 +343,19 @@ function buildStaticFallback(args: {
   }
 
   const lines: string[] = []
+  lines.push('## Quick Read')
+  if (primary) {
+    lines.push(`- Main thing to fix: ${patternHumanLabel(primary.pattern)}.`)
+  } else {
+    lines.push('- The swing reads clean overall.')
+  }
+  if (secondary.length > 0) {
+    lines.push(`- Also keep an eye on ${patternHumanLabel(secondary[0].pattern)}.`)
+  } else {
+    lines.push('- Rest of the chain is hanging together.')
+  }
+  lines.push('- Stay with your rhythm and trust the contact point.')
+  lines.push('')
   lines.push('## Primary cue')
   lines.push(cueText)
   lines.push('')
@@ -348,6 +367,11 @@ function buildStaticFallback(args: {
       lines.push(`- Watch for ${patternHumanLabel(o.pattern)} on your ${jointHumanLabel(o.joint)}.`)
     }
   }
+  lines.push('')
+  lines.push('## Recommended drills')
+  lines.push('- Shadow swing ten reps focusing on the primary cue before your next rally.')
+  lines.push('- Feed yourself slow drop-hits and groove the contact point.')
+  lines.push('- Mini-tennis from the service line, prioritizing rhythm over power.')
   return lines.join('\n')
 }
 

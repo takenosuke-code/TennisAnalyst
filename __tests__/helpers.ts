@@ -100,8 +100,26 @@ export function makeForehandSwingFrames(
       trunkRotation = 60 - phase * 20 // 60 -> 40
     }
 
-    // Generate a simple landmark set (standing pose with slight variations)
-    const landmarks = makeStandingPose()
+    // Drive the right wrist through a forehand arc so the
+    // wrist-velocity peak-pick detector (lib/swingDetect.ts) can lock
+    // on. Earlier versions of this helper used a static
+    // makeStandingPose() and only varied joint angles — that worked
+    // when detectSwings was joint-angle-energy based, but the new
+    // detector reads dominant-wrist linear speed.
+    //
+    // Position profile: slow backswing → fast acceleration → contact
+    // → fast follow-through → gentle return to rest. Asymmetric on
+    // purpose so the SPEED signal has a single dominant peak around
+    // contact (t ≈ 0.55), not two peaks like a symmetric sin would
+    // produce. Boundary positions match the rest pose (x=0.4) so
+    // back-to-back rest/swing fixtures don't generate boundary
+    // velocity spikes.
+    const landmarks = makeStandingPose().map((lm) => {
+      if (lm.id !== LANDMARK_INDICES.RIGHT_WRIST) return lm
+      const xArc = forehandWristX(t)
+      const yArc = 0.55 - 0.06 * Math.sin(Math.PI * t)
+      return { ...lm, x: xArc, y: yArc }
+    })
 
     const angles: JointAngles = {
       right_elbow: rightElbow,
@@ -144,6 +162,46 @@ export function makeRestFrames(
     frames.push(makeFrame(i, timestampMs, landmarks, angles))
   }
   return frames
+}
+
+/**
+ * Position profile of the right wrist along a forehand swing
+ * parameterized by t∈[0,1]. Boundary x equals the rest position (0.4)
+ * and the peak SPEED (not position) lands near t≈0.55 — the contact
+ * phase. The shape is a piecewise blend of a slow backswing pull-back,
+ * a fast forward swing through contact, and a gentle return to rest.
+ *
+ * Cubic in the [0, 0.6] window then a half-cosine tail. We park this
+ * here rather than inline so multiple test helpers can build on the
+ * same canonical motion.
+ */
+export function forehandWristX(t: number): number {
+  const REST_X = 0.4
+  const PEAK_X = 0.85
+  if (t <= 0) return REST_X
+  if (t >= 1) return REST_X
+  if (t < 0.6) {
+    // Cubic ease — slow start, fast finish, peaks ~at t=0.6.
+    const u = t / 0.6
+    return REST_X + (PEAK_X - REST_X) * (u * u * u)
+  }
+  // Half-cosine return: from PEAK_X at t=0.6 back to REST_X at t=1.
+  const u = (t - 0.6) / 0.4
+  return REST_X + (PEAK_X - REST_X) * (1 - u) * (1 - u)
+}
+
+/**
+ * Make a standing pose with the right wrist driven horizontally by a
+ * t∈[0,1] sweep. Useful for inline-fixture swing tests that need the
+ * wrist-velocity detector (lib/swingDetect.ts) to fire — a static
+ * pose has zero wrist speed and won't trigger detection.
+ */
+export function makeStandingPoseWithWristAt(t: number): Landmark[] {
+  const x = forehandWristX(Math.min(1, Math.max(0, t)))
+  const y = 0.55 - 0.06 * Math.sin(Math.PI * t)
+  return makeStandingPose().map((lm) =>
+    lm.id === LANDMARK_INDICES.RIGHT_WRIST ? { ...lm, x, y } : lm,
+  )
 }
 
 /**
