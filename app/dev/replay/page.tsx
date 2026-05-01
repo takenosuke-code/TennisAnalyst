@@ -86,28 +86,90 @@ const DETECT_STATS_BUFFER = 8
 // fast(er) — the encoding itself still takes ~30s/min of source.
 const FFMPEG_CORE_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
 
-async function transcodeToH264(input: File): Promise<File> {
+async function transcodeToH264(
+  input: File,
+  onLog?: (line: string) => void,
+): Promise<File> {
   const [{ FFmpeg }, { fetchFile, toBlobURL }] = await Promise.all([
     import('@ffmpeg/ffmpeg'),
     import('@ffmpeg/util'),
   ])
   const ffmpeg = new FFmpeg()
+  // Pipe ffmpeg's stderr (and stdout) into the page so the user can see
+  // what's happening when a transcode silently produces bad output.
+  // ffmpeg.wasm's default core ships without HEVC decoder on some
+  // builds — when that's the case we'd otherwise produce a 0-byte
+  // output and look like we succeeded.
+  if (onLog) {
+    ffmpeg.on('log', ({ message }: { message: string }) => onLog(message))
+  }
   await ffmpeg.load({
     coreURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
     wasmURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
   })
   await ffmpeg.writeFile('input', await fetchFile(input))
-  // Strip audio (-an) — Modal extracts pose from video frames only,
-  // and audio bytes just slow the upload. ultrafast preset because
-  // this is dev iteration; the output isn't going to be re-encoded
-  // again anywhere.
-  await ffmpeg.exec(['-i', 'input', '-c:v', 'libx264', '-preset', 'ultrafast', '-an', 'output.mp4'])
+  // Strip audio (-an) — Modal extracts pose from video frames only.
+  // ultrafast preset because dev iteration; output isn't re-encoded.
+  const exitCode = await ffmpeg.exec([
+    '-i', 'input',
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-pix_fmt', 'yuv420p',
+    '-an',
+    'output.mp4',
+  ])
+  if (exitCode !== 0) {
+    throw new Error(
+      `ffmpeg exit code ${exitCode} — most often this means the source codec isn't supported by the wasm build (HEVC is excluded from default @ffmpeg/core). Try cloudconvert.com instead, or use Safari.`,
+    )
+  }
   const out = await ffmpeg.readFile('output.mp4')
-  // ffmpeg.readFile returns Uint8Array | string depending on encoding;
-  // always Uint8Array when no encoding specified.
   const bytes = out instanceof Uint8Array ? out : new TextEncoder().encode(out)
+  if (bytes.byteLength < 1024) {
+    throw new Error(
+      `ffmpeg produced ${bytes.byteLength} bytes — likely a decode failure. See the log panel for ffmpeg's actual stderr.`,
+    )
+  }
   return new File([bytes as BlobPart], `${input.name.replace(/\.[^.]+$/, '')}-h264.mp4`, {
     type: 'video/mp4',
+  })
+}
+
+// Quickly verify a File is actually playable by the browser before
+// we hand it to handleReplay. Mounts it into a throwaway <video>
+// element off-screen and waits for `loadedmetadata` (good) or `error`
+// (bad). 4s budget — anything that takes longer is broken.
+function probePlayability(file: File): Promise<{ ok: true } | { ok: false; reason: string }> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file)
+    const v = document.createElement('video')
+    v.muted = true
+    v.preload = 'metadata'
+    const cleanup = () => {
+      v.removeEventListener('loadedmetadata', onOk)
+      v.removeEventListener('error', onErr)
+      URL.revokeObjectURL(url)
+    }
+    const onOk = () => {
+      cleanup()
+      resolve({ ok: true })
+    }
+    const onErr = () => {
+      const code = v.error?.code
+      const codeName: Record<number, string> = {
+        3: 'MEDIA_ERR_DECODE',
+        4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
+      }
+      cleanup()
+      resolve({ ok: false, reason: code ? (codeName[code] ?? `code ${code}`) : 'unknown' })
+    }
+    v.addEventListener('loadedmetadata', onOk)
+    v.addEventListener('error', onErr)
+    v.src = url
+    setTimeout(() => {
+      cleanup()
+      resolve({ ok: false, reason: 'timeout (>4s)' })
+    }, 4000)
   })
 }
 
@@ -121,6 +183,9 @@ export default function ReplayDevPage() {
   const [replayError, setReplayError] = useState<string | null>(null)
   const [transcodeState, setTranscodeState] = useState<'idle' | 'running' | 'error'>('idle')
   const [transcodeError, setTranscodeError] = useState<string | null>(null)
+  // Tail of ffmpeg's stderr so the user can see why a transcode failed
+  // without opening DevTools. Most useful line is usually near the end.
+  const [transcodeLog, setTranscodeLog] = useState<string[]>([])
   // Set true right after the transcode-button finishes; the effect
   // below auto-fires handleReplay once React has re-rendered with the
   // new file. Without this the user has to click Replay manually after
@@ -767,8 +832,26 @@ export default function ReplayDevPage() {
                 onClick={async () => {
                   setTranscodeState('running')
                   setTranscodeError(null)
+                  setTranscodeLog([])
+                  const logBuf: string[] = []
                   try {
-                    const out = await transcodeToH264(file)
+                    const out = await transcodeToH264(file, (line) => {
+                      logBuf.push(line)
+                      // Keep only the last 40 lines so the panel doesn't
+                      // explode for long clips.
+                      const tail = logBuf.slice(-40)
+                      setTranscodeLog(tail)
+                    })
+                    // Validate: ffmpeg sometimes "succeeds" (exit 0) but
+                    // produces an output the browser still can't decode
+                    // — typically when the HEVC decoder in this wasm
+                    // build returns garbage frames. Probe before swap.
+                    const probe = await probePlayability(out)
+                    if (!probe.ok) {
+                      throw new Error(
+                        `ffmpeg ran but the output isn't browser-playable (${probe.reason}). The wasm build likely couldn't decode this codec. Use cloudconvert.com or Safari.`,
+                      )
+                    }
                     if (fileObjectUrl) URL.revokeObjectURL(fileObjectUrl)
                     const newUrl = URL.createObjectURL(out)
                     setFile(out)
@@ -776,9 +859,6 @@ export default function ReplayDevPage() {
                     setReplayState('idle')
                     setReplayError(null)
                     setTranscodeState('idle')
-                    // Auto-fire the replay once React re-renders with the
-                    // new file (handleReplay's useCallback has `file` in
-                    // its deps; the effect waits for the new closure).
                     setAutoReplayPending(true)
                   } catch (err) {
                     setTranscodeState('error')
@@ -793,6 +873,14 @@ export default function ReplayDevPage() {
               </button>
               {transcodeError ? (
                 <div className="text-rose-400 text-xs">transcode error: {transcodeError}</div>
+              ) : null}
+              {transcodeLog.length > 0 ? (
+                <details className="text-xs text-white/50">
+                  <summary className="cursor-pointer">ffmpeg log (last {transcodeLog.length} lines)</summary>
+                  <pre className="font-mono text-[10px] leading-tight max-h-40 overflow-y-auto bg-black/40 rounded px-2 py-1 mt-1 whitespace-pre-wrap">
+                    {transcodeLog.join('\n')}
+                  </pre>
+                </details>
               ) : null}
             </div>
           ) : null}
