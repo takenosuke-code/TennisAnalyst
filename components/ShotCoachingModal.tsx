@@ -97,6 +97,11 @@ export default function ShotCoachingModal({
             frame_count: frames.length,
             frames,
           },
+          // mode='shot' tells the server to use the tighter per-shot
+          // token budget (max_tokens=600 instead of the tier default
+          // up to 1500). Cuts the streaming tail by ~5s for per-shot
+          // calls without affecting the page-level coach.
+          mode: 'shot',
           ...(userFocus.trim() ? { userFocus: userFocus.trim() } : {}),
         }),
         signal: controller.signal,

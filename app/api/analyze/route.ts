@@ -14,19 +14,14 @@ import { getBiomechanicsReference } from '@/lib/biomechanics-reference'
 import { SHOT_TYPE_CONFIGS } from '@/lib/shotTypeConfig'
 import { classifyAndTagCaptureQuality } from '@/lib/captureQuality'
 import {
-  buildCoachingToolInput,
   buildInferredTierCoachingBlock,
   buildTierCoachingBlock,
-  COACHING_TOOL_NAME,
-  COACHING_TOOL_SCHEMAS,
   DEFAULT_MAX_TOKENS,
   extractResponseMetrics,
   getCoachingContext,
   isTierDowngrade,
   parseTierAssessmentTrailer,
-  renderCoachingToolInputToMarkdown,
   TIER_MAX_TOKENS,
-  type CoachingToolInput,
   type SkillTier,
 } from '@/lib/profile'
 import { sanitizePromptInput } from '@/lib/sanitize'
@@ -59,7 +54,13 @@ export async function POST(request: NextRequest) {
     baselineLabel,
     shotType: bodyShotType,
     blobUrl: bodyBlobUrl,
+    // 'shot' = per-shot coaching modal — same prompt machinery but a
+    // tighter token budget since the per-shot output is shorter than
+    // the page-level synthesis. Defaults to undefined (= page-level
+    // behavior) when omitted.
+    mode: bodyMode,
   } = body
+  const isShotMode = bodyMode === 'shot'
 
   const focus = sanitizePromptInput(userFocus, 240)
   const isBaselineCompare = compareMode === 'baseline'
@@ -291,8 +292,51 @@ Same structure.
 ${lockItBody}
 
 Keep it under 350 words. Sound like a coach helping them tighten up.`
+  } else if (detectedMistakes.length === 0 && resolvedShotType) {
+    // Clean-swing branch: the rule-based auto-detector ran on the peak
+    // frame and found ZERO deviations. Every fault-finding template
+    // pressures the model to fabricate three problems even when the
+    // swing is mechanically sound, so the clean-swing path uses a
+    // celebratory format with at most ONE optional refinement and
+    // explicit permission to give zero. Eval evidence: with the
+    // standard "3 Things to Work On" template, both Sonnet and Haiku
+    // invented problems on a clean forehand fixture; with this
+    // branch they output a tight "your swing is solid, here's one
+    // thing to play with" response.
+    const soloRef = getBiomechanicsReference(refShotType)
+    prompt = `You are a tennis coach talking to a player right after watching their swing on video. Be encouraging and practical.
+${shotIntroBlock}
+${tierBlock}
+${focusBlock}
+NO ISSUES DETECTED. The auto-detection rules ran across this swing's peak frame and found ZERO deviations from textbook ranges. This swing is mechanically sound. Your job is NOT to find three things wrong. Your job is to celebrate what's working and offer at most ONE optional refinement.
+
+STRICT RULES:
+- NEVER mention degrees, angles, or numbers of any kind. Not even once. Describe everything in feel and body language.
+- NEVER rate or score the player.
+- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as a way to chain ideas or replace punctuation. Compound-word hyphens like "feel-based" are fine.
+- Talk like a real person. Short sentences. "You" and "your" constantly.
+
+Use the data below to understand what's happening, but ONLY talk in coaching language.
+
+REFERENCE: ${soloRef}
+USER SWING DATA: ${userSummary}
+
+Respond in this format:
+
+## What You're Doing Well
+Three sentences about specific elements that are working in their swing. Be confident.
+
+## Optional Refinement
+ONE sentence (NOT three) on something to play with if they want to push further. If nothing comes to mind, write "Your swing is in great shape. Keep grooving this." and stop. Do NOT invent issues.
+
+FINAL REMINDER: This swing is clean. Inventing three problems is INCORRECT. Better to under-coach a clean swing than over-coach it. Saying "your swing is solid, keep grooving it" is a CORRECT response.
+
+Keep it under 150 words. Sound like a coach who is genuinely impressed.`
   } else {
-    // Solo mode: single clip, general coaching without any reference.
+    // Solo mode: single clip, general coaching with the standard
+    // fault-finding template. Used when at least one auto-detected
+    // issue was flagged OR when shot type is unknown (we can't safely
+    // assert "no deviations" without a shot-specific rule check).
     const soloRef = getBiomechanicsReference(refShotType)
 
     // Advanced players get a trimmed prompt because listing three "tips"
@@ -363,38 +407,19 @@ For every coaching cue you give, also recommend ONE OR TWO short exercises the p
 
 After each coaching paragraph, also give 1-3 short bullet-point takeaways for someone who wants to skim. These bullets are the SAME advice without the analogies and without the feel cues, just the literal mechanic. Each bullet under ~80 characters. Examples: "Bend your elbow more at contact", "Turn your shoulders before the ball bounces", "Drive up through your back leg." The paragraph stays full coach-voice; the bullets are the dry version.`
 
-  // Primary (tool_use) system prompt. Relaxes the em-dash rule just for the
-  // literal advanced-baseline template, and instructs the model to emit its
-  // response through the emit_coaching tool rather than freeform prose.
-  const primarySystemPrompt = `You are a veteran tennis coach who has been on court for 30 years. You talk like a real person having a conversation with a player between points.
-
-VOICE RULES (follow these strictly):
-- Write like you TALK. Short sentences. Casual tone. "Your hips are way ahead of your arm here" not "The hip rotation precedes the arm extension."
-- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as a way to chain ideas or replace punctuation. Do not use them for emphasis, parenthetical asides, or to glue two clauses together. If you would have used a dash, write a full sentence with a period, OR connect the clauses with a comma, "and", "but", or a colon. Compound-word hyphens inside a single word like "feel-based" or "external-focus" are fine.
-- NEVER list raw degree numbers on their own. Wrong: "elbow: 170°, ideal: 110°". Right: "your arm is almost locked straight when you want a nice relaxed bend."
-- You CAN mention a number to back up a point, but always in a natural sentence: "you're only getting about 20 degrees of hip turn when ideal range is around 45."
-- Use coaching cues a player can FEEL: "load your weight into your back leg", "let the racket drop behind you like a pendulum", "snap your hips like you're throwing a punch."
-- Keep it practical. Every piece of advice should be something they can try on the very next ball.
-- Sound encouraging, not critical. You're helping, not grading.
-- No bullet points with just numbers. No tables. No clinical language.
-- Write "you" and "your" constantly. Talk TO the player.
-
-For every cue you emit, the schema requires 1-2 entries in the cue's "exercises" array. These are short, court-runnable drills that fix the specific issue described in that cue. Real drills, not generic "practice more" filler. Examples: "shadow forehands focusing on a relaxed elbow at contact, 20 reps each side", "slow-mo unit-turn drill against a fence, 10 reps", "wall rallies emphasizing early shoulder turn, 50 contacts." Each exercise must tie directly to the cue's title.
-
-For every cue, the schema also requires 1-3 entries in the cue's "keyPoints" array. These are short bullet-point takeaways for skimmers, the SAME advice as the body paragraph but stripped of analogies and feel cues. Just the literal mechanic. Each under ~80 characters. Examples: "Bend your elbow more at contact", "Turn your shoulders before the ball bounces", "Drive up through your back leg." The body paragraph stays full coach-voice; keyPoints are the dry version of the same advice.
-
-You will emit your response by calling the emit_coaching tool. Do not write prose outside the tool call.`
-
   // llm_coached_tier is the tier we're actually telling the LLM to coach to.
   // For self-reported users, that's the profile tier. For skipped users, the
   // LLM picks one from the swing data — null at insert, backfilled from the
   // parsed assessment trailer after the stream completes.
   const coachedTier = profile?.skill_tier ?? null
   const tierKey: SkillTier | null = profile?.skill_tier ?? null
-  const maxTokens = tierKey ? TIER_MAX_TOKENS[tierKey] : DEFAULT_MAX_TOKENS
-  // Schema selection falls back to intermediate when the user has no profile;
-  // metadata (tierKey) stays null so metrics and downgrade logic don't lie.
-  const toolSchema = COACHING_TOOL_SCHEMAS[tierKey ?? 'intermediate']
+  // Per-shot mode caps the token budget tighter — the per-shot modal
+  // shows a focused single-swing response, not the full page-level
+  // synthesis. 600 tokens is enough for "what's working + 1-3 cues +
+  // a quick practice plan" and saves ~5 sec of generation time vs
+  // the tier defaults (which run up to 1500).
+  const tierTokens = tierKey ? TIER_MAX_TOKENS[tierKey] : DEFAULT_MAX_TOKENS
+  const maxTokens = isShotMode ? Math.min(tierTokens, 600) : tierTokens
 
   // resolvedShotType + resolvedBlobUrl are set above (before the prompt is
   // built) so the coaching prompt can be shot-type-aware. The telemetry row
@@ -444,155 +469,96 @@ You will emit your response by calling the emit_coaching tool. Do not write pros
   const encoder = new TextEncoder()
   const ERROR_PREFIX = '\n\n[ERROR] '
 
-  // Try the structured (tool_use) path first. Returns null on any failure so
-  // the caller can fall back to the streaming path. Kill-switch short-circuits
-  // before we ever touch the SDK.
-  async function tryStructured(): Promise<
-    | { markdown: string; toolInput: CoachingToolInput; outputTokens: number | null }
-    | null
-  > {
-    if (process.env.STRUCTURED_OUTPUT_DISABLE === '1') return null
-    // Skipped users (no profile) need the streaming path so the model can emit
-    // a [TIER_ASSESSMENT: ...] trailer for tier inference. The tool_use schema
-    // has no trailer slot, so structured-path output would discard that signal.
-    if (!profile && skipped) return null
-    try {
-      const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: maxTokens,
-        // Prompt caching: the system prompt is the same ~600-line voice-
-        // rules + tool-use scaffolding on every call. Marking it
-        // ephemeral lets Anthropic skip re-tokenizing it within a 5-min
-        // window — saves ~1-2s of TTFB on subsequent calls and gives a
-        // 90% input-token discount on the cached portion.
-        system: [
-          { type: 'text', text: primarySystemPrompt, cache_control: { type: 'ephemeral' } },
-        ],
-        messages: [{ role: 'user', content: prompt }],
-        // TODO: drop this cast once COACHING_TOOL_SCHEMAS types `input_schema`
-        // as `Anthropic.Tool.InputSchema` instead of `Record<string, unknown>`.
-        tools: [toolSchema as unknown as Anthropic.Tool],
-        tool_choice: { type: 'tool', name: COACHING_TOOL_NAME },
-      })
+  // Single streaming path: emit chunks token-by-token to the client as
+  // they arrive from Anthropic. The previous implementation ran a
+  // tool_use primary call (non-streaming, ~15-20s of dead air) before
+  // falling back to streaming; the eval showed both paths produce the
+  // same advice quality, so the structured intermediate is dead
+  // weight. tool_use → streaming gives users a first token in ~1s
+  // instead of waiting for the full JSON response.
+  //
+  // Trailer suppression: skipped-onboarding users (no profile) get a
+  // `[TIER_ASSESSMENT: <tier>]` trailer at the end of the response
+  // for tier inference. We don't want that text flashed to the user,
+  // so for those users only we hold back the last 80 chars of stream
+  // output and parse the trailer on close before flushing the tail.
+  // Profile users (the majority) emit immediately with no buffering.
+  const isSkippedNoProfile = !profile && skipped
+  const TRAILER_HOLDBACK = isSkippedNoProfile ? 80 : 0
 
-      if (!Array.isArray(response.content) || response.content.length === 0) {
-        return null
-      }
-      const toolBlock = response.content.find(
-        (b): b is Extract<typeof b, { type: 'tool_use' }> =>
-          b.type === 'tool_use' && b.name === COACHING_TOOL_NAME,
-      )
-      if (!toolBlock) return null
-
-      const parsed = buildCoachingToolInput(toolBlock.input, tierKey)
-      if (!parsed) return null
-
-      const rendered = renderCoachingToolInputToMarkdown(parsed, tierKey)
-      if (!rendered) return null
-
-      const outputTokens = response.usage?.output_tokens ?? null
-      return { markdown: rendered, toolInput: parsed, outputTokens }
-    } catch (err) {
-      console.error('analyze structured path failed:', err)
-      return null
-    }
-  }
-
-  // Fallback streaming path. Preserves the pre-tool-use behavior: buffer the
-  // full response, strip the TIER_ASSESSMENT trailer, return the assessed tier
-  // so the backfill UPDATE can record it. Per-tier max_tokens is now honored
-  // here too (previously hardcoded to 1024).
-  async function runFallback(): Promise<{
-    markdown: string
-    assessedTier: ReturnType<typeof parseTierAssessmentTrailer>['assessedTier']
-    error: string | null
-  }> {
-    const messageStream = anthropic.messages.stream({
-      model: 'claude-sonnet-4-6',
-      max_tokens: maxTokens,
-      // Same prompt-caching pattern as the structured path. fallback
-      // and primary use different system prompts so they cache as
-      // separate entries — each saves ~1-2s TTFB on cache hits.
-      system: [
-        { type: 'text', text: fallbackSystemPrompt, cache_control: { type: 'ephemeral' } },
-      ],
-      messages: [{ role: 'user', content: prompt }],
-    })
-
-    let buffered = ''
-    let error: string | null = null
-    try {
-      for await (const chunk of messageStream) {
-        if (
-          chunk.type === 'content_block_delta' &&
-          chunk.delta.type === 'text_delta'
-        ) {
-          buffered += chunk.delta.text
-        }
-      }
-    } catch (err) {
-      error = err instanceof Error ? err.message : 'Analysis stream failed'
-    }
-    const { assessedTier, stripped } = parseTierAssessmentTrailer(buffered)
-    return { markdown: stripped, assessedTier, error }
-  }
-
-  // We buffer the full response before emitting, then parse + strip the
-  // [TIER_ASSESSMENT: ...] trailer. Latency cost is the streaming UX (response
-  // arrives in one shot instead of token-by-token), but the telemetry signal —
-  // seeing what the model thought the tier was, even when the defanged
-  // reconcile rule prevents it from acting — is worth far more than perceived
-  // typing speed. Total generation is capped per-tier so the wait is bounded.
   const stream = new ReadableStream({
     async start(controller) {
-      const structured = await tryStructured()
-
-      let markdown: string
-      let toolInput: CoachingToolInput | null
-      let outputTokens: number | null
-      let assessedTier:
-        | 'beginner'
-        | 'intermediate'
-        | 'competitive'
-        | 'advanced'
-        | 'unknown'
-        | null
+      let buffered = '' // full response, used for telemetry parsing + trailer strip
+      let pending = '' // tail held back from emission (only when isSkippedNoProfile)
       let streamError: string | null = null
+      let outputTokens: number | null = null
 
-      if (structured) {
-        markdown = structured.markdown
-        toolInput = structured.toolInput
-        outputTokens = structured.outputTokens
-        // tool_use forecloses model dissent on tier — by definition the model
-        // coached to the tier we passed in. Null when we had no profile.
-        assessedTier = tierKey
-      } else {
-        const fb = await runFallback()
-        markdown = fb.markdown
-        toolInput = null
-        outputTokens = null
-        assessedTier = fb.assessedTier
-        streamError = fb.error
+      try {
+        const messageStream = anthropic.messages.stream({
+          model: 'claude-sonnet-4-6',
+          max_tokens: maxTokens,
+          // Prompt caching: ~40-line voice-rules system prompt is the
+          // same on every call. Ephemeral cache_control gives a 90%
+          // input-token discount on the cached portion within a 5-min
+          // window and saves ~1-2s TTFB on cache hits.
+          system: [
+            { type: 'text', text: fallbackSystemPrompt, cache_control: { type: 'ephemeral' } },
+          ],
+          messages: [{ role: 'user', content: prompt }],
+        })
+
+        for await (const chunk of messageStream) {
+          if (
+            chunk.type === 'content_block_delta' &&
+            chunk.delta.type === 'text_delta'
+          ) {
+            const text = chunk.delta.text
+            buffered += text
+            if (TRAILER_HOLDBACK === 0) {
+              // Emit immediately — the common path.
+              controller.enqueue(encoder.encode(text))
+            } else {
+              // Hold back the trailing window so [TIER_ASSESSMENT: ...]
+              // can be detected and suppressed. Anything past the
+              // holdback gets emitted now.
+              pending += text
+              if (pending.length > TRAILER_HOLDBACK) {
+                const head = pending.slice(0, pending.length - TRAILER_HOLDBACK)
+                pending = pending.slice(pending.length - TRAILER_HOLDBACK)
+                controller.enqueue(encoder.encode(head))
+              }
+            }
+          } else if (chunk.type === 'message_delta' && chunk.usage?.output_tokens) {
+            outputTokens = chunk.usage.output_tokens
+          }
+        }
+      } catch (err) {
+        streamError = err instanceof Error ? err.message : 'Analysis stream failed'
       }
 
-      controller.enqueue(encoder.encode(markdown))
+      // Stream done. Parse trailer (cheap regex on full buffered text)
+      // and flush only the cleaned tail that hasn't been emitted yet.
+      const { assessedTier, stripped } = parseTierAssessmentTrailer(buffered)
+      const emittedSoFar = buffered.length - pending.length
+      const tailToFlush = stripped.slice(emittedSoFar)
+      if (tailToFlush) controller.enqueue(encoder.encode(tailToFlush))
+
       if (streamError) {
         controller.enqueue(encoder.encode(`${ERROR_PREFIX}${streamError}`))
       }
       controller.close()
 
-      // Backfill the parsed assessment + downgrade flag, plus the new output
-      // metrics. Wrapped in after() so Vercel keeps the invocation live past
-      // controller.close() — without this the DB UPDATE gets dropped when the
-      // function freezes.
+      // Backfill telemetry. Wrapped in after() so Vercel keeps the
+      // invocation alive past controller.close() — without this the DB
+      // UPDATE gets dropped when the serverless function freezes.
       if (eventId) {
         const backfillCoached =
           coachedTier ?? (assessedTier && assessedTier !== 'unknown' ? assessedTier : null)
         const downgrade = isTierDowngrade(backfillCoached, assessedTier)
         const metrics = extractResponseMetrics({
           tier: tierKey,
-          toolInput,
-          markdownText: markdown,
+          toolInput: null,
+          markdownText: stripped,
           outputTokens,
         })
         after(async () => {
