@@ -10,30 +10,30 @@ export default function Nav() {
   return (
     <nav className="border-b border-cream/10 bg-ink/40 backdrop-blur-md sticky top-0 z-50">
       <div className="px-5 sm:px-8 h-20 flex items-center justify-between">
-        <Link href="/" className="flex items-center gap-3 font-display font-extrabold text-cream text-2xl tracking-tight">
+        <Link href="/" className="flex items-center gap-3 font-display font-extrabold text-cream text-3xl tracking-tight">
           {/* Tennis ball — small inline SVG with the curve seam. Replaces
               the 🎾 emoji so the brand mark inherits the new aesthetic. */}
-          <svg viewBox="0 0 24 24" className="w-7 h-7 text-clay-soft" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+          <svg viewBox="0 0 24 24" className="w-8 h-8 text-clay-soft" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
             <circle cx="12" cy="12" r="9" />
             <path d="M3.5 9c4 1 8 1 12 0M3.5 16c4-1 8-1 12 0" transform="translate(2,-1)" />
           </svg>
           <span>Swingframe</span>
         </Link>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           <NavLink href="/live">Live</NavLink>
           <NavLink href="/analyze">Analyze</NavLink>
           <NavLink href="/baseline">Baselines</NavLink>
 
-          <div className="ml-3 pl-3 border-l border-cream/15">
+          <div className="ml-3 pl-4 border-l border-cream/15">
             {loading ? (
-              <div className="w-10 h-7" aria-hidden />
+              <div className="w-11 h-8" aria-hidden />
             ) : user ? (
               <AccountMenu email={user.email ?? 'Account'} />
             ) : (
               <Link
                 href="/login"
-                className="px-5 py-2 rounded-full text-base font-semibold tracking-wide bg-clay hover:bg-[#c4633f] text-cream transition-colors"
+                className="px-6 py-2.5 rounded-full text-lg font-semibold tracking-wide bg-clay hover:bg-[#c4633f] text-cream transition-colors"
               >
                 Sign In
               </Link>
@@ -50,7 +50,7 @@ function AccountMenu({ email }: { email: string }) {
   const initial = email[0]?.toUpperCase() ?? '?'
   return (
     <details className="relative group">
-      <summary className="list-none cursor-pointer w-10 h-10 rounded-full bg-clay/30 border border-clay/40 flex items-center justify-center text-clay-soft text-base font-semibold hover:bg-clay/40">
+      <summary className="list-none cursor-pointer w-11 h-11 rounded-full bg-clay/30 border border-clay/40 flex items-center justify-center text-clay-soft text-lg font-semibold hover:bg-clay/40">
         {initial}
       </summary>
       <div className="absolute right-0 mt-2 w-56 border border-ink/40 bg-ink shadow-xl overflow-hidden">
@@ -84,7 +84,7 @@ function NavLink({ href, children }: { href: string; children: React.ReactNode }
   return (
     <Link
       href={href}
-      className={`px-4 py-2 text-base font-medium tracking-wide transition-colors ${
+      className={`px-4 py-2 text-lg font-medium tracking-wide transition-colors ${
         isActive
           ? 'text-cream'
           : 'text-cream/60 hover:text-cream'

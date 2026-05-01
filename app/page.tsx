@@ -93,47 +93,58 @@ export default function HomePage() {
       <section className="bg-green-wash text-cream relative overflow-hidden min-h-screen">
         {/* Rally + court overlay — drawn behind the text. min-h-screen
             keeps the court filling the viewport so the next section
-            sits below the fold; we drop the flex-center so the headline
-            lands on the court's center service line (drawn at 50% of
-            the section in HeroRally's SVG) instead of being shoved
-            mid-section. */}
+            sits below the fold. The headline is absolutely positioned
+            so its baseline lands right on the court's horizontal
+            center service line (drawn at 50% in HeroRally's SVG). */}
         <HeroRally />
 
-        {/* Hero copy. pt-* values are tuned so the baseline of
-            "Last Swing." lands right on the horizontal cream line at
-            50% of the section. Buttons + paragraph drop below the
-            line, the eyeline stays on the headline. */}
-        <div className="relative max-w-3xl mx-auto px-5 sm:px-8 pt-32 pb-24 lg:pt-44 lg:pb-36 text-center">
-          <p className="text-[11px] sm:text-xs uppercase tracking-[0.18em] text-cream/70 mb-5">
-            AI Pose Tracking · For Tennis
-          </p>
-          <h1
-            className="font-display text-cream leading-[0.92] tracking-[-0.02em] text-[52px] sm:text-[76px] lg:text-[104px] mb-6"
-            style={{
-              fontWeight: 900,
-              fontVariationSettings: '"opsz" 144, "wght" 900, "SOFT" 30',
-            }}
-          >
-            Beat Your<br />Last Swing.
-          </h1>
-          <p className="text-cream/80 text-base sm:text-lg max-w-xl mx-auto mb-8 leading-relaxed">
-            Drop a video. We read your joint angles, save your best day, and tell
-            you what drifted in plain English. No clipboards, no stopwatches,
-            no jargon.
-          </p>
-          <div className="flex flex-col sm:flex-row gap-3 justify-center">
-            <Link
-              href="/analyze"
-              className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-sm font-semibold tracking-wide transition-colors"
+        {/* Top half: overline + headline, anchored so the BOTTOM of the
+            headline block sits at 50% of the section. -translate-y-full
+            on a top:50% block puts its bottom edge exactly at 50vh
+            regardless of viewport height. */}
+        <div className="absolute left-0 right-0 top-1/2 -translate-y-full px-5 sm:px-8 text-center pointer-events-none">
+          <div className="max-w-3xl mx-auto">
+            <p className="text-xs sm:text-sm uppercase tracking-[0.18em] text-cream/70 mb-5">
+              AI Pose Tracking · For Tennis
+            </p>
+            <h1
+              className="font-display text-cream leading-[0.92] tracking-[-0.02em] text-[64px] sm:text-[92px] lg:text-[128px]"
+              style={{
+                fontWeight: 900,
+                fontVariationSettings: '"opsz" 144, "wght" 900, "SOFT" 30',
+              }}
             >
-              Analyze My Swing
-            </Link>
-            <Link
-              href="/baseline"
-              className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-cream hover:bg-cream-soft text-ink text-sm font-semibold tracking-wide transition-colors"
-            >
-              My Baselines
-            </Link>
+              Beat Your<br />Last Swing.
+            </h1>
+          </div>
+        </div>
+
+        {/* Bottom half: paragraph + buttons, anchored at 50% of the
+            section so they sit just below the line and below the
+            headline. pointer-events restored on this block so the
+            buttons remain clickable; the headline block is decorative
+            so it stays pointer-events-none. */}
+        <div className="absolute left-0 right-0 top-1/2 px-5 sm:px-8 text-center pt-10 lg:pt-14">
+          <div className="max-w-3xl mx-auto">
+            <p className="text-cream/80 text-lg sm:text-xl max-w-2xl mx-auto mb-10 leading-relaxed">
+              Drop a video. We read your joint angles, save your best day, and tell
+              you what drifted in plain English. No clipboards, no stopwatches,
+              no jargon.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-3 justify-center">
+              <Link
+                href="/analyze"
+                className="inline-flex items-center justify-center px-8 py-4 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-base font-semibold tracking-wide transition-colors"
+              >
+                Analyze My Swing
+              </Link>
+              <Link
+                href="/baseline"
+                className="inline-flex items-center justify-center px-8 py-4 rounded-full bg-cream hover:bg-cream-soft text-ink text-base font-semibold tracking-wide transition-colors"
+              >
+                My Baselines
+              </Link>
+            </div>
           </div>
         </div>
       </section>
