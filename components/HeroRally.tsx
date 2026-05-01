@@ -67,53 +67,72 @@ type KeyframeAngles = {
 // (85°, 120°) — elbow always below or outside the left shoulder, so
 // the non-racket hand never crosses inward across the body.
 const KEYFRAME_ANGLES: KeyframeAngles[] = [
-  // Off-arm always sits clearly outside the body silhouette — uArmL ≥
-  // 110° and fArmL ≥ 125° at every phase, so the wrist is at least
-  // ~0.12 normalized units left of the shoulder (well past the body's
-  // left edge at ~0.05). Motion: idle out-and-down → extend toward
-  // ball at prep → retract through contact but stay out → return.
+  // Forehand modeled on the kinetic-chain phases in
+  // lib/biomechanics-reference.ts:
+  //  - t=0.4  Loading peak: full coil, racket cocked behind shoulder,
+  //           knees flexed (back-leg knee ~140°, biomech ideal range
+  //           130-150°), off-arm extended toward the ball.
+  //  - t=0.55 Hips fire (kinetic chain begins — hip peak ~75ms before
+  //           contact in elite players, ~t=0.55 in this 1.6s cycle).
+  //  - t=0.6  Trunk catches up (peak forward lean), arm extending.
+  //  - t=0.65 CONTACT: dominant elbow ~120° (within 100-140° biomech
+  //           range), arm out front, racket extending toward target.
+  //  - t=0.725 Follow-through: arm continues across the body, racket
+  //           sweeps out toward the net (no bounce-back).
+  //  - t=0.8  Finish: arm relaxes back toward ready, racket curls up
+  //           through chest level (capped — never over the shoulder).
+  // Off-arm uArmL/fArmL stay ≥ 110/125° throughout so the off-hand
+  // never crosses inward across the body.
   { t: 0.0, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -90.0,
-    uArmL: 110.0, fArmL: 125.0, uArmR: 67.1, fArmR: 70.2,
+    uArmL: 110.0, fArmL: 125.0, uArmR: 85.0, fArmR: 85.0,
     thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
-    racket: -79.8, racketLen: 0.13 },
-  { t: 0.15, hipCenter: [0.52, 0.55], trunk: -90.0, neck: -95.7,
-    uArmL: 120.0, fArmL: 145.0, uArmR: 69.9, fArmR: 55.1,
+    racket: -75.0, racketLen: 0.13 },
+  // Unit turn — shoulders begin coiling, racket pulls back to right
+  { t: 0.15, hipCenter: [0.51, 0.555], trunk: -90.0, neck: -94.0,
+    uArmL: 120.0, fArmL: 145.0, uArmR: 70.0, fArmR: 20.0,
     thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
-    racket: -79.8, racketLen: 0.13 },
-  { t: 0.4, hipCenter: [0.53, 0.56], trunk: -85.4, neck: -106.7,
-    uArmL: 140.0, fArmL: 170.0, uArmR: -15.0, fArmR: -65.2,
-    thighL: 109.9, shinL: 79.9, thighR: 70.1, shinR: 100.1,
-    racket: -100.2, racketLen: 0.13 },
-  { t: 0.475, hipCenter: [0.525, 0.56], trunk: -86.6, neck: -104.0,
-    uArmL: 125.0, fArmL: 145.0, uArmR: 2.1, fArmR: 10.0,
-    thighL: 108.1, shinL: 82.0, thighR: 71.9, shinR: 98.0,
-    racket: 29.9, racketLen: 0.13 },
-  { t: 0.55, hipCenter: [0.52, 0.56], trunk: -87.7, neck: -101.3,
-    uArmL: 115.0, fArmL: 135.0, uArmR: 20.1, fArmR: 84.8,
-    thighL: 105.0, shinL: 85.1, thighR: 75.0, shinR: 94.9,
-    racket: 100.2, racketLen: 0.13 },
-  { t: 0.6, hipCenter: [0.505, 0.555], trunk: -87.7, neck: -98.5,
-    uArmL: 110.0, fArmL: 130.0, uArmR: 64.9, fArmR: 98.2,
-    thighL: 101.9, shinL: 86.0, thighR: 78.1, shinR: 94.9,
-    racket: 150.1, racketLen: 0.13 },
-  { t: 0.65, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -95.7,
-    uArmL: 110.0, fArmL: 130.0, uArmR: 112.0, fArmR: 112.1,
-    thighL: 100.2, shinL: 88.0, thighR: 79.8, shinR: 94.9,
-    racket: -160.2, racketLen: 0.13 },
-  // Mid follow-through: racket arm fully extended toward the net
-  // (uArmR=145, fArmR=170 — wrist swings far left), racket holds at
-  // ~horizontal-left (-160 raw = 200° unwrapped, same as contact)
-  // before curling up.
-  { t: 0.725, hipCenter: [0.49, 0.55], trunk: -91.1, neck: -90.0,
-    uArmL: 110.0, fArmL: 125.0, uArmR: 145.0, fArmR: 170.0,
-    thighL: 97.1, shinL: 89.1, thighR: 81.9, shinR: 92.9,
+    racket: -65.0, racketLen: 0.13 },
+  // Loading peak — full coil, racket cocked, back-leg loaded ~140°
+  { t: 0.4, hipCenter: [0.53, 0.56], trunk: -85.0, neck: -100.0,
+    uArmL: 140.0, fArmL: 170.0, uArmR: 20.0, fArmR: -30.0,
+    thighL: 105.0, shinL: 80.0, thighR: 72.0, shinR: 105.0,
+    racket: -100.0, racketLen: 0.13 },
+  // Drop — racket loops below contact zone, weight on back foot
+  { t: 0.475, hipCenter: [0.525, 0.56], trunk: -85.0, neck: -98.0,
+    uArmL: 125.0, fArmL: 145.0, uArmR: 50.0, fArmR: 70.0,
+    thighL: 103.0, shinL: 82.0, thighR: 75.0, shinR: 100.0,
+    racket: 40.0, racketLen: 0.13 },
+  // Hip rotation peak — kinetic chain firing, forward swing begins
+  { t: 0.55, hipCenter: [0.51, 0.555], trunk: -83.0, neck: -96.0,
+    uArmL: 115.0, fArmL: 135.0, uArmR: 80.0, fArmR: 110.0,
+    thighL: 100.0, shinL: 86.0, thighR: 80.0, shinR: 95.0,
+    racket: 110.0, racketLen: 0.13 },
+  // Trunk peak — peak forward lean, arm extending toward contact
+  { t: 0.6, hipCenter: [0.50, 0.555], trunk: -82.0, neck: -94.0,
+    uArmL: 110.0, fArmL: 130.0, uArmR: 105.0, fArmR: 145.0,
+    thighL: 98.0, shinL: 88.0, thighR: 82.0, shinR: 93.0,
+    racket: 155.0, racketLen: 0.13 },
+  // CONTACT — arm extended (elbow ~120°), front knee driving up,
+  // off-arm tucks slightly, racket toward target
+  { t: 0.65, hipCenter: [0.49, 0.55], trunk: -85.0, neck: -92.0,
+    uArmL: 110.0, fArmL: 130.0, uArmR: 120.0, fArmR: 170.0,
+    thighL: 96.0, shinL: 90.0, thighR: 85.0, shinR: 92.0,
     racket: -160.0, racketLen: 0.13 },
-  // Finish: racket curls up to ~chest height (racket -110 raw =
-  // 250° unwrapped) as the arm starts relaxing back toward idle.
-  { t: 0.8, hipCenter: [0.48, 0.55], trunk: -92.3, neck: -84.3,
-    uArmL: 110.0, fArmL: 125.0, uArmR: 125.0, fArmR: 130.0,
-    thighL: 95.1, shinL: 90.0, thighR: 84.9, shinR: 90.0,
-    racket: -110.0, racketLen: 0.12 },
+  // Follow-through — racket continues out toward the net, arm sweeps
+  // across the body. uArmR caps at 135° (well below "behind the head"
+  // 180°+) so the racket-head arc peaks around chest, not over the
+  // off-shoulder.
+  { t: 0.725, hipCenter: [0.48, 0.55], trunk: -88.0, neck: -90.0,
+    uArmL: 110.0, fArmL: 125.0, uArmR: 135.0, fArmR: 170.0,
+    thighL: 94.0, shinL: 90.0, thighR: 87.0, shinR: 91.0,
+    racket: -130.0, racketLen: 0.13 },
+  // Finish — kinetic chain decelerating, arm relaxes back toward
+  // ready. Racket continues circular sweep through "up" (-90 raw =
+  // 270° unwrapped), wrist now near hip height so racket stays low.
+  { t: 0.8, hipCenter: [0.47, 0.55], trunk: -90.0, neck: -88.0,
+    uArmL: 110.0, fArmL: 125.0, uArmR: 110.0, fArmR: 125.0,
+    thighL: 92.0, shinL: 90.0, thighR: 89.0, shinR: 90.0,
+    racket: -90.0, racketLen: 0.12 },
 ]
 const N = KEYFRAME_ANGLES.length
 
