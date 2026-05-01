@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient } from '@/lib/supabase/server'
 
 // POST /api/extract — proxy that asks Railway (or Modal directly) to run
 // server-side pose extraction on an already-uploaded Vercel Blob.
@@ -161,6 +162,19 @@ export async function POST(request: NextRequest) {
 // pipeline mints. No Bearer header is required.
 // -----------------------------------------------------------------------
 async function handleBatchEphemeral(blobUrl: unknown): Promise<NextResponse> {
+  // Auth gate: middleware excludes /api/, so this endpoint is otherwise
+  // open to anyone with a public Vercel Blob URL — which would let
+  // unauthenticated callers burn T4 GPU credits on Modal indefinitely.
+  // The legacy path uses Bearer auth via Railway, but batch-ephemeral
+  // skips Railway, so we enforce a Supabase session here directly.
+  const authClient = await createClient()
+  const { data: userData } = await authClient.auth
+    .getUser()
+    .catch(() => ({ data: { user: null } }))
+  if (!userData?.user) {
+    return NextResponse.json({ error: 'Not signed in' }, { status: 401 })
+  }
+
   if (!MODAL_INFERENCE_URL) {
     return NextResponse.json(
       { error: 'modal-not-configured' },

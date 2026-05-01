@@ -10,6 +10,18 @@ const MOCK_RAILWAY_URL = 'https://railway.test.example.com'
 const MOCK_API_KEY = 'test-extract-key'
 const MOCK_MODAL_URL = 'https://modal.test.example.com/extract'
 
+// Auth client mock: defaults to a signed-in user so existing
+// batch-ephemeral happy-path tests keep working. The 401 test flips
+// this to null per-call.
+const mockGetUser = vi.fn<() => Promise<{ data: { user: { id: string } | null } }>>(
+  async () => ({ data: { user: { id: 'user-1' } } }),
+)
+vi.mock('@/lib/supabase/server', () => ({
+  createClient: async () => ({
+    auth: { getUser: mockGetUser },
+  }),
+}))
+
 function makeReq(body: unknown): NextRequest {
   return new NextRequest('http://localhost:3000/api/extract', {
     method: 'POST',
@@ -30,6 +42,9 @@ describe('POST /api/extract', () => {
     vi.stubEnv('RAILWAY_SERVICE_URL', MOCK_RAILWAY_URL)
     vi.stubEnv('EXTRACT_API_KEY', MOCK_API_KEY)
     vi.stubEnv('MODAL_INFERENCE_URL', MOCK_MODAL_URL)
+    // Reset auth mock to signed-in default each test.
+    mockGetUser.mockReset()
+    mockGetUser.mockResolvedValue({ data: { user: { id: 'user-1' } } })
   })
 
   afterEach(() => {
@@ -154,6 +169,55 @@ describe('POST /api/extract', () => {
       pose_backend: 'rtmpose-modal-cuda',
       timing: { download_ms: 100, inference_ms: 200 },
     }
+
+    it('returns 401 when no Supabase session is present', async () => {
+      // Auth gate: middleware excludes /api/, so without a signed-in
+      // user, an unauthenticated caller could otherwise burn T4 GPU
+      // credits on Modal indefinitely.
+      mockGetUser.mockResolvedValueOnce({ data: { user: null } })
+      const mockFetch = vi.mocked(fetch)
+      const POST = await importRoute()
+      const res = await POST(
+        makeReq({ mode: 'batch-ephemeral', blobUrl: 'https://blob/x.mp4' }),
+      )
+      expect(res.status).toBe(401)
+      const body = await res.json()
+      expect(body.error).toBe('Not signed in')
+      // Critical: Modal must NOT be called when auth fails.
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+
+    it('returns 401 when auth.getUser throws', async () => {
+      // Defense in depth: if Supabase auth itself errors, we treat the
+      // user as unauthenticated rather than letting the request through.
+      mockGetUser.mockRejectedValueOnce(new Error('supabase down'))
+      const mockFetch = vi.mocked(fetch)
+      const POST = await importRoute()
+      const res = await POST(
+        makeReq({ mode: 'batch-ephemeral', blobUrl: 'https://blob/x.mp4' }),
+      )
+      expect(res.status).toBe(401)
+      expect(mockFetch).not.toHaveBeenCalled()
+    })
+
+    it('returns 200 when a valid session is present (auth gate passes)', async () => {
+      // Mirror image of the 401 test: a signed-in user reaches Modal
+      // and gets keypoints back inline.
+      mockGetUser.mockResolvedValueOnce({ data: { user: { id: 'user-42' } } })
+      const mockFetch = vi.mocked(fetch)
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify(MODAL_OK_BODY), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      const POST = await importRoute()
+      const res = await POST(
+        makeReq({ mode: 'batch-ephemeral', blobUrl: 'https://blob/x.mp4' }),
+      )
+      expect(res.status).toBe(200)
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+    })
 
     it('returns 503 (modal-not-configured) when MODAL_INFERENCE_URL is unset', async () => {
       vi.resetModules()
