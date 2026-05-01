@@ -84,9 +84,9 @@ const KEYFRAME_ANGLES: KeyframeAngles[] = [
   // Off-arm uArmL/fArmL stay ≥ 110/125° throughout so the off-hand
   // never crosses inward across the body.
   { t: 0.0, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -90.0,
-    uArmL: 110.0, fArmL: 125.0, uArmR: 85.0, fArmR: 85.0,
+    uArmL: 110.0, fArmL: 125.0, uArmR: 85.0, fArmR: 110.0,
     thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
-    racket: -75.0, racketLen: 0.13 },
+    racket: -90.0, racketLen: 0.13 },
   // Unit turn — shoulders begin coiling, racket pulls back to right
   { t: 0.15, hipCenter: [0.51, 0.555], trunk: -90.0, neck: -94.0,
     uArmL: 120.0, fArmL: 145.0, uArmR: 70.0, fArmR: 20.0,
