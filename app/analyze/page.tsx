@@ -18,8 +18,6 @@ import { useProfile } from '@/hooks/useProfile'
 import type { SwingSegment } from '@/lib/jointAngles'
 import type { PoseFrame, VideoSegment } from '@/lib/supabase'
 
-const VALID_BASELINE_SHOTS = new Set(['forehand', 'backhand', 'serve', 'volley', 'slice'])
-
 // Dynamic import to avoid SSR issues with MediaPipe WASM
 const UploadZone = dynamic(() => import('@/components/UploadZone'), { ssr: false })
 const VideoCanvas = dynamic(() => import('@/components/VideoCanvas'), { ssr: false })
@@ -39,8 +37,6 @@ export default function AnalyzePage() {
   const [done, setDone] = useState(false)
   const [allFrames, setAllFrames] = useState<PoseFrame[]>([])
   const [selectedSwing, setSelectedSwing] = useState<number | null>(null)
-  const [baselineStatus, setBaselineStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
-  const [baselineError, setBaselineError] = useState<string | null>(null)
   const { user, loading: authLoading } = useUser()
   const { profile, skipped, loading: profileLoading } = useProfile()
   const router = useRouter()
@@ -204,21 +200,15 @@ export default function AnalyzePage() {
     setSelectedSwing(seg.index)
   }
 
-  // The frames to send to the LLM - either the selected swing or all frames
-  const analysisFrames = selectedSwing && swings[selectedSwing - 1]
-    ? swings[selectedSwing - 1].frames
-    : framesData
-
-  // For baseline saving: multi-swing videos must have one swing selected.
-  // Single-swing videos use all frames directly.
-  const baselineFrames = analysisFrames
-  const canSaveBaseline =
-    done &&
-    !!blobUrl &&
-    !!shotType &&
-    VALID_BASELINE_SHOTS.has(shotType) &&
-    baselineFrames.length > 0 &&
-    (!hasMultipleSwings || selectedSwing !== null)
+  // Page-level coaching scope: all detected swings concatenated. The
+  // panel produces general advice across the full rally (e.g. "your
+  // elbow drops in the second half of your sets"). Per-shot drill-down
+  // happens inside SwingBaselineGrid's "Coach this shot" action, which
+  // scopes a coach call to a single swing's frames.
+  const allSwingFrames = useMemo<PoseFrame[]>(
+    () => swings.flatMap((s) => s.frames),
+    [swings],
+  )
 
   // Per-swing baseline save state. The SwingBaselineGrid lets the user
   // save N independent swings from a long rally clip (e.g. 15 forehands
@@ -303,40 +293,6 @@ export default function AnalyzePage() {
     router.push('/baseline/compare')
   }
 
-  const saveAsBaseline = async () => {
-    if (!canSaveBaseline) return
-    setBaselineStatus('saving')
-    setBaselineError(null)
-    try {
-      const keypointsJson = {
-        fps_sampled: 30,
-        frame_count: baselineFrames.length,
-        frames: baselineFrames,
-      }
-      const res = await fetch('/api/baselines', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({
-          blobUrl,
-          shotType,
-          keypointsJson,
-          sourceSessionId: sessionId ?? undefined,
-        }),
-      })
-      if (!res.ok) {
-        const msg = (await res.text()) || `HTTP ${res.status}`
-        setBaselineStatus('error')
-        setBaselineError(msg)
-        return
-      }
-      setBaselineStatus('saved')
-    } catch (err) {
-      setBaselineStatus('error')
-      setBaselineError(err instanceof Error ? err.message : 'Failed to save baseline')
-    }
-  }
-
   return (
     <div className="max-w-7xl mx-auto px-5 sm:px-8 py-12">
       <div className="mb-10">
@@ -401,15 +357,15 @@ export default function AnalyzePage() {
             />
           )}
 
-          {/* Multi-swing baseline grid. Renders one card per detected
-              swing so a long rally clip (e.g. 15 forehands in a row)
-              produces 15 independently-saveable baselines. Uses the
-              client-side detectSwings() output directly — no Railway
-              / video-segments dependency. Renders only when there's
-              at least one swing AND the user has a blob URL to
-              reference; the existing single-CTA path below still
-              handles single-swing clips. */}
-          {done && hasMultipleSwings && blobUrl && (
+          {/* Per-shot baseline grid. The ONLY save-as-baseline path —
+              renders for any clip with at least one detected swing
+              (single-shot uploads still go through this UI; the prior
+              "save the whole 3-min video" path is gone because saving
+              a multi-shot rally as a single baseline has no anatomical
+              anchor). Long rallies produce N independently-saveable
+              baselines. Uses the client-side detectSwings() output
+              directly — no Railway / video-segments dependency. */}
+          {done && swings.length >= 1 && blobUrl && (
             <SwingBaselineGrid
               swings={swings}
               blobUrl={blobUrl}
@@ -448,59 +404,6 @@ export default function AnalyzePage() {
             />
           )}
 
-          {/* Advanced-tier players care most about drift-vs-baseline; surface the
-              baseline save as the lead action and keep the coaching panel below. */}
-          {done && isAdvanced && (
-            <div className="bg-cream text-ink">
-              <div className="h-2 bg-clay" />
-              <div className="p-5 flex items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <p className="font-display font-bold text-ink text-base mb-1">
-                    Your real wins are drift-focused
-                  </p>
-                  <p className="text-ink/65 text-sm">
-                    Save this and compare against future takes.
-                  </p>
-                  {baselineStatus === 'error' && baselineError && (
-                    <p className="text-clay text-xs mt-2">{baselineError}</p>
-                  )}
-                  {baselineStatus === 'saved' && (
-                    <p className="text-ink/70 text-xs mt-2">
-                      Saved. Future uploads will compare against this.
-                    </p>
-                  )}
-                </div>
-                {!authLoading && !user ? (
-                  <Link
-                    href="/login?next=/analyze"
-                    className="px-4 py-2 bg-clay hover:bg-[#c4633f] text-cream text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0"
-                  >
-                    Sign in to save
-                  </Link>
-                ) : baselineStatus === 'saved' ? (
-                  <Link
-                    href="/baseline/compare"
-                    className="px-4 py-2 bg-ink hover:bg-ink-soft text-cream text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0"
-                  >
-                    Compare new swing →
-                  </Link>
-                ) : (
-                  <button
-                    onClick={saveAsBaseline}
-                    disabled={!canSaveBaseline || baselineStatus === 'saving'}
-                    className={`px-4 py-2 text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0 ${
-                      !canSaveBaseline || baselineStatus === 'saving'
-                        ? 'bg-ink/10 text-ink/40 cursor-not-allowed'
-                        : 'bg-clay hover:bg-[#c4633f] text-cream'
-                    }`}
-                  >
-                    {baselineStatus === 'saving' ? 'Saving...' : 'Save as baseline'}
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
           {/* Subtle nudge for users who skipped onboarding — one line, no CTA
               button. Only rendered when an analysis is ready so it sits near
               the coaching output where the tailoring would apply. */}
@@ -515,59 +418,7 @@ export default function AnalyzePage() {
 
           {/* LLM coaching */}
           {done && (
-            <LLMCoachingPanel frames={analysisFrames} />
-          )}
-
-          {/* Baseline CTA — the main pivot action. Hidden for advanced-tier
-              users because the drift-focused card above already wires the
-              same save-as-baseline action. */}
-          {done && !isAdvanced && (
-            <div className="bg-cream text-ink flex">
-              <div className="w-2 bg-hard-court" />
-              <div className="flex-1 p-4 flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <p className="font-display font-bold text-ink text-sm">Is this your best day?</p>
-                  <p className="text-ink/60 text-xs mt-1 leading-relaxed">
-                    {!authLoading && !user
-                      ? 'Sign in to save this as a baseline and track progress across future swings.'
-                      : hasMultipleSwings && selectedSwing === null
-                        ? 'Pick a single swing above to save it as a baseline.'
-                        : baselineStatus === 'saved'
-                          ? 'Saved. Upload future swings on the baseline compare page to track progress.'
-                          : baselineStatus === 'error'
-                            ? baselineError ?? 'Failed to save baseline.'
-                            : 'Save this as a baseline and compare future swings against it.'}
-                  </p>
-                </div>
-                {!authLoading && !user ? (
-                  <Link
-                    href="/login?next=/analyze"
-                    className="px-4 py-2 bg-clay hover:bg-[#c4633f] text-cream text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0"
-                  >
-                    Sign in to save
-                  </Link>
-                ) : baselineStatus === 'saved' ? (
-                  <Link
-                    href="/baseline/compare"
-                    className="px-4 py-2 bg-ink hover:bg-ink-soft text-cream text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0"
-                  >
-                    Compare new swing →
-                  </Link>
-                ) : (
-                  <button
-                    onClick={saveAsBaseline}
-                    disabled={!canSaveBaseline || baselineStatus === 'saving'}
-                    className={`px-4 py-2 text-xs font-semibold tracking-wide rounded-full transition-colors flex-shrink-0 ${
-                      !canSaveBaseline || baselineStatus === 'saving'
-                        ? 'bg-ink/10 text-ink/40 cursor-not-allowed'
-                        : 'bg-clay hover:bg-[#c4633f] text-cream'
-                    }`}
-                  >
-                    {baselineStatus === 'saving' ? 'Saving...' : 'Set as baseline'}
-                  </button>
-                )}
-              </div>
-            </div>
+            <LLMCoachingPanel frames={allSwingFrames} />
           )}
 
         </div>

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SwingSegment } from '@/lib/jointAngles'
 import SegmentLightbox from './SegmentLightbox'
+import ShotCoachingModal from './ShotCoachingModal'
 
 const BASELINE_SHOTS = ['forehand', 'backhand', 'serve', 'volley', 'slice'] as const
 type BaselineShot = (typeof BASELINE_SHOTS)[number]
@@ -57,6 +58,11 @@ function SwingBaselineCard({
   const [label, setLabel] = useState<string>(`Swing ${swing.index} — ${initialShot}`)
   const [labelDirty, setLabelDirty] = useState(false)
   const [lightboxOpen, setLightboxOpen] = useState(false)
+  // Per-shot coaching modal — opens with this swing's frames scoped to
+  // the LLM call so advice is specific to *this* swing, not the whole
+  // rally. Independent local state from the page-level coaching panel
+  // so the two don't fight over the global feedback buffer.
+  const [coachOpen, setCoachOpen] = useState(false)
 
   // Contact-frame timestamp (peak activity) — used as the preview thumbnail
   // so each card shows the most representative moment of the swing.
@@ -234,6 +240,13 @@ function SwingBaselineCard({
           >
             {saving ? 'Saving...' : saved ? 'Saved' : 'Save as baseline'}
           </button>
+          <button
+            type="button"
+            onClick={() => setCoachOpen(true)}
+            className="px-3 py-2 rounded-lg text-sm font-semibold bg-white/10 hover:bg-white/15 text-white transition-colors"
+          >
+            Coach this shot
+          </button>
           {onCompare && (
             <button
               type="button"
@@ -245,8 +258,16 @@ function SwingBaselineCard({
           )}
         </div>
       ) : (
-        <p className="text-xs text-white/50">Sign in to save or compare this swing.</p>
+        <p className="text-xs text-white/50">Sign in to save, coach, or compare this swing.</p>
       )}
+
+      <ShotCoachingModal
+        open={coachOpen}
+        onClose={() => setCoachOpen(false)}
+        frames={swing.frames}
+        title={`Swing ${swing.index} — ${overrideShot}`}
+        subtitle={`${(swing.startMs / 1000).toFixed(1)}s – ${(swing.endMs / 1000).toFixed(1)}s · ${swing.frames.length} frames`}
+      />
     </div>
   )
 }
@@ -288,16 +309,20 @@ export default function SwingBaselineGrid({
   savedSwingIndices,
   errorBySwingIndex,
 }: SwingBaselineGridProps) {
-  if (swings.length <= 1) return null
+  if (swings.length === 0) return null
 
   return (
     <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4">
       <div className="mb-3">
         <h3 className="text-sm font-semibold text-white">
-          {swings.length} swings detected
+          {swings.length === 1
+            ? '1 swing detected'
+            : `${swings.length} swings detected`}
         </h3>
         <p className="text-xs text-white/40">
-          Save each one independently as a baseline. Useful for tracking individual reps from a long rally clip.
+          {swings.length === 1
+            ? 'Save it as a baseline or send it to the comparison page.'
+            : 'Save each one independently as a baseline, or compare any against your saved baseline.'}
         </p>
       </div>
 

@@ -172,9 +172,42 @@ export type SwingSegment = {
  */
 export function detectSwings(
   allFrames: PoseFrame[],
-  opts: { minSwingFrames?: number; restThreshold?: number; mergeGapFrames?: number } = {}
+  opts: {
+    minSwingFrames?: number
+    /**
+     * Single-threshold legacy knob. When set, used as the enter
+     * threshold and the exit is derived as enter / 4 (matches the
+     * 4:1 hysteresis ratio recommended by the EMG-onset literature).
+     * Pass `enterThreshold` / `exitThreshold` directly for finer
+     * control.
+     */
+    restThreshold?: number
+    enterThreshold?: number
+    exitThreshold?: number
+    mergeGapFrames?: number
+  } = {}
 ): SwingSegment[] {
-  const { minSwingFrames = 12, restThreshold = 0.3, mergeGapFrames = 5 } = opts
+  // Hysteresis (Schmitt-trigger) thresholds. Tennis activity profiles
+  // dip mid-swing — at the top of the backswing where the racket
+  // reverses direction, and through the decelerating follow-through.
+  // A single threshold splits a real swing across those valleys; two
+  // thresholds (enter HIGH, exit LOW) tolerate them. The 4:1 ratio
+  // is the canonical value from EMG onset/offset detection (see
+  // PMC10594734) and sits comfortably between the swing's peak and
+  // its internal valleys without merging genuinely separate shots.
+  //
+  // Defaults: enter = 0.40, exit = 0.10 of the (P90 − median) spread.
+  // The legacy `restThreshold` knob still works — when provided we
+  // use it as the enter and derive exit = enter / 4.
+  const enterFrac =
+    opts.enterThreshold ?? opts.restThreshold ?? 0.4
+  const exitFrac =
+    opts.exitThreshold ??
+    (opts.restThreshold !== undefined ? opts.restThreshold / 4 : 0.1)
+  // mergeGapFrames bumped 5 → 14 so a ~470 ms valley (longer than the
+  // backswing-top reversal) closes, but the 1 s+ gap between truly
+  // distinct shots in a rally stays open.
+  const { minSwingFrames = 12, mergeGapFrames = 14 } = opts
 
   if (allFrames.length < minSwingFrames) {
     return [{
@@ -219,22 +252,23 @@ export function detectSwings(
     smoothed.push(sum / count)
   }
 
-  // Adaptive threshold = median + restThreshold × (P90 − median).
-  //
-  // Was previously median + restThreshold × (max − median), but a single
-  // explosive swing in a long rally clip would set `max` to that swing's
-  // peak alone, inflating the threshold past every softer shot in the
-  // clip — slices, drop volleys, second-ball blocks would all silently
-  // fall below threshold and be dropped. P90 caps the spread denominator
-  // at the 90th percentile, so one outlier no longer raises the bar for
-  // everyone else. Mirrors the same trick LiveSwingDetector.thresholdStats
-  // already uses (lib/liveSwingDetector.ts:263-286).
+  // Adaptive thresholds = median + frac × (P90 − median), with two fracs:
+  // enter (HIGH) and exit (LOW). P90 instead of max so one explosive
+  // swing in a long rally doesn't inflate the bar past softer shots —
+  // mirrors the same trick LiveSwingDetector.thresholdStats already
+  // uses (lib/liveSwingDetector.ts:263-286).
   const sorted = [...smoothed].sort((a, b) => a - b)
   const median = sorted[Math.floor(sorted.length / 2)]
   const p90 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))]
-  const threshold = median + restThreshold * (p90 - median)
+  const spread = p90 - median
+  const enterT = median + enterFrac * spread
+  const exitT = median + exitFrac * spread
 
-  // Find contiguous regions above threshold
+  // Find regions via hysteresis: enter when activity rises above HIGH,
+  // exit only when it drops below LOW. Tolerates internal dips smaller
+  // than (HIGH − LOW) without splitting the region — exactly the
+  // mechanic that stops a single swing from fragmenting at the
+  // backswing-top valley.
   const regions: { start: number; end: number; peakIdx: number; peakVal: number }[] = []
   let inRegion = false
   let regionStart = 0
@@ -242,19 +276,23 @@ export function detectSwings(
   let peakVal = 0
 
   for (let i = 0; i < smoothed.length; i++) {
-    if (smoothed[i] >= threshold) {
-      if (!inRegion) {
+    const v = smoothed[i]
+    if (!inRegion) {
+      if (v >= enterT) {
         inRegion = true
         regionStart = i
         peakIdx = i
-        peakVal = smoothed[i]
-      } else if (smoothed[i] > peakVal) {
-        peakIdx = i
-        peakVal = smoothed[i]
+        peakVal = v
       }
-    } else if (inRegion) {
-      regions.push({ start: regionStart, end: i - 1, peakIdx, peakVal })
-      inRegion = false
+    } else {
+      if (v > peakVal) {
+        peakIdx = i
+        peakVal = v
+      }
+      if (v < exitT) {
+        regions.push({ start: regionStart, end: i - 1, peakIdx, peakVal })
+        inRegion = false
+      }
     }
   }
   if (inRegion) {
@@ -276,14 +314,20 @@ export function detectSwings(
     }
   }
 
-  // Filter out regions that are too short and add padding
-  const padding = 5
+  // Asymmetric biomechanical padding. The high-activity span detected
+  // above is the *acceleration through follow-through* portion; the
+  // backswing/loading runs ~600 ms before that with much lower angle-
+  // delta activity (joints are loading, not whipping), so it falls
+  // below threshold and gets clipped. Pad more before than after to
+  // capture the full motion envelope ~ 670 ms / 500 ms at 30 fps.
+  const padBefore = 20
+  const padAfter = 15
   const segments: SwingSegment[] = []
   let idx = 1
   for (const r of merged) {
     if (r.end - r.start + 1 < minSwingFrames) continue
-    const start = Math.max(0, r.start - padding)
-    const end = Math.min(allFrames.length - 1, r.end + padding)
+    const start = Math.max(0, r.start - padBefore)
+    const end = Math.min(allFrames.length - 1, r.end + padAfter)
     segments.push({
       index: idx++,
       startFrame: start,

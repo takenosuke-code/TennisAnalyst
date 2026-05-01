@@ -367,6 +367,75 @@ describe('detectSwings', () => {
     expect(result.length).toBe(4)
   })
 
+  it('keeps a swing whole when activity dips at the top of the backswing', () => {
+    // Regression: a real forehand has a brief reversal at the top of the
+    // backswing (~150-250ms of near-zero joint-angle delta as the racket
+    // transitions from back-swing to forward-swing). Before the
+    // hysteresis + wider mergeGap fix, that valley split a single swing
+    // into two — both halves often passing the minSwingFrames floor and
+    // showing up as two distinct cards. Fixture: 25 rest, then 50-frame
+    // swing with a 12-frame near-zero valley in the middle, then 25
+    // rest. Expect ONE swing.
+    const FPS = 30
+    const dt = Math.round(1000 / FPS)
+    const buildSwingWithValley = (startMs: number): PoseFrame[] => {
+      const frames: PoseFrame[] = []
+      // Phase plan (50 frames):
+      //   0-15: ramp activity up (backswing → loading)
+      //   16-27: VALLEY (top-of-backswing reversal, near-zero delta)
+      //   28-37: peak (acceleration through contact)
+      //   38-49: ramp down (follow-through tail)
+      // Each frame's angles step by an amount proportional to the
+      // phase's "activity level" so the smoothed signal carries the
+      // valley dip.
+      let elbow = 160, shoulder = 30, hip = 10, trunk = 10
+      for (let i = 0; i < 50; i++) {
+        let step = 0
+        if (i < 16) step = 4               // ramp up
+        else if (i < 28) step = 0.3        // valley (very small but nonzero)
+        else if (i < 38) step = 6          // peak
+        else step = 2                       // ramp down
+        elbow -= step
+        shoulder += step * 0.5
+        hip += step * 0.3
+        trunk += step * 0.3
+        const angles: JointAngles = {
+          right_elbow: elbow,
+          left_elbow: 160 - elbow * 0.2,
+          right_shoulder: shoulder,
+          left_shoulder: shoulder * 0.4,
+          hip_rotation: hip,
+          trunk_rotation: trunk,
+        }
+        frames.push(makeFrame(i, startMs + i * dt, makeStandingPose(), angles))
+      }
+      return frames
+    }
+
+    const REST = 25
+    const sections: PoseFrame[][] = []
+    let cursorMs = 0
+    sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * dt
+    sections.push(buildSwingWithValley(cursorMs)); cursorMs += 50 * dt
+    sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * dt
+
+    const allFrames: PoseFrame[] = []
+    let idx = 0
+    for (const sect of sections) {
+      for (const f of sect) {
+        allFrames.push({ ...f, frame_index: idx++ })
+      }
+    }
+
+    const result = detectSwings(allFrames)
+    // Hysteresis + wider mergeGap should keep the swing whole.
+    expect(result.length).toBe(1)
+    // And the segment should span (most of) the 50 swing frames plus
+    // padding — proves it didn't truncate at the valley.
+    const swing = result[0]
+    expect(swing.endFrame - swing.startFrame).toBeGreaterThan(45)
+  })
+
   it('sets peakFrame to the frame with maximum activity', () => {
     const frames: PoseFrame[] = []
     for (let i = 0; i < 30; i++) {
