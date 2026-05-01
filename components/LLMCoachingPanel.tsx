@@ -446,7 +446,7 @@ function CoachingSections({
             In-depth analysis
           </p>
           {primary != null && (
-            <p className="text-sm text-ink/60 italic leading-relaxed mb-4">
+            <p className="text-sm text-ink/80 italic leading-relaxed mb-4">
               {primary.trim()}
               {loading && primary.trim() && (
                 <span className="inline-block w-1.5 h-4 bg-clay animate-pulse ml-1 align-middle" />
@@ -527,14 +527,14 @@ function BulletList({
   const paras = items.filter((i) => i.kind === 'para')
 
   const paraClass = prominent
-    ? 'text-base text-ink/95 leading-7'
-    : 'text-sm text-ink/75 leading-relaxed'
+    ? 'text-base text-ink leading-7'
+    : 'text-sm text-ink/90 leading-relaxed'
 
   const ulClass = dense
-    ? 'list-disc pl-5 space-y-0.5 text-xs text-ink/75 leading-relaxed marker:text-ink/30'
+    ? 'list-disc pl-5 space-y-0.5 text-xs text-ink/85 leading-relaxed marker:text-ink/40'
     : prominent
-      ? 'list-disc pl-5 space-y-2 text-base text-ink/95 leading-7 marker:text-clay'
-      : 'list-disc pl-5 space-y-1 text-sm text-ink/75 leading-relaxed marker:text-ink/30'
+      ? 'list-disc pl-5 space-y-2 text-base text-ink leading-7 marker:text-clay'
+      : 'list-disc pl-5 space-y-1 text-sm text-ink/90 leading-relaxed marker:text-ink/45'
 
   return (
     <div className={dense ? 'space-y-1' : 'space-y-1.5'}>
