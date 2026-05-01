@@ -86,7 +86,38 @@ const DETECT_STATS_BUFFER = 8
 // fast(er) — the encoding itself still takes ~30s/min of source.
 const FFMPEG_CORE_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
 
-async function transcodeToH264(
+// Try the browser's hardware-accelerated WebCodecs path (mediabunny)
+// first. This is what `components/UploadZone.tsx` uses for the live
+// upload flow on /analyze, so any clip that "works in /analyze" will
+// transcode here too. If WebCodecs isn't supported (Safari < 17,
+// older Chromium) or the codec isn't decodable by hardware, fall
+// through to ffmpeg.wasm.
+async function transcodeViaMediabunnyOrFfmpeg(
+  input: File,
+  onLog?: (line: string) => void,
+): Promise<File> {
+  try {
+    const { canTranscode, transcodeToH264_720p } = await import('@/lib/videoTranscode')
+    if (await canTranscode()) {
+      onLog?.('[mediabunny] starting WebCodecs transcode (hardware-accelerated)…')
+      const result = await transcodeToH264_720p(input, {
+        onProgress: (f) => onLog?.(`[mediabunny] ${Math.round(f * 100)}%`),
+      })
+      onLog?.(
+        `[mediabunny] success: ${result.originalBytes} → ${result.outputBytes} bytes`,
+      )
+      return result.file
+    }
+    onLog?.('[mediabunny] not supported on this browser; trying ffmpeg.wasm')
+  } catch (err) {
+    onLog?.(
+      `[mediabunny] failed: ${err instanceof Error ? err.message : String(err)} — trying ffmpeg.wasm`,
+    )
+  }
+  return transcodeToH264WithFfmpegWasm(input, onLog)
+}
+
+async function transcodeToH264WithFfmpegWasm(
   input: File,
   onLog?: (line: string) => void,
 ): Promise<File> {
@@ -846,7 +877,7 @@ export default function ReplayDevPage() {
                   setTranscodeLog([])
                   const logBuf: string[] = []
                   try {
-                    const out = await transcodeToH264(file, (line) => {
+                    const out = await transcodeViaMediabunnyOrFfmpeg(file, (line) => {
                       logBuf.push(line)
                       // Keep only the last 40 lines so the panel doesn't
                       // explode for long clips.
@@ -879,8 +910,8 @@ export default function ReplayDevPage() {
                 className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs rounded px-3 py-1.5"
               >
                 {transcodeState === 'running'
-                  ? 'Transcoding (~30MB ffmpeg.wasm + encode)…'
-                  : 'Transcode to H.264 in browser'}
+                  ? 'Transcoding (WebCodecs / ffmpeg.wasm fallback)…'
+                  : 'Transcode to H.264 (same path /analyze uses)'}
               </button>
               {transcodeError ? (
                 <div className="text-rose-400 text-xs">transcode error: {transcodeError}</div>
