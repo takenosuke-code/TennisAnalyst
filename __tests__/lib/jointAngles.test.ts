@@ -90,7 +90,7 @@ describe('computeJointAngles', () => {
     expect(angles.right_elbow).toBeCloseTo(180, 0)
   })
 
-  it('returns 0 when two landmarks are at the same position (zero-length vector)', () => {
+  it('returns NaN when two landmarks are at the same position (zero-length vector)', () => {
     // rElbow and rShoulder at the same position
     const landmarks = [
       makeLandmark(LANDMARK_INDICES.LEFT_SHOULDER, 0.6, 0.25),
@@ -100,8 +100,10 @@ describe('computeJointAngles', () => {
     ]
     const angles = computeJointAngles(landmarks)
 
-    // vec(elbow->shoulder) = (0,0), magnitude = 0 => angleBetween returns 0
-    expect(angles.right_elbow).toBe(0)
+    // vec(elbow->shoulder) = (0,0), magnitude = 0 => angleBetween returns
+    // NaN so downstream Number.isFinite filters can drop the bad frame
+    // rather than treating a degenerate measurement as "arm folded shut".
+    expect(angles.right_elbow).toBeNaN()
   })
 
   it('returns angles in degrees in the 0-180 range', () => {

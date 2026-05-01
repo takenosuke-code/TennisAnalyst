@@ -61,7 +61,11 @@ function angleBetween(v1: [number, number], v2: [number, number]): number {
   const dot = v1[0] * v2[0] + v1[1] * v2[1]
   const mag1 = Math.sqrt(v1[0] ** 2 + v1[1] ** 2)
   const mag2 = Math.sqrt(v2[0] ** 2 + v2[1] ** 2)
-  if (mag1 === 0 || mag2 === 0) return 0
+  // Degenerate landmarks (NaN, overlapping joints, missing keypoints) used
+  // to return 0 here, which downstream `min()` then picked up as a real
+  // measurement of "arm folded shut at 0°". Returning NaN lets the
+  // Number.isFinite filters in coachingObservations skip the bad frame.
+  if (mag1 === 0 || mag2 === 0) return NaN
   const cosAngle = Math.max(-1, Math.min(1, dot / (mag1 * mag2)))
   return (Math.acos(cosAngle) * 180) / Math.PI
 }

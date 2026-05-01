@@ -296,11 +296,13 @@ function buildRuleContext(input: ExtractionInput): RuleContext | null {
 
 /**
  * Elbow rules detect cramped (<90°) and over-extended (>175°) at contact.
- * We scan the FULL swing slice for the extremum (min for cramped, max for
- * over-extended) rather than reading a single peak-activity frame. The peak
- * activity frame is the moment of fastest angle change, not the contact
- * extremum, so on a clean swing the extremum and the peak don't coincide.
- * Extremum-over-window is robust to that and to single-frame jitter.
+ * We read the elbow angle at the peak (contact-proxy) frame, not the
+ * extremum across the entire slice — on a normal forehand the elbow is
+ * most-flexed during prep (~70-90°) and most-extended through contact
+ * (~140-170°), so slice-min would surface the prep angle and falsely
+ * flag every clean swing as cramped. peakFrame is the swing detector's
+ * peak-activity frame, which lines up with the contact moment closely
+ * enough for this rule.
  *
  * Serve cramped threshold relaxed to 140° because serves expect near-full
  * extension at contact.
@@ -312,15 +314,14 @@ function checkElbowAtContact(
   const out: Observation[] = []
   const key = dominantElbowKey(shot)
 
-  const minElbow = angleMin(ctx.shotFrames, key)
-  const maxElbow = angleMax(ctx.shotFrames, key)
-  if (minElbow === null || maxElbow === null) return out
+  const elbow = ctx.peakFrame.joint_angles?.[key]
+  if (typeof elbow !== 'number' || !Number.isFinite(elbow)) return out
 
   // Cramped elbow: under 90° on groundstrokes, under 140° on the serve.
   const crampedThreshold = shot === 'serve' ? 140 : 90
   const crampedAnchor = shot === 'serve' ? 100 : 60
-  if (minElbow < crampedThreshold) {
-    const margin = undershootMargin(minElbow, crampedThreshold, crampedAnchor)
+  if (elbow < crampedThreshold) {
+    const margin = undershootMargin(elbow, crampedThreshold, crampedAnchor)
     const confidence = computeConfidence({
       landmarkVisibility: ctx.meanVis,
       thresholdMargin: margin,
@@ -333,14 +334,14 @@ function checkElbowAtContact(
         pattern: 'cramped_elbow',
         severity: severityFromMargin(margin),
         confidence,
-        todayValue: minElbow,
+        todayValue: elbow,
       })
     }
   }
 
   // Over-extended elbow: 175° at contact = locked straight.
-  if (maxElbow > 175) {
-    const margin = overshootMargin(maxElbow, 175, 180)
+  if (elbow > 175) {
+    const margin = overshootMargin(elbow, 175, 180)
     const confidence = computeConfidence({
       landmarkVisibility: ctx.meanVis,
       thresholdMargin: margin,
@@ -353,7 +354,7 @@ function checkElbowAtContact(
         pattern: 'over_extended_elbow',
         severity: severityFromMargin(margin),
         confidence,
-        todayValue: maxElbow,
+        todayValue: elbow,
       })
     }
   }
@@ -627,10 +628,40 @@ function compareDrift(
     }
   }
 
-  // Elbow at contact = the minimum elbow angle in the swing window (most flexed).
-  // Knee at loading = the minimum knee angle in the swing window (deepest load).
-  // 12° threshold sits comfortably outside single-camera measurement noise.
-  compareExtremum(elbowKey, 'min', `${todayCtx.dominantSide}_elbow`, 'contact', 12)
+  // Elbow at contact = the elbow angle at the peak (contact-proxy) frame,
+  // matching checkElbowAtContact above. Knee at loading remains the slice
+  // min — knee deepest-load IS the most-flexed knee and that lines up with
+  // the slice min naturally. 12° threshold sits comfortably outside
+  // single-camera measurement noise.
+  const todayElbow = todayCtx.peakFrame.joint_angles?.[elbowKey]
+  const baseElbow = baselineCtx.peakFrame.joint_angles?.[elbowKey]
+  if (
+    typeof todayElbow === 'number' && Number.isFinite(todayElbow) &&
+    typeof baseElbow === 'number' && Number.isFinite(baseElbow)
+  ) {
+    const drift = Math.abs(todayElbow - baseElbow)
+    if (drift >= 12) {
+      const margin = clamp01((drift - 12) / 12)
+      const meanVis = (todayCtx.meanVis + baselineCtx.meanVis) / 2
+      const confidence = computeConfidence({
+        landmarkVisibility: meanVis,
+        thresholdMargin: margin,
+        ruleApplicability: Math.min(todayCtx.applicability, baselineCtx.applicability),
+      })
+      if (confidence >= CONFIDENCE_FLOOR) {
+        out.push({
+          phase: 'contact',
+          joint: `${todayCtx.dominantSide}_elbow`,
+          pattern: 'drift_from_baseline',
+          severity: severityFromMargin(margin),
+          confidence,
+          todayValue: todayElbow,
+          baselineValue: baseElbow,
+          driftMagnitude: drift,
+        })
+      }
+    }
+  }
   compareExtremum(kneeKey, 'min', `${todayCtx.dominantSide}_knee`, 'loading', 12)
 
   // Excursion-level drift. Hips and trunk move enough across a swing that a
