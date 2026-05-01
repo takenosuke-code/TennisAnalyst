@@ -67,48 +67,58 @@ type KeyframeAngles = {
 // (85°, 120°) — elbow always below or outside the left shoulder, so
 // the non-racket hand never crosses inward across the body.
 const KEYFRAME_ANGLES: KeyframeAngles[] = [
+  // Off-arm (uArmL / fArmL) tracks a real human forehand: extends OUT
+  // to the figure's left during prep ("tracking the ball"), tucks
+  // toward the chest during contact, then relaxes back. All values
+  // stay ≥ 90° so the elbow + wrist always sit on the figure's left
+  // side — no crossing inward across the body.
   { t: 0.0, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -90.0,
-    uArmL: 90.0, fArmL: 90.0, uArmR: 67.1, fArmR: 70.2,
+    uArmL: 90.0, fArmL: 95.0, uArmR: 67.1, fArmR: 70.2,
     thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
     racket: -79.8, racketLen: 0.13 },
+  // Unit turn: off-arm starts extending out-and-down to the left
   { t: 0.15, hipCenter: [0.52, 0.55], trunk: -90.0, neck: -95.7,
-    uArmL: 95.0, fArmL: 85.0, uArmR: 69.9, fArmR: 55.1,
+    uArmL: 110.0, fArmL: 140.0, uArmR: 69.9, fArmR: 55.1,
     thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
     racket: -79.8, racketLen: 0.13 },
+  // Peak prep: off-arm fully extended out to figure's LEFT, near
+  // horizontal — the "non-dominant hand pointing at the ball" gesture
   { t: 0.4, hipCenter: [0.53, 0.56], trunk: -85.4, neck: -106.7,
-    uArmL: 110.0, fArmL: 120.0, uArmR: -15.0, fArmR: -65.2,
+    uArmL: 140.0, fArmL: 170.0, uArmR: -15.0, fArmR: -65.2,
     thighL: 109.9, shinL: 79.9, thighR: 70.1, shinR: 100.1,
     racket: -100.2, racketLen: 0.13 },
+  // Drop: off-arm starts retracting
   { t: 0.475, hipCenter: [0.525, 0.56], trunk: -86.6, neck: -104.0,
-    uArmL: 100.0, fArmL: 100.0, uArmR: 2.1, fArmR: 10.0,
+    uArmL: 120.0, fArmL: 130.0, uArmR: 2.1, fArmR: 10.0,
     thighL: 108.1, shinL: 82.0, thighR: 71.9, shinR: 98.0,
     racket: 29.9, racketLen: 0.13 },
+  // Forward swing: off-arm pulls in toward the chest
   { t: 0.55, hipCenter: [0.52, 0.56], trunk: -87.7, neck: -101.3,
-    uArmL: 95.0, fArmL: 95.0, uArmR: 20.1, fArmR: 84.8,
+    uArmL: 105.0, fArmL: 110.0, uArmR: 20.1, fArmR: 84.8,
     thighL: 105.0, shinL: 85.1, thighR: 75.0, shinR: 94.9,
     racket: 100.2, racketLen: 0.13 },
   { t: 0.6, hipCenter: [0.505, 0.555], trunk: -87.7, neck: -98.5,
-    uArmL: 95.0, fArmL: 95.0, uArmR: 64.9, fArmR: 98.2,
+    uArmL: 100.0, fArmL: 100.0, uArmR: 64.9, fArmR: 98.2,
     thighL: 101.9, shinL: 86.0, thighR: 78.1, shinR: 94.9,
     racket: 150.1, racketLen: 0.13 },
+  // Contact: off-arm tucked on left side, hand at chest level
   { t: 0.65, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -95.7,
     uArmL: 100.0, fArmL: 100.0, uArmR: 112.0, fArmR: 112.1,
     thighL: 100.2, shinL: 88.0, thighR: 79.8, shinR: 94.9,
     racket: -160.2, racketLen: 0.13 },
-  // Mid follow-through — arm forward across the body but uArmR caps
-  // at 130° (was 155.8°, behind the head). Forearm continues forward
-  // (160°), racket keeps rotating in the same direction (-130 raw =
-  // 230° unwrapped from 200° at contact), no reversal.
+  // Mid follow-through — racket arm caps below "over the shoulder"
+  // (uArmR=130, was 155.8). Racket keeps rotating forward (-130 raw =
+  // 230° unwrapped from 200° at contact). Off-arm minor sway.
   { t: 0.725, hipCenter: [0.49, 0.55], trunk: -91.1, neck: -90.0,
     uArmL: 105.0, fArmL: 105.0, uArmR: 130.0, fArmR: 160.0,
     thighL: 97.1, shinL: 89.1, thighR: 81.9, shinR: 92.9,
     racket: -130.0, racketLen: 0.13 },
-  // Finish — arm relaxing back toward idle while the racket continues
-  // its circular sweep through the "up" phase (-90 raw = 270°
-  // unwrapped). Wrist is at hip height here so the racket head only
-  // reaches chest level, not over the shoulder.
+  // Finish — racket continues circular sweep through "up" phase
+  // (racket -90 raw = 270° unwrapped) but wrist is at hip height so
+  // racket head peaks around chest, not over the shoulder. Off-arm
+  // relaxes back toward idle.
   { t: 0.8, hipCenter: [0.48, 0.55], trunk: -92.3, neck: -84.3,
-    uArmL: 95.0, fArmL: 95.0, uArmR: 120.0, fArmR: 130.0,
+    uArmL: 95.0, fArmL: 100.0, uArmR: 120.0, fArmR: 130.0,
     thighL: 95.1, shinL: 90.0, thighR: 84.9, shinR: 90.0,
     racket: -90.0, racketLen: 0.12 },
 ]
