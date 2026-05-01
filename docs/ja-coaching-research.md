@@ -173,3 +173,140 @@ All five JA cues are Claude-drafted in the patterns observed in Section 3 source
 - Affirmation/silence-replacement phrases (the "Clean — repeat that." cluster): not directly sourced; the four examples in Section 3 (#22, #23) and Section 5 are Claude-extrapolated from the casual register patterns and need native speaker confirmation.
 
 **Recommendation:** before launch, have a JA-fluent recreational or competitive tennis player (not just a fluent translator) read Section 5 examples and the affirmation set. Tennis coach voice is a subculture register, not just textbook JA.
+
+---
+
+## Section 7: Gap-Fill Research (Pass 2)
+
+Pass 1 (Sections 1–6) flagged three areas as thin: courtside spoken register, affirmation/silence cues, and wrist-lag/micro-finish terminology. This section appends sourced corpus targeting each. Sources are listed in 7.4; sources from Pass 1's bibliography are not re-cited. Where a phrase is Claude-extrapolated rather than sourced verbatim, it is tagged `verify with native speaker`.
+
+### 7.1 Courtside Spoken Register — Sourced Phrases
+
+The biggest finding: written tennis blogs underrepresent how blunt and how short coaches actually speak in person. Several written-source coaches describe lessons or quote themselves; once you find that quoted speech, the casual register *is* genuinely distinct from the polite-instructional written voice the first pass captured. Below are verbatim phrases that two coaches and one student-blogger reported being said on court.
+
+| # | JA phrase (verbatim) | Context / situation | Source |
+|---|---|---|---|
+| C1 | ラインより下がらない。ライジングでとるようにして。 | Coach instructing student not to back up; take ball on the rise. Note bare 〜して imperative. | tennismama 2020/02 |
+| C2 | ちゃんと下がって、ボールとの距離をとって。ストロークの打ち方がおかしくなってるよ。 | A *different* coach correcting same student. Note 〜よ ending and 〜てる contraction; diagnostic + corrective combined. | tennismama 2020/02 |
+| C3 | 君さ、返事は良いからさ。ちゃんと走ってやる気を見せてよ。 | Coach calling out a student for low effort. Very casual: 君さ、〜からさ、〜てよ. This is the bluntest sourced register in the corpus. | ameblo greenyy8 |
+| C4 | Aさん以外、返事がないぞ‼ | Coach addressing the group; uses rough 〜ぞ ending — only male, only group context. | ameblo greenyy8 |
+| C5 | とりあえずこうやって握って打ってみようか。 | Coach offering a grip change with low pressure. 〜ようか pattern — invitational, casual, very common. | note coach_raku |
+| C6 | サーブ、なかなかいいじゃないですか。 | Trial-lesson coach to adult student. Mixed register: polite frame, casual じゃないですか tag. | mikawa-kyosei (excerpt via search) |
+| C7 | 中級でばっちりですよ! | Same coach, post-lesson placement assessment. Casual ばっちり + polite ですよ. | mikawa-kyosei |
+| C8 | 〇〇さんナイスショット | Standard pattern: name + ナイスショット. The name-prefix is named explicitly as a relationship-building technique. | thedigestweb 55985, officeyamamoto |
+| C9 | 〇〇さんドンマイ | Same name-prefix pattern after a miss. | thedigestweb 55985, officeyamamoto |
+| C10 | 今のナイスだったよ | Doubles partner / coach voicing approval after the point. 〜だったよ past-tense affirmation. | chiebukuro q14265229104 |
+| C11 | ドンマイドンマイ、次頑張ろう | Doubled ドンマイ + 次頑張ろう. Standard between-points pickup; the doubled form is more natural than single. | chiebukuro q14265229104 |
+| C12 | OK、OK、気にしないでもう一度ボールに集中しよう。 | Reset cue after a missed point. Note OK loanword + 〜しよう volitional. | feeling-tennis advice-2 |
+| C13 | OK、OK、終わった事は忘れて、次のボールに集中しよう。 | Variant of C12 — same writer recommends both. | feeling-tennis advice-2 |
+
+**Register patterns observed (across these 13 phrases):**
+
+- **Sentence-final 〜よ / 〜ね / 〜さ** dominate over 〜です. Written sources hide this; spoken corpus surfaces it.
+- **〜てる contraction** (打ち方がおかしくなってる, 残ってる) is normal coach-to-player, even from coaches who write in 〜ています.
+- **Sentence fragments and trailing 〜て imperatives** ("〜して。" without 〜ください) are the courtside default. Bare 〜して reads as *neither* harsh nor soft — it's the working register.
+- **Name-prefix is the primary politeness marker** in groups. "〇〇さんナイス" lets the coach drop other politeness scaffolding without sounding rude.
+- **Doubled affirmations** (ドンマイドンマイ、ナイスナイス) are more natural than singletons in fast-pace contexts.
+
+Two extrapolated cues to consider, both `verify with native speaker`:
+- C-ext-1: いい感じ、もう一回 ("Good feel, one more.")
+- C-ext-2: それそれ、それキープ ("That, that — keep that.")
+
+### 7.2 Affirmation Cue Corpus
+
+This is where the corpus is genuinely thinnest. The Japanese coach-voice affirmation lexicon is smaller than English's. The dominant on-court affirmations across all sources:
+
+**Sourced (used verbatim in cited sources):**
+| EN target | JA equivalent | Source / register note |
+|---|---|---|
+| "Nice." | ナイス / ナイスショット | universal; chiebukuro, officeyamamoto, feeling-tennis |
+| "Nice watch." (defensive read) | ナイスウォッチ | doubles-specific; chiebukuro |
+| "Good line." | ナイスコース | chiebukuro |
+| "Nice try." | ナイストライ | chiebukuro |
+| "That was nice." | 今のナイスだったよ | chiebukuro |
+| "Don't worry, next one." | ドンマイ / ドンマイドンマイ、次 | chiebukuro |
+| "OK, refocus." | OK、OK、〜に集中しよう | feeling-tennis |
+| "Lucky!" | ラッキー / シャーラッキー | chiebukuro (informal exclamation, post-net-cord etc.) |
+| "Just barely." | ジャストでしたね | chiebukuro |
+| "So close." | おしかったです | chiebukuro |
+| "Nice!" (volleyball-adjacent) | ナイス / ナイスファイト | agevolley (cross-sport corpus) |
+| "Go for it / take it." | 思い切って / 攻めていいよ | agevolley |
+
+**Extrapolated for English-side affirmations the corpus does not cover (all `verify with native speaker`):**
+
+| EN target | Proposed JA | Rationale |
+|---|---|---|
+| "Clean — repeat that." | きれいなスイング、もう一回。 | "きれい" is the natural JA evaluative for a clean technical execution; もう一回 is corpus-attested. |
+| "Trust that swing." | 今のスイング、信じて。 / そのスイングでいいよ。 | 信じて imports English coaching directly; そのスイングでいい matches feeling-tennis register. |
+| "Same swing again." | 同じスイングでもう一回。 | Direct compositional translation; matches Pass 1 #22. |
+| "Lock that in." | その感覚、覚えといて。 / それキープ。 | 感覚を覚える is corpus-attested (sports.yahoo "感覚をつかむ"); キープ from racket-face source. |
+| "That's it." | それそれ。 / そう、それ。 | Idiomatic JA approval echo; not directly sourced in tennis but pan-sport. |
+| "Stay with it." | そのまま、そのまま。 | Doubled-imperative pattern parallels ドンマイドンマイ. |
+| (silence-affirmation: nod, no words) | 〔無言で頷く / OK サインのみ〕 | JA coaches lean on physical OK signs and head-nods more than English coaches; per agevolley + feeling-tennis, silence is acceptable when the action speaks. Worth treating as a valid output, not a missing one. |
+
+**Important observation for the LLM prompt:** when the EN-side cue is purely affirmative and contains no diagnostic information ("Lock it in." after a clean rep), the most natural JA output may be a *non*-sentence: a fragment, an interjection, or a doubled word. Forcing a complete です/ます sentence here over-translates and reads as condescending. This is a structural difference Pass 1 did not surface.
+
+### 7.3 Wrist-Lag / Racket-Face / Contact-Point Terminology
+
+Pass 1 noted no clean JA term for "wrist lag." Pass 2 surfaces a small but real lexicon — coaches do have terms; they just don't map 1:1 to English.
+
+**Wrist lag, racket-head delay:**
+| English concept | JA expression(s) | Source |
+|---|---|---|
+| (general) racket head lag | ラケットヘッドが遅れて出てくる / ラケットヘッドが落ちる | tennistsu, ryoji.site racket-head-down |
+| grip-end leads, head trails | グリップエンド先行 (でインパクトを迎える) | improving-tennis forehand-inpact2 |
+| late wrist release | リストの解放タイミング(が早い/遅い) | improving-tennis forehand-inpact2 |
+| relax the wrist (so lag happens) | 手首をリラックスさせる / 手首は意識的に使わない | tennistsu |
+| don't manipulate the wrist | 手首をこねない | tennispirits, tofutennis |
+| stabilize the wrist | 手首を固める / 手首をコックする | tofutennis |
+| dorsiflexion / palmar flexion (technical) | 背屈 / 掌屈 | tofutennis |
+| arm-only swing (anti-pattern) | 手打ち | Pass 1 + tennispirits (re-confirmed) |
+
+**Racket face:**
+| English | JA | Source |
+|---|---|---|
+| keep face vertical | ラケット面を垂直に保つ | tennisnavi racket-face |
+| close the face | 面を伏せる (下向きにする) | tennisnavi racket-face |
+| open face | 面が開いている | tennisnavi racket-face |
+| make/build the face | 面を作る | search snippet (tennis-jotatsu) |
+| face control (general) | ラケット面のコントロール | tennisnavi racket-face |
+
+**Contact-point nuance:**
+| English | JA | Source |
+|---|---|---|
+| contact point is forward | 打点は前 | jh-tennis contact-point (cites this as the conventional cue, *then critiques it*) |
+| body's "side" rather than "front" | 体の横 (で打つ) | jh-tennis contact-point |
+| pull the ball in / wait for it | ボールを引き付ける / ボールをしっかり引き付ける | jh-tennis contact-point |
+| meet impact with grip end leading | グリップエンド先行でインパクトを迎える | improving-tennis forehand-inpact2 |
+
+**Practical takeaway for prompt engineering:** the cleanest single coaching cue for "wrist lag" is **「ラケットヘッドを遅らせて」** or **「グリップエンド先行で」** — but coaches more often *describe the cause* (relaxed wrist, body rotation) than the *symptom* (lag itself). A faithful JA cue for "you're losing wrist lag" is closer to **「手首に力が入ってる、もう少しリラックスして」** than to a literal "wrist lag" translation.
+
+### 7.4 New Sources Consulted (Not in Pass 1's bibliography)
+
+- https://www.tennistsu.com/stroke_racket-drop.html — racket-head drop, wrist-relaxation principles. Polite ます register.
+- https://ryoji.site/racket-head-down/ — racket-head-down with caveats; short cues "ラケットを寝かす", "手の力を抜く".
+- https://tennisnavi.com/technique/forehand-stroke/racket-face/ (formerly xn--zckzap9321bz4p.com) — racket-face control, 面を伏せる/開く lexicon.
+- https://www.jh-tennis.jp/entry/contact-point-for-ground-strokes/ — contact-point critique; "ボールを引き付ける" verbatim. (Different post from Pass 1's split-step entry on same site.)
+- https://improving-tennis.com/forehand-inpact2 — "グリップエンド先行", "リストの解放タイミング" — the cleanest sourced wrist-lag terminology found.
+- https://tofutennis.com/forehand_wrist/ — wrist terminology (背屈/掌屈, 手首をこねる, 手首を固める).
+- https://tennispirits.com/blog/skillup/list-used/ — wrist usage; "手首をこねない" verbatim.
+- https://www.xn--zckzap9321bz4p.com/forehand/how-to-use-wrist — wrist-use article (search snippet only).
+- https://tennismama.hatenadiary.jp/entry/2020/02/09/... — student-blogger quoting two different coaches verbatim. C1, C2 above. **Highest-value new source for casual register.**
+- https://ameblo.jp/greenyy8/entry-12845595427.html — coach blog quoting his own on-court speech. C3, C4 above (the blunt 〜さ / 〜ぞ register).
+- https://note.com/coach_raku/n/n6bc0386fc5dc — coach reflecting on minimal-talking philosophy; one verbatim casual cue (C5).
+- https://detail.chiebukuro.yahoo.co.jp/qa/question_detail/q14265229104 — Yahoo Q&A on doubles encouragement phrases. Single best source for the affirmation lexicon.
+- https://feeling-tennis.com/advice-2/ — match advice + reset cues (C12, C13).
+- https://thedigestweb.com/tennis/detail/id=55985 — manners article noting name + ナイスショット pattern. (Different post from Pass 1's footwork article on same site.)
+- https://officeyamamoto-tennis.com/116-2/ — re-confirms name-prefix pattern.
+- https://ameblo.jp/yoshimie1/entry-12724629706.html — student blog quoting coach (referenced for register confirmation; coaching content not extracted as a cue).
+- https://sports-zip.com/blog/coach_tweet/101746 — senior-coach quotes; useful for register confirmation, not added as cues.
+- https://agevolley-blog.com/how-to-support-with-voice/ — adjacent-sport (volleyball) affirmation corpus; ナイスファイト, 思い切って, 攻めていいよ.
+- https://mikawa-kyosei.jp/blog/5532/ — search-snippet excerpt only; full page did not surface the quoted phrases on fetch (C6, C7 are from the search snippet, treat as medium-confidence).
+
+### 7.5 What Still Needs Human Review
+
+- **Section 7.1 phrases C6 and C7** were read from a search-result snippet, not the full page. A native reviewer should confirm the source uses them verbatim before they are quoted as such in shipping copy.
+- **Section 7.2 extrapolations** (the seven proposed JA equivalents tagged `verify with native speaker`) are the highest-stakes items. Several map English idioms ("Lock that in.", "Trust that swing.") that have no clean JA equivalent; reviewer should choose between (a) the proposed near-equivalent, (b) a different phrasing entirely, or (c) silence/non-sentence output.
+- **The 〜ぞ register (C4)** is masculine and group-context only. Do **not** generate this tone for one-on-one cues to an unknown user; flag in the prompt.
+- **YouTube transcript mining** is still the largest unfilled gap. A bilingual reviewer with one hour and a YouTube transcript tool could pull 50+ verbatim courtside phrases from窪田 / Star Tennis Academy / ともやん channels. This would move 7.1 from "medium" to "high" confidence.
+- **The silence-as-affirmation pattern** (suggested in 7.2) is a hypothesis based on coach-philosophy articles (note coach_raku explicitly advocates *less* talking). Worth validating with one coach interview before treating as a designed output.
