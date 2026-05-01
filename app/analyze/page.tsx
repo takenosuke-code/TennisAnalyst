@@ -13,6 +13,8 @@ import BackendChip from '@/components/BackendChip'
 import type { SegmentCardSaveOverride } from '@/components/SegmentCard'
 import { usePoseStore, useJointStore, useCompareHandoff } from '@/store'
 import { detectSwings } from '@/lib/jointAngles'
+import { scoreStrokes } from '@/lib/strokeQuality'
+import type { DetectedStroke } from '@/lib/strokeAnalysis'
 import { useUser } from '@/hooks/useUser'
 import { useProfile } from '@/hooks/useProfile'
 import type { SwingSegment } from '@/lib/jointAngles'
@@ -24,12 +26,6 @@ const VideoCanvas = dynamic(() => import('@/components/VideoCanvas'), { ssr: fal
 const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), { ssr: false })
 const StrokeRibbon = dynamic(() => import('@/components/StrokeRibbon'), { ssr: false })
 
-// Feature flag for the stroke-chip ribbon (Task F). The ribbon's input
-// pipeline (stroke quality scoring + LLM best/worst comparison) is not
-// wired yet — we feed it deterministically-mocked z-scores derived from
-// the swing index so the visual integration is reviewable end-to-end
-// without committing to a contract before the upstream lands.
-const STROKE_RIBBON_ENABLED = process.env.NEXT_PUBLIC_STROKE_RIBBON === 'true'
 
 export default function AnalyzePage() {
   const {
@@ -208,56 +204,27 @@ export default function AnalyzePage() {
     setSelectedSwing(seg.index)
   }
 
-  // ---- Stroke-ribbon mock plumbing (feature-flagged) --------------------
-  // Synthesises StrokeRibbon's input shape from the in-memory `swings`
-  // list. Z-scores are a deterministic-but-varied function of swing
-  // index so chips show a mix of clay / cream-soft / green stripes
-  // without random flicker on re-render. One stroke is forced into the
-  // rejected bucket to exercise the muted/aria-describedby path. The
-  // comparison object marks the highest mock score as "best" and the
-  // lowest as "worst". Replace this block with real upstream data once
-  // the stroke quality + comparison endpoints land.
+  // ---- Stroke-ribbon inputs --------------------------------------------
+  // Scores the in-memory `swings` via the real strokeQuality pipeline
+  // (peak wrist speed + kinetic-chain timing error + wrist-angle
+  // variance, z-scored across the session). No `comparison` object is
+  // produced here — best/worst reasoning needs the LLM compare-strokes
+  // route, which runs from a baseline context, not the solo upload
+  // flow. Without it the ribbon hides Best/Worst badges and just
+  // colors chips by score, which is the honest behavior for a
+  // first-time analyze.
   const ribbonInputs = useMemo(() => {
-    if (!STROKE_RIBBON_ENABLED) return null
     if (swings.length === 0) return null
-    const strokes = swings.map((s) => ({
+    const strokes: DetectedStroke[] = swings.map((s) => ({
       strokeId: `swing-${s.index}`,
       startFrame: s.startFrame,
       endFrame: s.endFrame,
       peakFrame: s.peakFrame,
       fps: 30,
     }))
-    const quality = swings.map((s) => {
-      const score = ((s.index * 1.7) % 3) - 1.3 // deterministic spread in roughly [-1.3, 1.7]
-      const rejected = s.index === 4 // every 4th sample is a synthetic "skip"
-      return {
-        strokeId: `swing-${s.index}`,
-        score: rejected ? Number.NaN : score,
-        rejected,
-        ...(rejected ? { rejectReason: 'low_visibility' as const } : {}),
-        components: {
-          peakWristSpeed: 0,
-          kineticChainTimingError: 0,
-          wristAngleVariance: 0,
-        },
-      }
-    })
-    // Pick the non-rejected stroke with the highest/lowest mock score
-    // so badges appear consistently.
-    const nonRejected = quality.filter((q) => !q.rejected)
-    const best = nonRejected.length
-      ? nonRejected.reduce((a, b) => (a.score > b.score ? a : b))
-      : null
-    const worst = nonRejected.length
-      ? nonRejected.reduce((a, b) => (a.score < b.score ? a : b))
-      : null
-    const comparison = {
-      best: best ? { strokeId: best.strokeId, reasoning: '', citations: [] } : null,
-      worst: worst ? { strokeId: worst.strokeId, reasoning: '', citations: [] } : null,
-      isConsistent: false,
-    }
-    return { strokes, quality, comparison }
-  }, [swings])
+    const quality = scoreStrokes(strokes, allFrames)
+    return { strokes, quality }
+  }, [swings, allFrames])
 
   const selectedStrokeId =
     selectedSwing != null ? `swing-${selectedSwing}` : null
@@ -479,18 +446,14 @@ export default function AnalyzePage() {
           )}
 
           {/* Stroke-chip ribbon — SwingVision-style navigator. Sits
-              between the video and the coaching panel as an additional
-              surface (does NOT replace the panel). Currently fed by
-              mock z-scores derived from the swing index — see
-              ribbonInputs above. Gated on NEXT_PUBLIC_STROKE_RIBBON so
-              the integration is visible in dev without affecting prod
-              until the upstream stroke-quality + comparison endpoints
-              land. */}
+              between the video and the coaching panel. Quality scores
+              come from lib/strokeQuality.ts (real, z-scored across the
+              session); Best/Worst badges only appear when an LLM
+              comparison is wired (baseline-compare flow). */}
           {done && ribbonInputs && (
             <StrokeRibbon
               strokes={ribbonInputs.strokes}
               quality={ribbonInputs.quality}
-              comparison={ribbonInputs.comparison}
               selectedStrokeId={selectedStrokeId}
               onStrokeSelect={(id) => {
                 const idx = Number(id.replace('swing-', ''))
