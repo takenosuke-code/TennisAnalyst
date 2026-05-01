@@ -78,6 +78,39 @@ type CoachCueLogEntry = {
 
 const DETECT_STATS_BUFFER = 8
 
+// ffmpeg.wasm is a ~30MB blob; lazy-load via the shared CDN so it
+// doesn't ship in the main bundle. The "Transcode locally" button
+// imports @ffmpeg/ffmpeg dynamically and pulls the core wasm from
+// unpkg, which is what the official quickstart recommends. After
+// first use the browser caches both, so subsequent transcodes are
+// fast(er) — the encoding itself still takes ~30s/min of source.
+const FFMPEG_CORE_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
+
+async function transcodeToH264(input: File): Promise<File> {
+  const [{ FFmpeg }, { fetchFile, toBlobURL }] = await Promise.all([
+    import('@ffmpeg/ffmpeg'),
+    import('@ffmpeg/util'),
+  ])
+  const ffmpeg = new FFmpeg()
+  await ffmpeg.load({
+    coreURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
+    wasmURL: await toBlobURL(`${FFMPEG_CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
+  })
+  await ffmpeg.writeFile('input', await fetchFile(input))
+  // Strip audio (-an) — Modal extracts pose from video frames only,
+  // and audio bytes just slow the upload. ultrafast preset because
+  // this is dev iteration; the output isn't going to be re-encoded
+  // again anywhere.
+  await ffmpeg.exec(['-i', 'input', '-c:v', 'libx264', '-preset', 'ultrafast', '-an', 'output.mp4'])
+  const out = await ffmpeg.readFile('output.mp4')
+  // ffmpeg.readFile returns Uint8Array | string depending on encoding;
+  // always Uint8Array when no encoding specified.
+  const bytes = out instanceof Uint8Array ? out : new TextEncoder().encode(out)
+  return new File([bytes as BlobPart], `${input.name.replace(/\.[^.]+$/, '')}-h264.mp4`, {
+    type: 'video/mp4',
+  })
+}
+
 export default function ReplayDevPage() {
   // -----------------------------------------------------------------
   // File picker + replay state
@@ -86,6 +119,8 @@ export default function ReplayDevPage() {
   const [fileObjectUrl, setFileObjectUrl] = useState<string | null>(null)
   const [replayState, setReplayState] = useState<ReplayState>('idle')
   const [replayError, setReplayError] = useState<string | null>(null)
+  const [transcodeState, setTranscodeState] = useState<'idle' | 'running' | 'error'>('idle')
+  const [transcodeError, setTranscodeError] = useState<string | null>(null)
   const [playbackRate, setPlaybackRate] = useState<number>(1)
   const [toggles, setToggles] = useState<FetchToggles>({
     blockExtract: false,
@@ -676,6 +711,45 @@ export default function ReplayDevPage() {
           ) : null}
           {error ? (
             <div className="text-rose-400">capture error: {error}</div>
+          ) : null}
+          {/* Transcode escape hatch: when the source video failed with
+              SRC_NOT_SUPPORTED (typically HEVC on a non-Safari browser),
+              offer a one-click in-browser transcode to H.264 via
+              ffmpeg.wasm. Cost is a ~30MB lazy-load + ~30s/min of source
+              encode time. Output replaces the picked file so the user
+              can just click Replay again. */}
+          {file && replayError && /SRC_NOT_SUPPORTED/.test(replayError) ? (
+            <div className="pt-2 space-y-1">
+              <button
+                type="button"
+                disabled={transcodeState === 'running'}
+                onClick={async () => {
+                  setTranscodeState('running')
+                  setTranscodeError(null)
+                  try {
+                    const out = await transcodeToH264(file)
+                    if (fileObjectUrl) URL.revokeObjectURL(fileObjectUrl)
+                    const newUrl = URL.createObjectURL(out)
+                    setFile(out)
+                    setFileObjectUrl(newUrl)
+                    setReplayState('idle')
+                    setReplayError(null)
+                    setTranscodeState('idle')
+                  } catch (err) {
+                    setTranscodeState('error')
+                    setTranscodeError(err instanceof Error ? err.message : 'transcode failed')
+                  }
+                }}
+                className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs rounded px-3 py-1.5"
+              >
+                {transcodeState === 'running'
+                  ? 'Transcoding (~30MB ffmpeg.wasm + encode)…'
+                  : 'Transcode to H.264 in browser'}
+              </button>
+              {transcodeError ? (
+                <div className="text-rose-400 text-xs">transcode error: {transcodeError}</div>
+              ) : null}
+            </div>
           ) : null}
         </div>
       </section>
