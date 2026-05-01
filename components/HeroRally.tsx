@@ -58,52 +58,59 @@ type KeyframeAngles = {
   racket: number; racketLen: number
 }
 
-// Right-arm follow-through capped below "over-the-shoulder" — the
-// previous keyframes had uArmR sweeping past 180° (behind the head)
-// during follow-through, which reads as a 2D arm-rotation rather than
-// a forehand finish. uArmR / fArmR / racket at t=0.725 and t=0.8 now
-// stay forward-and-across the body, then relax back toward idle.
+// Right-arm follow-through stays below "over-the-shoulder" while the
+// racket completes its circular sweep: uArmR / fArmR cap below
+// horizontal-left during follow-through, but the racket angle keeps
+// rotating in the same direction (no bounce-back). The racket-head
+// arc peaks around chest height because the wrist sits at hip level
+// at the racket's "up" phase. Off-arm (uArmL / fArmL) stays in
+// (85°, 120°) — elbow always below or outside the left shoulder, so
+// the non-racket hand never crosses inward across the body.
 const KEYFRAME_ANGLES: KeyframeAngles[] = [
   { t: 0.0, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -90.0,
-    uArmL: 112.9, fArmL: 109.8, uArmR: 67.1, fArmR: 70.2,
+    uArmL: 90.0, fArmL: 90.0, uArmR: 67.1, fArmR: 70.2,
     thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
     racket: -79.8, racketLen: 0.13 },
   { t: 0.15, hipCenter: [0.52, 0.55], trunk: -90.0, neck: -95.7,
-    uArmL: 95.0, fArmL: 84.8, uArmR: 69.9, fArmR: 55.1,
+    uArmL: 95.0, fArmL: 85.0, uArmR: 69.9, fArmR: 55.1,
     thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
     racket: -79.8, racketLen: 0.13 },
   { t: 0.4, hipCenter: [0.53, 0.56], trunk: -85.4, neck: -106.7,
-    uArmL: 20.1, fArmL: 70.2, uArmR: -15.0, fArmR: -65.2,
+    uArmL: 110.0, fArmL: 120.0, uArmR: -15.0, fArmR: -65.2,
     thighL: 109.9, shinL: 79.9, thighR: 70.1, shinR: 100.1,
     racket: -100.2, racketLen: 0.13 },
   { t: 0.475, hipCenter: [0.525, 0.56], trunk: -86.6, neck: -104.0,
-    uArmL: 85.0, fArmL: 77.8, uArmR: 2.1, fArmR: 10.0,
+    uArmL: 100.0, fArmL: 100.0, uArmR: 2.1, fArmR: 10.0,
     thighL: 108.1, shinL: 82.0, thighR: 71.9, shinR: 98.0,
     racket: 29.9, racketLen: 0.13 },
   { t: 0.55, hipCenter: [0.52, 0.56], trunk: -87.7, neck: -101.3,
-    uArmL: 149.7, fArmL: 84.8, uArmR: 20.1, fArmR: 84.8,
+    uArmL: 95.0, fArmL: 95.0, uArmR: 20.1, fArmR: 84.8,
     thighL: 105.0, shinL: 85.1, thighR: 75.0, shinR: 94.9,
     racket: 100.2, racketLen: 0.13 },
   { t: 0.6, hipCenter: [0.505, 0.555], trunk: -87.7, neck: -98.5,
-    uArmL: 175.0, fArmL: 81.8, uArmR: 64.9, fArmR: 98.2,
+    uArmL: 95.0, fArmL: 95.0, uArmR: 64.9, fArmR: 98.2,
     thighL: 101.9, shinL: 86.0, thighR: 78.1, shinR: 94.9,
     racket: 150.1, racketLen: 0.13 },
   { t: 0.65, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -95.7,
-    uArmL: -159.9, fArmL: 10.0, uArmR: 112.0, fArmR: 112.1,
+    uArmL: 100.0, fArmL: 100.0, uArmR: 112.0, fArmR: 112.1,
     thighL: 100.2, shinL: 88.0, thighR: 79.8, shinR: 94.9,
     racket: -160.2, racketLen: 0.13 },
-  // Mid follow-through — arm continues forward across the body but
-  // upper arm stops short of "behind the head" (was 155.8, now 130).
+  // Mid follow-through — arm forward across the body but uArmR caps
+  // at 130° (was 155.8°, behind the head). Forearm continues forward
+  // (160°), racket keeps rotating in the same direction (-130 raw =
+  // 230° unwrapped from 200° at contact), no reversal.
   { t: 0.725, hipCenter: [0.49, 0.55], trunk: -91.1, neck: -90.0,
-    uArmL: -149.7, fArmL: 14.9, uArmR: 130.0, fArmR: 140.0,
+    uArmL: 105.0, fArmL: 105.0, uArmR: 130.0, fArmR: 160.0,
     thighL: 97.1, shinL: 89.1, thighR: 81.9, shinR: 92.9,
-    racket: -140.0, racketLen: 0.13 },
-  // Finish — arm relaxes back toward idle. Loop seam from here back
-  // to t=0 is now a small recovery, not a 360° spin.
+    racket: -130.0, racketLen: 0.13 },
+  // Finish — arm relaxing back toward idle while the racket continues
+  // its circular sweep through the "up" phase (-90 raw = 270°
+  // unwrapped). Wrist is at hip height here so the racket head only
+  // reaches chest level, not over the shoulder.
   { t: 0.8, hipCenter: [0.48, 0.55], trunk: -92.3, neck: -84.3,
-    uArmL: -140.0, fArmL: 19.8, uArmR: 110.0, fArmR: 100.0,
+    uArmL: 95.0, fArmL: 95.0, uArmR: 120.0, fArmR: 130.0,
     thighL: 95.1, shinL: 90.0, thighR: 84.9, shinR: 90.0,
-    racket: 85.0, racketLen: 0.12 },
+    racket: -90.0, racketLen: 0.12 },
 ]
 const N = KEYFRAME_ANGLES.length
 
