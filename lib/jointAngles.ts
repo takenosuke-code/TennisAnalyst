@@ -379,3 +379,23 @@ export function buildAngleSummary(
     })
     .join('\n')
 }
+
+// ---------------------------------------------------------------------------
+// Camera-robust helpers (re-exported from `lib/cameraNormalization`).
+//
+// These are siblings of the camera-frame helpers above, factored out so
+// callers can opt into camera-invariant comparisons without reaching
+// across modules. The implementations live in `lib/cameraNormalization.ts`
+// — kept there because they share private constants (visibility floor,
+// hip-line minimum) with the other camera-normalization utilities. We
+// re-export here so `import { computeRotationExcursion } from
+// '@/lib/jointAngles'` is the natural ergonomic path for code already
+// pulling other angle helpers from this module.
+// ---------------------------------------------------------------------------
+
+export {
+  computeBodyFrameAngles,
+  computeRotationExcursion,
+  computeCameraSimilarity,
+} from './cameraNormalization'
+export type { CameraClass } from './cameraNormalization'
