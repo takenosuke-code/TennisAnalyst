@@ -121,6 +121,17 @@ export default function ReplayDevPage() {
   const [replayError, setReplayError] = useState<string | null>(null)
   const [transcodeState, setTranscodeState] = useState<'idle' | 'running' | 'error'>('idle')
   const [transcodeError, setTranscodeError] = useState<string | null>(null)
+  // Set true right after the transcode-button finishes; the effect
+  // below auto-fires handleReplay once React has re-rendered with the
+  // new file. Without this the user has to click Replay manually after
+  // transcoding, and at least one user reported the manual click did
+  // "nothing" — likely because handleReplay's useCallback closure
+  // captured the OLD file reference until the next render.
+  const [autoReplayPending, setAutoReplayPending] = useState(false)
+  // Last time the Replay button click handler actually fired. Surfaced
+  // inline as a diagnostic — if the user clicks Replay and this
+  // timestamp doesn't update, the click isn't registering at all.
+  const [lastReplayClickAt, setLastReplayClickAt] = useState<number | null>(null)
   const [playbackRate, setPlaybackRate] = useState<number>(1)
   const [toggles, setToggles] = useState<FetchToggles>({
     blockExtract: false,
@@ -346,6 +357,7 @@ export default function ReplayDevPage() {
   // hidden <video>, captureStream() it, and drive useLiveCapture.start().
   // -----------------------------------------------------------------
   const handleReplay = useCallback(async () => {
+    setLastReplayClickAt(Date.now())
     if (!file || !fileObjectUrl) {
       setReplayError('Pick a file first')
       return
@@ -523,6 +535,19 @@ export default function ReplayDevPage() {
     start,
     resetSession,
   ])
+
+  // After the transcode button replaces `file` + `fileObjectUrl`,
+  // React re-renders and handleReplay's useCallback closes over the
+  // new file. THIS effect (which depends on handleReplay) then
+  // auto-fires it so the user doesn't have to click Replay manually.
+  // The autoReplayPending guard ensures we only fire once per
+  // transcode and only when state is clean ('idle', file present).
+  useEffect(() => {
+    if (!autoReplayPending) return
+    if (replayState !== 'idle' || !file || !fileObjectUrl) return
+    setAutoReplayPending(false)
+    void handleReplay()
+  }, [autoReplayPending, replayState, file, fileObjectUrl, handleReplay])
 
   // Centralised stop path. Used by the EOF handler and the manual Stop
   // button. Always restores getUserMedia (via ref) and stops file-stream
@@ -705,7 +730,23 @@ export default function ReplayDevPage() {
             {' · '}
             captureStatus: <span className="font-mono">{status}</span>
             {isRecording ? ' · recording' : null}
+            {' · '}
+            replayDisabled: <span className="font-mono">{String(replayDisabled)}</span>
           </div>
+          {lastReplayClickAt ? (
+            <div className="text-white/40">
+              last Replay click: <span className="font-mono">{new Date(lastReplayClickAt).toLocaleTimeString()}</span>
+              {' '}
+              <span className="text-white/30">
+                (if you clicked Replay and this didn&apos;t update, the click isn&apos;t registering)
+              </span>
+            </div>
+          ) : null}
+          {autoReplayPending ? (
+            <div className="text-emerald-300">
+              auto-replay pending — will fire on next render with the new file
+            </div>
+          ) : null}
           {replayError ? (
             <div className="text-rose-400">replay error: {replayError}</div>
           ) : null}
@@ -735,6 +776,10 @@ export default function ReplayDevPage() {
                     setReplayState('idle')
                     setReplayError(null)
                     setTranscodeState('idle')
+                    // Auto-fire the replay once React re-renders with the
+                    // new file (handleReplay's useCallback has `file` in
+                    // its deps; the effect waits for the new closure).
+                    setAutoReplayPending(true)
                   } catch (err) {
                     setTranscodeState('error')
                     setTranscodeError(err instanceof Error ? err.message : 'transcode failed')
