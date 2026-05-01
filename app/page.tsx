@@ -90,14 +90,19 @@ export default function HomePage() {
           that draws the court lines, net, and both figures + ball.
           The text is purely decorative now — the ball doesn't collide
           with it. */}
-      <section className="bg-green-wash text-cream relative overflow-hidden">
-        {/* Rally + court overlay — drawn behind the text. */}
+      <section className="bg-green-wash text-cream relative overflow-hidden min-h-screen flex items-center">
+        {/* Rally + court overlay — drawn behind the text. With the section
+            now anchored to min-h-screen, the court fills the viewport
+            (HeroRally is absolute inset-0) and the next "Everything You
+            Need" section sits below the fold instead of peeking in at
+            the bottom. */}
         <HeroRally />
 
         {/* Centered hero copy. Sits on top of the court but the
             buttons remain clickable because the overlay above is
-            pointer-events-none. */}
-        <div className="relative max-w-3xl mx-auto px-5 sm:px-8 pt-20 pb-24 lg:pt-32 lg:pb-36 text-center">
+            pointer-events-none. The flex parent vertically centers
+            this block within the now-taller section. */}
+        <div className="relative max-w-3xl mx-auto px-5 sm:px-8 py-16 lg:py-24 text-center w-full">
           <p className="text-[11px] sm:text-xs uppercase tracking-[0.18em] text-cream/70 mb-5">
             AI Pose Tracking · For Tennis
           </p>
