@@ -357,7 +357,7 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
       }),
     )
     expect(res.status).toBe(200)
-    expect(res.headers.get('X-Analyze-Empty-State')).toBe('1')
+    expect(res.headers.get('X-Analyze-Empty-State')).toBe('true')
     const body = await readStream(res)
     expect(body).toMatch(/could not read your swing/i)
     expect(body).toMatch(/from the side/i)

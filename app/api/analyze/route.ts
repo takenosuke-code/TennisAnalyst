@@ -486,7 +486,7 @@ export async function POST(request: NextRequest) {
       'Content-Type': 'text/plain; charset=utf-8',
       'Cache-Control': 'no-cache',
       'X-Content-Type-Options': 'nosniff',
-      'X-Analyze-Empty-State': '1',
+      'X-Analyze-Empty-State': 'true',
     }
     if (eventId) headers['X-Analysis-Event-Id'] = eventId
     return new NextResponse(stream, { headers })
