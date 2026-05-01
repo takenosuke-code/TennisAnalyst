@@ -58,6 +58,11 @@ type KeyframeAngles = {
   racket: number; racketLen: number
 }
 
+// Right-arm follow-through capped below "over-the-shoulder" — the
+// previous keyframes had uArmR sweeping past 180° (behind the head)
+// during follow-through, which reads as a 2D arm-rotation rather than
+// a forehand finish. uArmR / fArmR / racket at t=0.725 and t=0.8 now
+// stay forward-and-across the body, then relax back toward idle.
 const KEYFRAME_ANGLES: KeyframeAngles[] = [
   { t: 0.0, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -90.0,
     uArmL: 112.9, fArmL: 109.8, uArmR: 67.1, fArmR: 70.2,
@@ -87,14 +92,18 @@ const KEYFRAME_ANGLES: KeyframeAngles[] = [
     uArmL: -159.9, fArmL: 10.0, uArmR: 112.0, fArmR: 112.1,
     thighL: 100.2, shinL: 88.0, thighR: 79.8, shinR: 94.9,
     racket: -160.2, racketLen: 0.13 },
+  // Mid follow-through — arm continues forward across the body but
+  // upper arm stops short of "behind the head" (was 155.8, now 130).
   { t: 0.725, hipCenter: [0.49, 0.55], trunk: -91.1, neck: -90.0,
-    uArmL: -149.7, fArmL: 14.9, uArmR: 155.8, fArmR: -160.2,
+    uArmL: -149.7, fArmL: 14.9, uArmR: 130.0, fArmR: 140.0,
     thighL: 97.1, shinL: 89.1, thighR: 81.9, shinR: 92.9,
-    racket: -150.1, racketLen: 0.13 },
+    racket: -140.0, racketLen: 0.13 },
+  // Finish — arm relaxes back toward idle. Loop seam from here back
+  // to t=0 is now a small recovery, not a 360° spin.
   { t: 0.8, hipCenter: [0.48, 0.55], trunk: -92.3, neck: -84.3,
-    uArmL: -140.0, fArmL: 19.8, uArmR: -159.9, fArmR: -70.2,
+    uArmL: -140.0, fArmL: 19.8, uArmR: 110.0, fArmR: 100.0,
     thighL: 95.1, shinL: 90.0, thighR: 84.9, shinR: 90.0,
-    racket: -94.8, racketLen: 0.12 },
+    racket: 85.0, racketLen: 0.12 },
 ]
 const N = KEYFRAME_ANGLES.length
 
