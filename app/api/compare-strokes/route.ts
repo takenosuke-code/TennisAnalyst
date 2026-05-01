@@ -34,12 +34,6 @@ import type { ShotType } from '@/lib/shotTypeConfig'
 import { VALID_SHOT_TYPES } from '@/lib/shotTypeConfig'
 import type { StrokeComparisonResult } from '@/lib/strokeAnalysis'
 
-// Re-export so any existing import path (e.g.
-// `import type { StrokeComparisonResult } from
-// '@/app/api/compare-strokes/route'`) keeps resolving. The canonical
-// declaration lives in lib/strokeAnalysis.ts.
-export type { StrokeComparisonResult }
-
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 })
@@ -52,7 +46,7 @@ const anthropic = new Anthropic({
 // best/worst verdict. Tuned from the user's research: 0.7 z-score units is
 // roughly "noticeable but not decisive", and pretending to have a winner on
 // anything tighter erodes player trust in the system.
-export const TIE_THRESHOLD = 0.7
+const TIE_THRESHOLD = 0.7
 
 // Word-count budget for each per-stroke reasoning paragraph. Both stated in
 // the system prompt AND validated post-parse (defense in depth).

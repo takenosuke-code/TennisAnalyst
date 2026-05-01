@@ -71,6 +71,37 @@ function currentModelVersion(): string {
   return process.env.POSE_CACHE_MODEL_VERSION || 'rtmpose-modal'
 }
 
+// Frame-shape gate before we write Modal output to the pose cache. The
+// cache key is sha256(video bytes), so any garbage we memoize would be
+// served forever for the same upload — we'd rather pay re-extract on
+// the next request than poison the row.
+type FrameValidation =
+  | { ok: true }
+  | { ok: false; reason: string; frameIndex?: number }
+
+function validateFrames(frames: unknown[]): FrameValidation {
+  if (frames.length === 0) {
+    return { ok: false, reason: 'frames array is empty' }
+  }
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i]
+    if (!f || typeof f !== 'object') {
+      return { ok: false, reason: 'frame is not an object', frameIndex: i }
+    }
+    const obj = f as Record<string, unknown>
+    if (typeof obj.frame_index !== 'number') {
+      return { ok: false, reason: 'frame_index missing or not a number', frameIndex: i }
+    }
+    if (typeof obj.timestamp_ms !== 'number') {
+      return { ok: false, reason: 'timestamp_ms missing or not a number', frameIndex: i }
+    }
+    if (!Array.isArray(obj.landmarks)) {
+      return { ok: false, reason: 'landmarks missing or not an array', frameIndex: i }
+    }
+  }
+  return { ok: true }
+}
+
 // Synchronous Modal call budget for the batch-ephemeral path:
 //   ~5-10s cold-start  + ~3-5s blob download (Modal-side)
 // + ~3-5s inference    + ~2s overhead
