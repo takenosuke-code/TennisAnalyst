@@ -317,6 +317,15 @@ export const COACHING_EXAMPLES_BLOCK = `EXAMPLES of strong cue bodies (imitate t
 // metrics extractor and integration tests reference one source of truth.
 export const ADVANCED_BASELINE_TEMPLATE = 'This is clean. Save it as your baseline.'
 
+// Clean-swing closing used by the streaming /api/analyze route when
+// the auto-detector finds zero deviations and the model has nothing
+// material to add. Tracked here (not inside the route) so
+// matchesBaselineTemplate can recognize it for the
+// `used_baseline_template` telemetry flag, and so any future change to
+// the wording stays in lock-step with detection.
+export const CLEAN_SWING_CLOSING =
+  'Your swing is in great shape. Keep grooving this.'
+
 // Per-tier token ceiling passed to Anthropic's max_tokens. Bumped twice:
 // once for per-cue exercises, again for per-cue keyPoints (bullet
 // summaries). Each cue now carries body + keyPoints + exercises, so the
@@ -540,7 +549,21 @@ function normalizeForTemplateCompare(s: string): string {
 
 function matchesBaselineTemplate(s: string): boolean {
   if (!s) return false
-  return normalizeForTemplateCompare(s) === normalizeForTemplateCompare(ADVANCED_BASELINE_TEMPLATE)
+  const normalized = normalizeForTemplateCompare(s)
+  // Advanced-tier tool_use legacy: the whole closing IS the template.
+  if (normalized === normalizeForTemplateCompare(ADVANCED_BASELINE_TEMPLATE)) {
+    return true
+  }
+  // Streaming clean-swing branch (post-tool_use): the closing sentence
+  // appears at the end of a longer markdown response, so we check for
+  // substring containment rather than equality. Catches the
+  // "## Optional Refinement\nYour swing is in great shape. Keep
+  // grooving this." case the streaming route emits when
+  // detectedMistakes.length === 0.
+  if (normalized.includes(normalizeForTemplateCompare(CLEAN_SWING_CLOSING))) {
+    return true
+  }
+  return false
 }
 
 // Deterministic renderer: CoachingToolInput -> markdown for LLMCoachingPanel's
