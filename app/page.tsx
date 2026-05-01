@@ -134,13 +134,13 @@ export default function HomePage() {
             <div className="flex flex-col sm:flex-row gap-3 justify-center">
               <Link
                 href="/analyze"
-                className="inline-flex items-center justify-center px-8 py-4 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-base font-semibold tracking-wide transition-colors"
+                className="inline-flex items-center justify-center px-8 py-4 min-w-[220px] rounded-full bg-clay hover:bg-[#c4633f] text-cream text-base font-semibold tracking-wide transition-colors"
               >
                 Analyze My Swing
               </Link>
               <Link
                 href="/baseline"
-                className="inline-flex items-center justify-center px-8 py-4 rounded-full bg-cream hover:bg-cream-soft text-ink text-base font-semibold tracking-wide transition-colors"
+                className="inline-flex items-center justify-center px-8 py-4 min-w-[220px] rounded-full bg-cream hover:bg-cream-soft text-ink text-base font-semibold tracking-wide transition-colors"
               >
                 My Baselines
               </Link>
