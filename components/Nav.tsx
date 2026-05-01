@@ -9,7 +9,7 @@ export default function Nav() {
 
   return (
     <nav className="border-b border-cream/10 bg-ink/40 backdrop-blur-md sticky top-0 z-50">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
+      <div className="px-5 sm:px-8 h-20 flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2.5 font-display font-extrabold text-cream text-lg tracking-tight">
           {/* Tennis ball — small inline SVG with the curve seam. Replaces
               the 🎾 emoji so the brand mark inherits the new aesthetic. */}
