@@ -77,9 +77,8 @@ vi.mock('@/lib/captureQuality', () => ({
 
 // getCoachingContext is the only profile.ts hook the route calls. We
 // override per-test to simulate different tiers; everything else
-// (TIER_MAX_TOKENS, buildTierCoachingBlock, parseTierAssessmentTrailer,
-// matchesBaselineTemplate, etc) imports from the real module so
-// behavioral assertions match prod.
+// (TIER_MAX_TOKENS, etc) imports from the real module so behavioral
+// assertions match prod.
 vi.mock('@/lib/profile', async () => {
   const actual = await vi.importActual<typeof import('@/lib/profile')>('@/lib/profile')
   return {
@@ -97,6 +96,13 @@ vi.mock('next/server', async () => {
 
 // ---------- Helpers ----------
 
+/**
+ * Standard fixture: 60 frames whose hip/trunk excursion is zero (constant
+ * angles), so the new observation extractor reliably emits at least one
+ * `insufficient_*_excursion` observation. With landmarks=[] the visibility
+ * defaults to 1.0 inside the extractor (per its contract), so the confidence
+ * floor doesn't fire.
+ */
 function makeFakeKeypoints(frameCount = 60) {
   return {
     fps_sampled: 30,
@@ -112,6 +118,32 @@ function makeFakeKeypoints(frameCount = 60) {
         left_shoulder: 90,
         right_knee: 150,
         left_knee: 150,
+        hip_rotation: 50,
+        trunk_rotation: 50,
+      },
+    })),
+  }
+}
+
+/**
+ * Empty-state fixture: explicit zero-visibility landmarks force the
+ * confidence floor to kill every observation, exercising the empty-state
+ * branch.
+ */
+function makeBlindKeypoints(frameCount = 60) {
+  return {
+    fps_sampled: 30,
+    frame_count: frameCount,
+    frames: Array.from({ length: frameCount }, (_, i) => ({
+      frame_index: i,
+      timestamp_ms: (i / 30) * 1000,
+      landmarks: [
+        { id: 0, name: 'nose', x: 0, y: 0, z: 0, visibility: 0.05 },
+        { id: 11, name: 'l_shoulder', x: 0, y: 0, z: 0, visibility: 0.05 },
+      ],
+      joint_angles: {
+        right_elbow: 80,
+        right_knee: 178,
         hip_rotation: 50,
         trunk_rotation: 50,
       },
@@ -142,7 +174,7 @@ async function readStream(res: Response): Promise<string> {
 
 // ---------- Tests ----------
 
-describe('POST /api/analyze (streaming)', () => {
+describe('POST /api/analyze (observation-driven pipeline)', () => {
   beforeEach(() => {
     vi.resetModules()
     lastArgsBox.current = null
@@ -166,8 +198,12 @@ describe('POST /api/analyze (streaming)', () => {
     }))
   })
 
+  // -------------------------------------------------------------------------
+  // Tier wiring + system prompt voice rules
+  // -------------------------------------------------------------------------
+
   for (const tier of ['beginner', 'intermediate', 'competitive', 'advanced'] as const) {
-    it(`tier=${tier}: passes the right max_tokens + tier rubric block + voice-only system prompt`, async () => {
+    it(`tier=${tier}: passes the right max_tokens, voice-rules system prompt, and tier hint in user prompt`, async () => {
       mockGetCoachingContext.mockResolvedValue({
         profile: {
           skill_tier: tier,
@@ -177,7 +213,10 @@ describe('POST /api/analyze (streaming)', () => {
         },
         skipped: false,
       })
-      responseQueue.push('Body of the coach response.')
+      // Clean coach reply with the new two-section format.
+      responseQueue.push(
+        '## Primary cue\nTurn your shoulders earlier and let the racket follow.\n\n## Other things I noticed\n- Set the back leg before the bounce.',
+      )
 
       const { POST } = await import('@/app/api/analyze/route')
       const res = await POST(
@@ -189,17 +228,15 @@ describe('POST /api/analyze (streaming)', () => {
       expect(res.status).toBe(200)
       await readStream(res) // drain so after() runs
 
-      // Single streaming call — no tool_use primary, no fallback.
       expect(lastArgsBox.current).not.toBeNull()
       // max_tokens wired to the per-tier ceiling.
       expect(lastArgsBox.current!.max_tokens).toBe(TIER_MAX_TOKENS[tier])
-      // System prompt is the voice-rules block, NOT the tool_use one.
+      // System prompt is the new tight voice-rules block.
       expect(lastArgsBox.current!.system[0].text).toMatch(
         /You are a veteran tennis coach/i,
       )
-      expect(lastArgsBox.current!.system[0].text).not.toMatch(/emit_coaching tool/i)
-      // Tier rubric is woven into the user prompt — the rubric block
-      // names the tier explicitly so we can grep for it.
+      expect(lastArgsBox.current!.system[0].text).toMatch(/Voice rules/i)
+      // User prompt must mention the tier name so the model can calibrate.
       expect(lastArgsBox.current!.messages[0].content.toLowerCase()).toContain(tier)
     })
   }
@@ -214,7 +251,9 @@ describe('POST /api/analyze (streaming)', () => {
       },
       skipped: false,
     })
-    responseQueue.push('Quick per-shot advice.')
+    responseQueue.push(
+      '## Primary cue\nQuick advice.\n\n## Other things I noticed\n- Stay sideways.',
+    )
 
     const { POST } = await import('@/app/api/analyze/route')
     const res = await POST(
@@ -231,12 +270,22 @@ describe('POST /api/analyze (streaming)', () => {
     expect(lastArgsBox.current!.max_tokens).toBe(600)
   })
 
-  it('skipped-onboarding users: TIER_ASSESSMENT trailer is suppressed from the streamed response', async () => {
-    mockGetCoachingContext.mockResolvedValue({ profile: null, skipped: true })
-    // The trailer must be the tail of the response — that's where
-    // parseTierAssessmentTrailer extracts it from.
+  // -------------------------------------------------------------------------
+  // Response shape
+  // -------------------------------------------------------------------------
+
+  it('emits "## Primary cue", "## Other things I noticed", and "## Show your work" sections', async () => {
+    mockGetCoachingContext.mockResolvedValue({
+      profile: {
+        skill_tier: 'intermediate',
+        dominant_hand: 'right',
+        backhand_style: 'two_handed',
+        primary_goal: 'consistency',
+      },
+      skipped: false,
+    })
     responseQueue.push(
-      'Coach body text here. More body. And more body content.\n\n[TIER_ASSESSMENT: intermediate]',
+      '## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.',
     )
 
     const { POST } = await import('@/app/api/analyze/route')
@@ -248,13 +297,12 @@ describe('POST /api/analyze (streaming)', () => {
     )
     expect(res.status).toBe(200)
     const body = await readStream(res)
-    // Trailer should not leak to the user.
-    expect(body).not.toMatch(/\[TIER_ASSESSMENT:/i)
-    // But the body content survived the holdback flush.
-    expect(body).toContain('Coach body text here.')
+    expect(body).toContain('## Primary cue')
+    expect(body).toContain('## Other things I noticed')
+    expect(body).toContain('## Show your work')
   })
 
-  it('signed-in profile users: emits tokens immediately (no holdback) — full body matches the mock', async () => {
+  it('numbers only appear in the "## Show your work" section', async () => {
     mockGetCoachingContext.mockResolvedValue({
       profile: {
         skill_tier: 'intermediate',
@@ -264,8 +312,9 @@ describe('POST /api/analyze (streaming)', () => {
       },
       skipped: false,
     })
-    const expected = 'A complete coaching response with no trailer at all.'
-    responseQueue.push(expected)
+    responseQueue.push(
+      '## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.',
+    )
 
     const { POST } = await import('@/app/api/analyze/route')
     const res = await POST(
@@ -275,6 +324,148 @@ describe('POST /api/analyze (streaming)', () => {
       }),
     )
     const body = await readStream(res)
-    expect(body).toBe(expected)
+    const showIdx = body.indexOf('## Show your work')
+    expect(showIdx).toBeGreaterThan(-1)
+    const beforeShow = body.slice(0, showIdx)
+    expect(beforeShow).not.toMatch(/\d/)
+    // The Show your work section itself must contain at least one digit
+    // (the rendered observation values).
+    const afterShow = body.slice(showIdx)
+    expect(afterShow).toMatch(/\d/)
+  })
+
+  // -------------------------------------------------------------------------
+  // Empty-state branch
+  // -------------------------------------------------------------------------
+
+  it('empty-state: no observations -> friendly message + X-Analyze-Empty-State header + no LLM call', async () => {
+    mockGetCoachingContext.mockResolvedValue({
+      profile: {
+        skill_tier: 'intermediate',
+        dominant_hand: 'right',
+        backhand_style: 'two_handed',
+        primary_goal: 'consistency',
+      },
+      skipped: false,
+    })
+
+    const { POST } = await import('@/app/api/analyze/route')
+    const res = await POST(
+      makeReq({
+        keypointsJson: makeBlindKeypoints(60),
+        shotType: 'forehand',
+      }),
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get('X-Analyze-Empty-State')).toBe('1')
+    const body = await readStream(res)
+    expect(body).toMatch(/could not read your swing/i)
+    expect(body).toMatch(/from the side/i)
+    // Anthropic should NOT have been called.
+    expect(lastArgsBox.current).toBeNull()
+  })
+
+  // -------------------------------------------------------------------------
+  // Post-filter behavior
+  // -------------------------------------------------------------------------
+
+  it('post-filter rejects digit-leak output and re-rolls; clean retry survives', async () => {
+    mockGetCoachingContext.mockResolvedValue({
+      profile: {
+        skill_tier: 'intermediate',
+        dominant_hand: 'right',
+        backhand_style: 'two_handed',
+        primary_goal: 'consistency',
+      },
+      skipped: false,
+    })
+    // First attempt: contains a digit. Second attempt: clean.
+    responseQueue.push(
+      '## Primary cue\nTurn 30 degrees earlier.\n\n## Other things I noticed\n- Bend.',
+    )
+    responseQueue.push(
+      '## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.',
+    )
+
+    const { POST } = await import('@/app/api/analyze/route')
+    const res = await POST(
+      makeReq({
+        keypointsJson: makeFakeKeypoints(60),
+        shotType: 'forehand',
+      }),
+    )
+    const body = await readStream(res)
+    // Post-filter accepted the second (clean) attempt; digit appears only in
+    // the Show your work block.
+    const showIdx = body.indexOf('## Show your work')
+    const beforeShow = body.slice(0, showIdx)
+    expect(beforeShow).not.toMatch(/\d/)
+    expect(beforeShow).toContain('Turn your shoulders earlier')
+  })
+
+  it('post-filter falls back to a static cue after 3 dirty LLM responses', async () => {
+    mockGetCoachingContext.mockResolvedValue({
+      profile: {
+        skill_tier: 'intermediate',
+        dominant_hand: 'right',
+        backhand_style: 'two_handed',
+        primary_goal: 'consistency',
+      },
+      skipped: false,
+    })
+    // All 3 attempts dirty.
+    for (let i = 0; i < 3; i++) {
+      responseQueue.push('Bad output with the kinetic chain explanation.')
+    }
+
+    const { POST } = await import('@/app/api/analyze/route')
+    const res = await POST(
+      makeReq({
+        keypointsJson: makeFakeKeypoints(60),
+        shotType: 'forehand',
+      }),
+    )
+    const body = await readStream(res)
+    // Static fallback emits a Primary cue + Other things I noticed structure
+    // built from CueExemplar text — none of the disallowed strings.
+    expect(body).toContain('## Primary cue')
+    expect(body).toContain('## Other things I noticed')
+    expect(body).toContain('## Show your work')
+    const showIdx = body.indexOf('## Show your work')
+    const beforeShow = body.slice(0, showIdx)
+    expect(beforeShow).not.toMatch(/kinetic chain/i)
+    expect(beforeShow).not.toMatch(/\d/)
+  })
+
+  it('post-filter rejects em-dashes and falls through to the next attempt', async () => {
+    mockGetCoachingContext.mockResolvedValue({
+      profile: {
+        skill_tier: 'intermediate',
+        dominant_hand: 'right',
+        backhand_style: 'two_handed',
+        primary_goal: 'consistency',
+      },
+      skipped: false,
+    })
+    // Em-dash is in the first attempt; second attempt is clean.
+    responseQueue.push(
+      '## Primary cue\nTurn your shoulders \u2014 then drive forward.\n\n## Other things I noticed\n- Bend the knees.',
+    )
+    responseQueue.push(
+      '## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.',
+    )
+
+    const { POST } = await import('@/app/api/analyze/route')
+    const res = await POST(
+      makeReq({
+        keypointsJson: makeFakeKeypoints(60),
+        shotType: 'forehand',
+      }),
+    )
+    const body = await readStream(res)
+    const showIdx = body.indexOf('## Show your work')
+    const beforeShow = body.slice(0, showIdx)
+    expect(beforeShow).not.toContain('\u2014')
+    expect(beforeShow).toContain('Turn your shoulders earlier')
   })
 })

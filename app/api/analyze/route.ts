@@ -3,40 +3,309 @@
 //   EXTRACT_API_KEY=<same key used for /extract>
 // Missing either -> capture_quality_flag stays null on every row.
 // This is intentional -- telemetry must never block coaching.
+//
+// Pipeline (rewritten 2026-04 to be observation-driven):
+//   1. extractObservations() turns pose data into typed Observations.
+//   2. If empty -> stream the friendly "couldn't read your swing" empty-state
+//      response and skip Anthropic entirely. X-Analyze-Empty-State signals it.
+//   3. Otherwise pickPrimary + pickSecondary, build a tight system prompt
+//      (10 lines of voice rules) and a user prompt with chosen exemplars +
+//      observations + format spec.
+//   4. Buffer the LLM body, validate against the post-filter (no digits, no
+//      em-dash, no biomech jargon), re-roll twice with stricter framing on
+//      reject; on the third failure emit a CueExemplar-driven static fallback.
+//   5. Append a deterministic "## Show your work" markdown block constructed
+//      from the Observation rows. Numbers are ALLOWED only in this section.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { after } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { supabase, supabaseAdmin } from '@/lib/supabase'
 import { createClient } from '@/lib/supabase/server'
-import { buildAngleSummary, detectSwings } from '@/lib/jointAngles'
-import { getBiomechanicsReference } from '@/lib/biomechanics-reference'
-import { SHOT_TYPE_CONFIGS } from '@/lib/shotTypeConfig'
+import { buildAngleSummary } from '@/lib/jointAngles'
 import { classifyAndTagCaptureQuality } from '@/lib/captureQuality'
 import {
-  buildInferredTierCoachingBlock,
-  buildTierCoachingBlock,
   DEFAULT_MAX_TOKENS,
   extractResponseMetrics,
   getCoachingContext,
-  isTierDowngrade,
-  parseTierAssessmentTrailer,
   TIER_MAX_TOKENS,
   type SkillTier,
 } from '@/lib/profile'
 import { sanitizePromptInput } from '@/lib/sanitize'
-import type { KeypointsJson } from '@/lib/supabase'
+import {
+  extractObservations,
+  pickPrimary,
+  pickSecondary,
+  type Observation,
+} from '@/lib/coachingObservations'
+import {
+  CUE_EXEMPLARS,
+  findExemplars,
+  type CueExemplar,
+} from '@/lib/cueExemplars'
+import type { ShotType } from '@/lib/shotTypeConfig'
+import { VALID_SHOT_TYPES } from '@/lib/shotTypeConfig'
+import type { KeypointsJson, PoseFrame } from '@/lib/supabase'
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 })
 
+// ---------------------------------------------------------------------------
+// Voice rules system prompt — kept tight so the model has the contract in
+// front of it without being smothered by 30 lines of don't-do-this. Echoes
+// the cueExemplars register: imperative, second person, single primary cue,
+// then "Other things I noticed" listing secondary observations.
+// ---------------------------------------------------------------------------
+
+const SYSTEM_PROMPT = `You are a veteran tennis coach. Talk like one.
+Voice rules, no exceptions:
+1. Second person, imperative voice. Address the player directly.
+2. One primary cue, then a short list of other things you noticed.
+3. NEVER include numbers, digits, percentages, or counts.
+4. NEVER use em-dashes or en-dashes. Use full sentences or commas.
+5. NEVER use biomechanics jargon (no "kinetic chain", no "trunk_rotation", no "joint angle").
+6. External focus: attention on the racket, the ball, or a court target. Not on muscles.
+7. Plain coach language. Short sentences.
+8. Output exactly two markdown sections: "## Primary cue" and "## Other things I noticed".
+9. Do not generate any other section. The server appends "## Show your work" after you.
+10. Do not narrate the observations. Coach them.`
+
+// Stricter retry preamble — appended to the user prompt on a failed-output retry.
+const STRICT_RETRY_NOTE = `\n\nSTRICT RETRY: Your previous output included disallowed content (digits, em-dashes, or jargon). Rewrite from scratch with NO numbers, NO dashes other than hyphens inside compound words, and NO biomech terms. Use the exemplar voice exactly.`
+
+// Empty-state markdown shown when no observations clear the confidence floor.
+const EMPTY_STATE_MARKDOWN = `## We could not read your swing clearly
+
+We could not read your swing clearly enough to give specific coaching. Try shooting from the side at chest height, with the player filling the frame.`
+
+// Patterns we reject in LLM output. Show your work is appended AFTER the
+// filter runs, so the digit pattern there does not trip it.
+const REJECT_DIGIT_RE = /\d/
+const REJECT_JARGON_RE = /(kinetic chain|trunk_rotation|hip_rotation|joint angle|—|–)/i
+
+const MAX_LLM_RETRIES = 2 // primary + 2 retries = 3 total
+
+// ---------------------------------------------------------------------------
+// Helpers — pure formatting, kept above POST so the handler stays linear.
+// ---------------------------------------------------------------------------
+
+function patternHumanLabel(pattern: Observation['pattern']): string {
+  switch (pattern) {
+    case 'cramped_elbow':
+      return 'cramped elbow at contact'
+    case 'over_extended_elbow':
+      return 'arm locked straight at contact'
+    case 'shallow_knee_load':
+      return 'shallow knee load'
+    case 'locked_knees':
+      return 'legs staying tall through the load'
+    case 'insufficient_hip_excursion':
+      return 'hips barely turning through the swing'
+    case 'insufficient_trunk_excursion':
+      return 'shoulders barely turning through the swing'
+    case 'insufficient_unit_turn':
+      return 'no full unit turn into preparation'
+    case 'truncated_followthrough':
+      return 'follow-through cut short'
+    case 'drift_from_baseline':
+      return 'drift from your best-day baseline'
+  }
+}
+
+function jointHumanLabel(joint: string): string {
+  return joint.replace(/_/g, ' ')
+}
+
+function renderObservationLine(o: Observation): string {
+  return `${jointHumanLabel(o.joint)} at ${o.phase}: ${patternHumanLabel(o.pattern)} (severity: ${o.severity})`
+}
+
+/**
+ * Render the deterministic Show Your Work block from the chosen observations.
+ * Numbers come from the Observation rows. ° is included so the player can
+ * tie the human-language coaching back to the underlying angles. This block
+ * is concatenated AFTER the LLM body, so post-filter never inspects it.
+ */
+function renderShowYourWork(
+  primary: Observation,
+  secondary: Observation[],
+): string {
+  const all = [primary, ...secondary]
+  const lines: string[] = ['', '## Show your work']
+  for (const o of all) {
+    const phase = o.phase
+    const joint = jointHumanLabel(o.joint)
+    if (
+      o.pattern === 'drift_from_baseline' &&
+      typeof o.baselineValue === 'number' &&
+      typeof o.driftMagnitude === 'number'
+    ) {
+      const today = Math.round(o.todayValue)
+      const base = Math.round(o.baselineValue)
+      const drift = Math.round(o.driftMagnitude)
+      lines.push(
+        `- **${joint} at ${phase}**: ${base}° on baseline, ${today}° today (drifted ${drift}°)`,
+      )
+    } else {
+      const today = Math.round(o.todayValue)
+      lines.push(`- **${joint} at ${phase}**: ${today}° today (${o.severity})`)
+    }
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Choose plain vs technical exemplar register. Per spec:
+ *   advanced + competitive -> technical
+ *   beginner + intermediate + null -> plain
+ */
+type Register = 'plain' | 'technical'
+function registerForTier(tier: SkillTier | null): Register {
+  if (tier === 'advanced' || tier === 'competitive') return 'technical'
+  return 'plain'
+}
+
+/**
+ * Format the user prompt. Includes 3-5 exemplars in the player's register,
+ * the primary observation rendered as a single line, the list of secondary
+ * observations, and the format spec.
+ */
+function buildUserPrompt(args: {
+  primary: Observation
+  secondary: Observation[]
+  exemplars: CueExemplar[]
+  register: Register
+  shotType: ShotType | null
+  tier: SkillTier | null
+  focus: string | null
+}): string {
+  const { primary, secondary, exemplars, register, shotType, tier, focus } = args
+
+  const exemplarLines = exemplars
+    .map((ex) => `- ${register === 'technical' ? ex.technical : ex.plain}`)
+    .join('\n')
+
+  const secondaryLines = secondary.length
+    ? secondary.map((o) => `- ${renderObservationLine(o)}`).join('\n')
+    : '- (none)'
+
+  const tierHint = tier
+    ? `Player skill: ${tier}. Calibrate vocabulary to that level.`
+    : `Player skill: unknown. Use plain coaching language.`
+  const shotHint = shotType ? `Shot: ${shotType}.` : `Shot: not specified.`
+  const focusHint = focus
+    ? `Player asked: "${focus}". Address it in your primary cue when relevant.`
+    : ''
+
+  return `${tierHint}
+${shotHint}
+${focusHint}
+
+EXEMPLARS (imitate this voice register, do not copy verbatim):
+${exemplarLines}
+
+PRIMARY ISSUE: ${renderObservationLine(primary)}
+
+OTHER OBSERVATIONS:
+${secondaryLines}
+
+FORMAT — respond with EXACTLY two sections, no other content:
+
+## Primary cue
+One short paragraph addressing the primary issue. Imperative, second person, no numbers, no jargon, no em-dashes.
+
+## Other things I noticed
+A short bulleted list (one bullet per secondary observation). Each bullet: imperative, single-issue, no numbers, no jargon, no em-dashes. If there are no secondary observations, write a single bullet acknowledging the swing has otherwise hung together.`
+}
+
+/**
+ * Buffer-and-validate one LLM call. Returns the cleaned body or null when
+ * the post-filter rejected it.
+ */
+async function streamLlmBody(args: {
+  systemPrompt: string
+  userPrompt: string
+  maxTokens: number
+}): Promise<{ text: string | null; outputTokens: number | null; error: string | null }> {
+  let buffered = ''
+  let outputTokens: number | null = null
+  let error: string | null = null
+  try {
+    const messageStream = anthropic.messages.stream({
+      model: 'claude-sonnet-4-6',
+      max_tokens: args.maxTokens,
+      system: [
+        { type: 'text', text: args.systemPrompt, cache_control: { type: 'ephemeral' } },
+      ],
+      messages: [{ role: 'user', content: args.userPrompt }],
+    })
+    for await (const chunk of messageStream) {
+      if (
+        chunk.type === 'content_block_delta' &&
+        chunk.delta.type === 'text_delta'
+      ) {
+        buffered += chunk.delta.text
+      } else if (chunk.type === 'message_delta' && chunk.usage?.output_tokens) {
+        outputTokens = chunk.usage.output_tokens
+      }
+    }
+  } catch (err) {
+    error = err instanceof Error ? err.message : 'Anthropic stream failed'
+  }
+  if (error) return { text: null, outputTokens, error }
+  if (REJECT_DIGIT_RE.test(buffered) || REJECT_JARGON_RE.test(buffered)) {
+    return { text: null, outputTokens, error: null }
+  }
+  return { text: buffered.trim(), outputTokens, error: null }
+}
+
+/**
+ * Static fallback used when all LLM retries fail validation. Constructs a
+ * coach-voiced response from a chosen CueExemplar and lists secondary
+ * observations as one-liners. No LLM involvement.
+ */
+function buildStaticFallback(args: {
+  primary: Observation
+  secondary: Observation[]
+  exemplar: CueExemplar | null
+  register: Register
+}): string {
+  const { primary, secondary, exemplar, register } = args
+  const cueText = exemplar
+    ? register === 'technical'
+      ? exemplar.technical
+      : exemplar.plain
+    : `Focus on ${patternHumanLabel(primary.pattern)} on the next ball.`
+
+  const lines: string[] = []
+  lines.push('## Primary cue')
+  lines.push(cueText)
+  lines.push('')
+  lines.push('## Other things I noticed')
+  if (secondary.length === 0) {
+    lines.push('- The rest of the swing is hanging together.')
+  } else {
+    for (const o of secondary) {
+      lines.push(`- Watch for ${patternHumanLabel(o.pattern)} on your ${jointHumanLabel(o.joint)}.`)
+    }
+  }
+  return lines.join('\n')
+}
+
+function normalizeShotType(raw: unknown): ShotType | null {
+  if (typeof raw !== 'string') return null
+  const lower = raw.toLowerCase().trim()
+  return (VALID_SHOT_TYPES as readonly string[]).includes(lower)
+    ? (lower as ShotType)
+    : null
+}
+
+// ---------------------------------------------------------------------------
+// POST handler
+// ---------------------------------------------------------------------------
+
 export async function POST(request: NextRequest) {
-  // Resolve profile + skipped state in a single getUser() round trip so every
-  // prompt branch can tier-calibrate. Anonymous / legacy users return null
-  // profile and skipped=false, falling through to the generic calibration
-  // block. Users who explicitly skipped onboarding get the inferred-tier block
-  // instead, so we don't ignore their "I don't want to self-report" signal.
   const authClient = await createClient()
   const { profile, skipped } = await getCoachingContext(authClient)
   const { data: userData } = await authClient.auth.getUser().catch(() => ({ data: { user: null } }))
@@ -50,32 +319,25 @@ export async function POST(request: NextRequest) {
     keypointsJson: inlineKeypoints,
     compareKeypointsJson,
     userFocus,
-    compareMode,
-    baselineLabel,
+    // compareMode + baselineLabel are still accepted on the wire so the
+    // existing UI doesn't have to change, but the new pipeline routes both
+    // legacy and baseline compares through extractObservations(), so the
+    // labels themselves are no longer interpolated into the prompt.
     shotType: bodyShotType,
     blobUrl: bodyBlobUrl,
-    // 'shot' = per-shot coaching modal — same prompt machinery but a
-    // tighter token budget since the per-shot output is shorter than
-    // the page-level synthesis. Defaults to undefined (= page-level
-    // behavior) when omitted.
     mode: bodyMode,
   } = body
   const isShotMode = bodyMode === 'shot'
 
   const focus = sanitizePromptInput(userFocus, 240)
-  const isBaselineCompare = compareMode === 'baseline'
-  const baselineTag = sanitizePromptInput(baselineLabel, 80) ?? 'your best day'
 
-  // Get user keypoints - from inline payload or session
   let userKeypoints: KeypointsJson | null = inlineKeypoints ?? null
-
   if (!userKeypoints && sessionId) {
     const { data: session, error: sessionError } = await supabase
       .from('user_sessions')
       .select('keypoints_json')
       .eq('id', sessionId)
       .single()
-
     if (sessionError) {
       return NextResponse.json({ error: 'Session not found' }, { status: 404 })
     }
@@ -89,8 +351,6 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  // Validate frame elements are non-null objects with joint_angles to prevent
-  // a TypeError crash inside buildAngleSummary from malformed input
   const framesValid = userKeypoints.frames.every(
     (f) => f !== null && typeof f === 'object' && typeof f.joint_angles === 'object'
   )
@@ -98,13 +358,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid keypoints format' }, { status: 400 })
   }
 
-  // Build compact angle summary for the user
-  const userSummary = buildAngleSummary(userKeypoints.frames)
-
-  // Resolve shot type once, early. Used by both the prompt (shape the coaching
-  // for forehand vs. backhand vs. serve) and the telemetry row (kept as-is
-  // downstream). Priority: request body > session metadata > null.
-  let resolvedShotType: string | null = typeof bodyShotType === 'string' ? bodyShotType : null
+  // Resolve shot type (request body > session metadata).
+  let resolvedShotType: ShotType | null = normalizeShotType(bodyShotType)
   let resolvedBlobUrl: string | null = typeof bodyBlobUrl === 'string' ? bodyBlobUrl : null
   if ((!resolvedShotType || !resolvedBlobUrl) && sessionId) {
     try {
@@ -114,7 +369,7 @@ export async function POST(request: NextRequest) {
         .eq('id', sessionId)
         .single()
       if (sessionMeta) {
-        resolvedShotType = resolvedShotType ?? sessionMeta.shot_type ?? null
+        resolvedShotType = resolvedShotType ?? normalizeShotType(sessionMeta.shot_type)
         resolvedBlobUrl = resolvedBlobUrl ?? sessionMeta.blob_url ?? null
       }
     } catch (err) {
@@ -122,67 +377,8 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Run the shot-type-specific mistakeChecks from SHOT_TYPE_CONFIGS against
-  // the peak-activity frame of the primary swing. Gives the LLM a curated
-  // list of issues to prioritize instead of fabricating from raw angles.
-  // Only runs when we actually know the shot type — SHOT_TYPE_CONFIGS
-  // normalizes unknown to forehand, and running forehand checks on a serve
-  // would produce bogus detected-issue cites. Capped at 2 so the model can
-  // still speak freely.
-  let detectedMistakes: string[] = []
-  if (
-    resolvedShotType &&
-    SHOT_TYPE_CONFIGS[resolvedShotType] &&
-    userKeypoints.frames.length > 0
-  ) {
-    const swings = detectSwings(userKeypoints.frames)
-    const primary = swings[0]
-    if (primary) {
-      // peakFrame is an index into allFrames; primary.frames is a slice of
-      // those (from startFrame to endFrame). Translate so we index the slice.
-      const peakIdxInSlice = primary.peakFrame - primary.startFrame
-      const peakFrame = primary.frames[Math.max(0, Math.min(primary.frames.length - 1, peakIdxInSlice))]
-      if (peakFrame && peakFrame.joint_angles) {
-        const checks = SHOT_TYPE_CONFIGS[resolvedShotType].mistakeChecks
-        for (const check of checks) {
-          try {
-            if (check.detect(peakFrame.joint_angles)) {
-              detectedMistakes.push(`${check.label}: ${check.tip}`)
-              if (detectedMistakes.length >= 2) break
-            }
-          } catch {
-            // Defensive: a mistakeCheck that throws on unexpected input
-            // shouldn't block coaching. Silent skip is fine.
-          }
-        }
-      }
-    }
-  }
-
-  // Map to the reference library's vocabulary. Only forehand/backhand/serve
-  // have dedicated references; volley/slice/unknown fall back to 'all'.
-  const refShotType: 'forehand' | 'backhand' | 'serve' | 'all' =
-    resolvedShotType === 'forehand' || resolvedShotType === 'backhand' || resolvedShotType === 'serve'
-      ? resolvedShotType
-      : 'all'
-
-  // Shared prompt blocks injected into BOTH the solo and compare branches.
-  // When shot type IS specified we lock the prompt to that shot. When it
-  // is NOT specified we just stay silent about it. The previous "name
-  // which shot you think this is" instruction made the model open every
-  // response with "Looks like a forehand to me", which read as low-confidence
-  // and was a user-flagged regression. Better to skip the meta-statement
-  // entirely and let the coaching focus on what to actually fix.
-  const shotIntroBlock = resolvedShotType
-    ? `\nSHOT TYPE: You are analyzing a ${resolvedShotType} swing. Tailor every cue and reference angle to this specific shot. Do NOT generalize across shot types. Do NOT open by naming the shot type.\n`
-    : ''
-  const detectedIssuesBlock = detectedMistakes.length > 0
-    ? `\nAUTO-DETECTED ISSUES (system-flagged for this swing, weave coaching around these, do not just list them):\n${detectedMistakes.map((m, i) => `${i + 1}. ${m}`).join('\n')}\n`
-    : ''
-
-  // Optional second-take keypoints for self-compare mode. Validated the same
-  // way as user keypoints to avoid crashes inside buildAngleSummary.
-  let compareSummary: string | null = null
+  // Optional baseline frames for compare-mode. Same validation as user frames.
+  let baselineFrames: PoseFrame[] | undefined
   if (compareKeypointsJson && typeof compareKeypointsJson === 'object') {
     const cmp = compareKeypointsJson as KeypointsJson
     if (Array.isArray(cmp.frames) && cmp.frames.length > 0) {
@@ -195,239 +391,27 @@ export async function POST(request: NextRequest) {
           { status: 400 },
         )
       }
-      compareSummary = buildAngleSummary(cmp.frames)
+      baselineFrames = cmp.frames
     }
   }
 
-  // Tier-aware coaching rubric. Three-way branch:
-  //   profile            -> tier rules + handedness + goal weighting
-  //   skipped && !profile -> infer-tier block (LLM names its guess inline)
-  //   neither            -> generic fallback calibration
-  const tierBlock = profile
-    ? buildTierCoachingBlock(profile)
-    : skipped
-      ? buildInferredTierCoachingBlock()
-      : buildTierCoachingBlock(null)
+  // Compact angle summary kept for telemetry — `composite_metrics.user_summary`
+  // backs the existing capture-quality / drift dashboards. Not part of the
+  // new prompt path.
+  const userSummary = buildAngleSummary(userKeypoints.frames)
 
-  const focusBlock = focus
-    ? `\nTHE PLAYER ASKED: "${focus}"\nThis is the QUESTION you must answer. Open your response by directly addressing this exact question in 1 to 2 sentences before anything else. Do not generalize. Do not pivot to unrelated cues. After answering their question, you can add the standard coaching sections, but the question comes first and gets a real answer grounded in their swing data.\n`
-    : ''
+  // Run the observation extractor. This is the new core: rule-based detection
+  // emits typed Observation rows, and we choose primary + secondary from there.
+  const observations = extractObservations({
+    todaySummary: userKeypoints.frames,
+    baselineSummary: baselineFrames,
+    shotType: resolvedShotType,
+  })
 
-  let prompt: string
+  const primary = pickPrimary(observations)
+  const secondary = pickSecondary(observations, primary, 3)
 
-  if (compareSummary) {
-    // Self-compare mode: same player, two takes. Coach for CONSISTENCY —
-    // spot what's drifting between the two swings rather than rebuilding either.
-    //
-    // Baseline variant (compareMode === 'baseline'): same data plumbing, but
-    // the framing shifts from "two takes side by side" to "best day vs today".
-    // Everything else (rules, voice, biomechanics reference) is identical.
-    const soloRef = getBiomechanicsReference(refShotType)
-
-    const framingParagraph = isBaselineCompare
-      ? `You are a tennis coach helping a player compare today's swing against their best-day baseline ("${baselineTag}"). Your job is progress tracking. Show them what's held up since that peak, what's drifted, and how to lock the good stuff back in.`
-      : `You are a tennis coach watching the same player hit two different swings back to back. Your job is consistency. Help them spot what's staying the same and what's drifting between takes.`
-
-    const anchorRule = isBaselineCompare
-      ? `- Do NOT suggest rebuilds. The baseline IS the anchor. Anywhere today's swing drifts from "${baselineTag}", coach them back toward how they moved on their best day.`
-      : `- Do NOT suggest rebuilds. Both swings come from the same player, so pick the cleaner take as the anchor and talk about matching to it.`
-
-    const specificExample = isBaselineCompare
-      ? `- Be SPECIFIC about differences: "your hips turned further on your best day but today your arm got ahead of them", not "your swing looks different".`
-      : `- Be SPECIFIC about differences: "your hips turned further in take 1 but your arm lagged behind in take 2", not "your swing was inconsistent".`
-
-    const leftLabel = isBaselineCompare ? `BEST-DAY BASELINE ("${baselineTag}") DATA` : 'TAKE 1 DATA'
-    const rightLabel = isBaselineCompare ? 'TODAY DATA' : 'TAKE 2 DATA'
-
-    const heldUpHeading = isBaselineCompare ? "What's Held Up From Your Best Day" : "What's Consistent"
-    const driftingHeading = isBaselineCompare ? "What's Drifted" : "What's Drifting"
-    const lockItHeading = isBaselineCompare ? 'Lock It Back In' : 'Lock It In'
-
-    const heldUpBody = isBaselineCompare
-      ? `Two or three sentences on what today's swing kept from the best-day baseline. Reinforce what's still working.`
-      : `Two or three sentences on what they're doing the same in both takes. Reinforce what's working.`
-
-    const driftingItemBody = isBaselineCompare
-      ? `What changed from the best day to today, which version looked cleaner, and one feel-based cue to get back to best-day quality.`
-      : `What changed between the two takes, which take was cleaner, and one feel-based cue to anchor the next swing.`
-
-    const lockItBody = isBaselineCompare
-      ? `Two short sentences on what to groove next session so today's swing matches your best day again.`
-      : `Two short sentences on what to groove next session so these swings match.`
-
-    prompt = `${framingParagraph}
-${shotIntroBlock}
-${tierBlock}
-${focusBlock}${detectedIssuesBlock}
-STRICT RULES:
-- NEVER mention degrees, angles, or numbers of any kind. Describe everything in feel and body language.
-- NEVER rate or score the player. No X/100, no percentages, no grades.
-- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as a way to chain ideas or replace punctuation. Do not use them for emphasis, parenthetical asides, or to glue two clauses together. If you would have used a dash, write a full sentence with a period, OR connect the clauses with a comma, "and", "but", or a colon. Compound-word hyphens inside a single word like "feel-based" or "external-focus" are fine.
-${anchorRule}
-${specificExample}
-
-Use the data below to understand what's happening, but ONLY talk in coaching language.
-
-REFERENCE: ${soloRef}
-${leftLabel}: ${userSummary}
-${rightLabel}: ${compareSummary}
-
-Respond in this format:
-
-## ${heldUpHeading}
-${heldUpBody}
-
-## ${driftingHeading}
-
-**1. [specific element]**
-${driftingItemBody}
-
-**2. [specific element]**
-Same structure.
-
-**3. [specific element]**
-Same structure.
-
-## ${lockItHeading}
-${lockItBody}
-
-Keep it under 350 words. Sound like a coach helping them tighten up.`
-  } else if (detectedMistakes.length === 0 && resolvedShotType) {
-    // Clean-swing branch: the rule-based auto-detector ran on the peak
-    // frame and found ZERO deviations. Every fault-finding template
-    // pressures the model to fabricate three problems even when the
-    // swing is mechanically sound, so the clean-swing path uses a
-    // celebratory format with at most ONE optional refinement and
-    // explicit permission to give zero. Eval evidence: with the
-    // standard "3 Things to Work On" template, both Sonnet and Haiku
-    // invented problems on a clean forehand fixture; with this
-    // branch they output a tight "your swing is solid, here's one
-    // thing to play with" response.
-    const soloRef = getBiomechanicsReference(refShotType)
-    prompt = `You are a tennis coach talking to a player right after watching their swing on video. Be encouraging and practical.
-${shotIntroBlock}
-${tierBlock}
-${focusBlock}
-NO ISSUES DETECTED. The auto-detection rules ran across this swing's peak frame and found ZERO deviations from textbook ranges. This swing is mechanically sound. Your job is NOT to find three things wrong. Your job is to celebrate what's working and offer at most ONE optional refinement.
-
-STRICT RULES:
-- NEVER mention degrees, angles, or numbers of any kind. Not even once. Describe everything in feel and body language.
-- NEVER rate or score the player.
-- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as a way to chain ideas or replace punctuation. Compound-word hyphens like "feel-based" are fine.
-- Talk like a real person. Short sentences. "You" and "your" constantly.
-
-Use the data below to understand what's happening, but ONLY talk in coaching language.
-
-REFERENCE: ${soloRef}
-USER SWING DATA: ${userSummary}
-
-Respond in this format:
-
-## What You're Doing Well
-Three sentences about specific elements that are working in their swing. Be confident.
-
-## Optional Refinement
-ONE sentence (NOT three) on something to play with if they want to push further. If nothing comes to mind, write "Your swing is in great shape. Keep grooving this." and stop. Do NOT invent issues.
-
-FINAL REMINDER: This swing is clean. Inventing three problems is INCORRECT. Better to under-coach a clean swing than over-coach it. Saying "your swing is solid, keep grooving it" is a CORRECT response.
-
-Keep it under 150 words. Sound like a coach who is genuinely impressed.`
-  } else {
-    // Solo mode: single clip, general coaching with the standard
-    // fault-finding template. Used when at least one auto-detected
-    // issue was flagged OR when shot type is unknown (we can't safely
-    // assert "no deviations" without a shot-specific rule check).
-    const soloRef = getBiomechanicsReference(refShotType)
-
-    // Advanced players get a trimmed prompt because listing three "tips"
-    // when the swing is already clean forces the model to fabricate
-    // problems. Baseline-compare is the right place for drift detection,
-    // so we point them there instead.
-    const isAdvanced = profile?.skill_tier === 'advanced'
-    const advancedTrim = isAdvanced
-      ? `\nADVANCED TRIM: Output at most 2 sentences unless you see a genuine mechanical issue. If the swing is solid, say so and redirect them to baseline-compare for drift detection. Do not force a "3 things to work on" section when there's nothing to fix.\n`
-      : ''
-
-    prompt = `You are a tennis coach talking to a player right after watching their swing on video. Be encouraging and practical.
-${shotIntroBlock}
-${tierBlock}
-${advancedTrim}${focusBlock}${detectedIssuesBlock}
-STRICT RULES:
-- NEVER mention degrees, angles, or numbers of any kind. Not even once. Describe everything in feel and body language.
-- NEVER rate or score the player (no X/100, no percentages, no grades). Just give advice.
-- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as a way to chain ideas or replace punctuation. Do not use them for emphasis, parenthetical asides, or to glue two clauses together. If you would have used a dash, write a full sentence with a period, OR connect the clauses with a comma, "and", "but", or a colon. Compound-word hyphens inside a single word like "feel-based" or "external-focus" are fine.
-- Talk like a real person. Short sentences. "You" and "your" constantly.
-- If the swing is already clean, SAY THAT and give fine-tuning cues. Don't fabricate problems.
-
-Use the data below to understand what's happening, but ONLY talk in coaching language. The player never sees these numbers.
-
-REFERENCE: ${soloRef}
-USER SWING DATA: ${userSummary}
-
-Respond in this format:
-
-## What You're Doing Well
-Two or three sentences about what's genuinely working in their swing. Be specific, not generic.
-
-## 3 Things to Work On
-
-**1. [Short coaching cue]**
-What you see, why it matters for their game, how it compares to solid technique. Give one drill or feel-based tip they can try on the next ball. Use phrases like "load into your legs", "let the racket drop behind you", "turn your hips before your shoulders".
-
-**2. [Short coaching cue]**
-Same approach. Observation, why it matters, one actionable tip.
-
-**3. [Short coaching cue]**
-Same approach. Observation, why it matters, one actionable tip.
-
-## Your Practice Plan
-Three specific things to focus on in their next hitting session. Make each one a single sentence they can remember on court.
-
-Keep it under 350 words. Sound like a coach who believes in this player.`
-  }
-
-  // Fallback (streaming) system prompt. Kept verbatim from the pre-tool-use
-  // behavior so the fallback path produces the same output shape it did
-  // before. Any mention of tool_use here would confuse the model on the
-  // streaming branch.
-  const fallbackSystemPrompt = `You are a veteran tennis coach who has been on court for 30 years. You talk like a real person having a conversation with a player between points.
-
-VOICE RULES (follow these strictly):
-- Write like you TALK. Short sentences. Casual tone. "Your hips are way ahead of your arm here" not "The hip rotation precedes the arm extension."
-- WRITE LIKE A HUMAN COACH TALKING. Never use em dashes (—), en dashes (–), or hyphens (-) as a way to chain ideas or replace punctuation. Do not use them for emphasis, parenthetical asides, or to glue two clauses together. If you would have used a dash, write a full sentence with a period, OR connect the clauses with a comma, "and", "but", or a colon. Compound-word hyphens inside a single word like "feel-based" or "external-focus" are fine.
-- NEVER list raw degree numbers on their own. Wrong: "elbow: 170°, ideal: 110°". Right: "your arm is almost locked straight when you want a nice relaxed bend."
-- You CAN mention a number to back up a point, but always in a natural sentence: "you're only getting about 20 degrees of hip turn when ideal range is around 45."
-- Use coaching cues a player can FEEL: "load your weight into your back leg", "let the racket drop behind you like a pendulum", "snap your hips like you're throwing a punch."
-- Keep it practical. Every piece of advice should be something they can try on the very next ball.
-- Sound encouraging, not critical. You're helping, not grading.
-- No bullet points with just numbers. No tables. No clinical language.
-- Write "you" and "your" constantly. Talk TO the player.
-
-For every coaching cue you give, also recommend ONE OR TWO short exercises the player can do to fix that specific issue. Real drills, not generic "practice more" filler. Examples: "shadow forehands focusing on a relaxed elbow at contact, 20 reps each side", "slow-mo unit-turn drill against a fence, 10 reps", "wall rallies emphasizing early shoulder turn, 50 contacts." Specific, court-runnable, tied to the cue you just gave.
-
-After each coaching paragraph, also give 1-3 short bullet-point takeaways for someone who wants to skim. These bullets are the SAME advice without the analogies and without the feel cues, just the literal mechanic. Each bullet under ~80 characters. Examples: "Bend your elbow more at contact", "Turn your shoulders before the ball bounces", "Drive up through your back leg." The paragraph stays full coach-voice; the bullets are the dry version.`
-
-  // llm_coached_tier is the tier we're actually telling the LLM to coach to.
-  // For self-reported users, that's the profile tier. For skipped users, the
-  // LLM picks one from the swing data — null at insert, backfilled from the
-  // parsed assessment trailer after the stream completes.
-  const coachedTier = profile?.skill_tier ?? null
-  const tierKey: SkillTier | null = profile?.skill_tier ?? null
-  // Per-shot mode caps the token budget tighter — the per-shot modal
-  // shows a focused single-swing response, not the full page-level
-  // synthesis. 600 tokens is enough for "what's working + 1-3 cues +
-  // a quick practice plan" and saves ~5 sec of generation time vs
-  // the tier defaults (which run up to 1500).
-  const tierTokens = tierKey ? TIER_MAX_TOKENS[tierKey] : DEFAULT_MAX_TOKENS
-  const maxTokens = isShotMode ? Math.min(tierTokens, 600) : tierTokens
-
-  // resolvedShotType + resolvedBlobUrl are set above (before the prompt is
-  // built) so the coaching prompt can be shot-type-aware. The telemetry row
-  // below just consumes those same resolved values.
-
-  // Insert the telemetry row BEFORE streaming starts so the X-Analysis-Event-Id
-  // header can be set on the response the frontend binds its thumbs button to.
-  // Wrapped in try/catch: telemetry must NEVER fail the coaching stream.
+  // Telemetry insert. Wrapped — must NEVER fail the coaching stream.
   let eventId: string | null = null
   try {
     const { data: inserted, error: insertError } = await supabaseAdmin
@@ -443,8 +427,8 @@ After each coaching paragraph, also give 1-3 short bullet-point takeaways for so
         primary_goal: profile?.primary_goal ?? null,
         shot_type: resolvedShotType,
         blob_url: resolvedBlobUrl,
-        composite_metrics: { user_summary: userSummary },
-        llm_coached_tier: coachedTier,
+        composite_metrics: { user_summary: userSummary, observation_count: observations.length },
+        llm_coached_tier: profile?.skill_tier ?? null,
         llm_assessed_tier: null,
         llm_tier_downgrade: false,
         capture_quality_flag: null,
@@ -460,118 +444,175 @@ After each coaching paragraph, also give 1-3 short bullet-point takeaways for so
     console.error('analysis_events insert threw:', err)
   }
 
-  // Telemetry-only camera-angle classification. Wrapped in after() so Vercel
-  // keeps the invocation warm long enough for the Railway call + DB UPDATE
-  // to complete. Without after(), serverless freeze after stream close was
-  // dropping the UPDATE and leaving capture_quality_flag null in prod.
+  // Camera-angle telemetry — always runs, doesn't block coaching.
   after(() => classifyAndTagCaptureQuality(eventId, resolvedBlobUrl))
 
   const encoder = new TextEncoder()
-  const ERROR_PREFIX = '\n\n[ERROR] '
 
-  // Single streaming path: emit chunks token-by-token to the client as
-  // they arrive from Anthropic. The previous implementation ran a
-  // tool_use primary call (non-streaming, ~15-20s of dead air) before
-  // falling back to streaming; the eval showed both paths produce the
-  // same advice quality, so the structured intermediate is dead
-  // weight. tool_use → streaming gives users a first token in ~1s
-  // instead of waiting for the full JSON response.
-  //
-  // Trailer suppression: skipped-onboarding users (no profile) get a
-  // `[TIER_ASSESSMENT: <tier>]` trailer at the end of the response
-  // for tier inference. We don't want that text flashed to the user,
-  // so for those users only we hold back the last 80 chars of stream
-  // output and parse the trailer on close before flushing the tail.
-  // Profile users (the majority) emit immediately with no buffering.
-  const isSkippedNoProfile = !profile && skipped
-  const TRAILER_HOLDBACK = isSkippedNoProfile ? 80 : 0
+  // -----------------------------------------------------------------------
+  // Empty-state branch: no observations clear the confidence floor. Stream
+  // the friendly "couldn't read your swing" message and skip Anthropic.
+  // -----------------------------------------------------------------------
+  if (!primary) {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(EMPTY_STATE_MARKDOWN))
+        controller.close()
+
+        if (eventId) {
+          const metrics = extractResponseMetrics({
+            tier: profile?.skill_tier ?? null,
+            toolInput: null,
+            markdownText: EMPTY_STATE_MARKDOWN,
+            outputTokens: 0,
+          })
+          after(async () => {
+            const { error } = await supabaseAdmin
+              .from('analysis_events')
+              .update({
+                response_token_count: metrics.response_token_count,
+                response_tip_count: 0,
+                response_char_count: metrics.response_char_count,
+                used_baseline_template: false,
+              })
+              .eq('id', eventId)
+            if (error) console.error('analysis_events update failed:', error)
+          })
+        }
+      },
+    })
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Analyze-Empty-State': '1',
+    }
+    if (eventId) headers['X-Analysis-Event-Id'] = eventId
+    return new NextResponse(stream, { headers })
+  }
+
+  // -----------------------------------------------------------------------
+  // Coaching branch: build prompt, call LLM, post-filter, fall back to static.
+  // -----------------------------------------------------------------------
+  const tier: SkillTier | null = profile?.skill_tier ?? null
+  const register = registerForTier(tier)
+  const tierTokens = tier ? TIER_MAX_TOKENS[tier] : DEFAULT_MAX_TOKENS
+  const maxTokens = isShotMode ? Math.min(tierTokens, 600) : tierTokens
+
+  // Choose 3-5 exemplars for the prompt. Combine primary + first secondary
+  // exemplars, capped at 5, deduped.
+  const exemplarSet: CueExemplar[] = []
+  const seen = new Set<CueExemplar>()
+  for (const ex of findExemplars(primary, 3)) {
+    if (!seen.has(ex)) {
+      seen.add(ex)
+      exemplarSet.push(ex)
+    }
+  }
+  for (const o of secondary) {
+    for (const ex of findExemplars(o, 1)) {
+      if (exemplarSet.length >= 5) break
+      if (!seen.has(ex)) {
+        seen.add(ex)
+        exemplarSet.push(ex)
+      }
+    }
+    if (exemplarSet.length >= 5) break
+  }
+  // Top up with generic exemplars from the same register if the matched set
+  // is short.
+  if (exemplarSet.length < 3) {
+    for (const ex of CUE_EXEMPLARS) {
+      if (exemplarSet.length >= 3) break
+      if (!seen.has(ex)) {
+        seen.add(ex)
+        exemplarSet.push(ex)
+      }
+    }
+  }
+
+  const userPrompt = buildUserPrompt({
+    primary,
+    secondary,
+    exemplars: exemplarSet,
+    register,
+    shotType: resolvedShotType,
+    tier,
+    focus,
+  })
+
+  // The LLM call is buffered (not streamed straight to the client) so we can
+  // run the post-filter and re-roll on rejection. Streaming AND retries are
+  // incoherent — we'd have to roll back already-emitted tokens — so the call
+  // buffers and we stream the cleaned result + Show Your Work to the client
+  // in one shot. Tokens-per-second perception is preserved by keeping the
+  // overall response under ~3 seconds.
 
   const stream = new ReadableStream({
     async start(controller) {
-      let buffered = '' // full response, used for telemetry parsing + trailer strip
-      let pending = '' // tail held back from emission (only when isSkippedNoProfile)
-      let streamError: string | null = null
+      let attempts = 0
+      let cleanedBody: string | null = null
+      let lastError: string | null = null
       let outputTokens: number | null = null
+      let usedFallback = false
 
-      try {
-        const messageStream = anthropic.messages.stream({
-          model: 'claude-sonnet-4-6',
-          max_tokens: maxTokens,
-          // Prompt caching: ~40-line voice-rules system prompt is the
-          // same on every call. Ephemeral cache_control gives a 90%
-          // input-token discount on the cached portion within a 5-min
-          // window and saves ~1-2s TTFB on cache hits.
-          system: [
-            { type: 'text', text: fallbackSystemPrompt, cache_control: { type: 'ephemeral' } },
-          ],
-          messages: [{ role: 'user', content: prompt }],
+      while (attempts <= MAX_LLM_RETRIES && cleanedBody === null) {
+        const userContent =
+          attempts === 0 ? userPrompt : userPrompt + STRICT_RETRY_NOTE
+        const result = await streamLlmBody({
+          systemPrompt: SYSTEM_PROMPT,
+          userPrompt: userContent,
+          maxTokens,
         })
-
-        for await (const chunk of messageStream) {
-          if (
-            chunk.type === 'content_block_delta' &&
-            chunk.delta.type === 'text_delta'
-          ) {
-            const text = chunk.delta.text
-            buffered += text
-            if (TRAILER_HOLDBACK === 0) {
-              // Emit immediately — the common path.
-              controller.enqueue(encoder.encode(text))
-            } else {
-              // Hold back the trailing window so [TIER_ASSESSMENT: ...]
-              // can be detected and suppressed. Anything past the
-              // holdback gets emitted now.
-              pending += text
-              if (pending.length > TRAILER_HOLDBACK) {
-                const head = pending.slice(0, pending.length - TRAILER_HOLDBACK)
-                pending = pending.slice(pending.length - TRAILER_HOLDBACK)
-                controller.enqueue(encoder.encode(head))
-              }
-            }
-          } else if (chunk.type === 'message_delta' && chunk.usage?.output_tokens) {
-            outputTokens = chunk.usage.output_tokens
-          }
+        if (result.outputTokens != null) outputTokens = result.outputTokens
+        if (result.error) {
+          lastError = result.error
+          break // stream errored; do not retry — fall back below.
         }
-      } catch (err) {
-        streamError = err instanceof Error ? err.message : 'Analysis stream failed'
+        if (result.text) {
+          cleanedBody = result.text
+          break
+        }
+        attempts += 1
       }
 
-      // Stream done. Parse trailer (cheap regex on full buffered text)
-      // and flush only the cleaned tail that hasn't been emitted yet.
-      const { assessedTier, stripped } = parseTierAssessmentTrailer(buffered)
-      const emittedSoFar = buffered.length - pending.length
-      const tailToFlush = stripped.slice(emittedSoFar)
-      if (tailToFlush) controller.enqueue(encoder.encode(tailToFlush))
+      if (cleanedBody === null) {
+        usedFallback = true
+        cleanedBody = buildStaticFallback({
+          primary,
+          secondary,
+          exemplar: exemplarSet[0] ?? null,
+          register,
+        })
+      }
 
-      if (streamError) {
-        controller.enqueue(encoder.encode(`${ERROR_PREFIX}${streamError}`))
+      const showWork = renderShowYourWork(primary, secondary)
+      const fullResponse = `${cleanedBody}\n${showWork}`
+      controller.enqueue(encoder.encode(fullResponse))
+      if (lastError) {
+        controller.enqueue(encoder.encode(`\n\n[ERROR] ${lastError}`))
       }
       controller.close()
 
-      // Backfill telemetry. Wrapped in after() so Vercel keeps the
-      // invocation alive past controller.close() — without this the DB
-      // UPDATE gets dropped when the serverless function freezes.
+      // Telemetry backfill. response_tip_count = primary + secondary count
+      // (matches the new prompt's structure).
       if (eventId) {
-        const backfillCoached =
-          coachedTier ?? (assessedTier && assessedTier !== 'unknown' ? assessedTier : null)
-        const downgrade = isTierDowngrade(backfillCoached, assessedTier)
         const metrics = extractResponseMetrics({
-          tier: tierKey,
+          tier,
           toolInput: null,
-          markdownText: stripped,
+          markdownText: fullResponse,
           outputTokens,
         })
+        const tipCount = 1 + secondary.length
         after(async () => {
           const { error } = await supabaseAdmin
             .from('analysis_events')
             .update({
-              llm_assessed_tier: assessedTier,
-              llm_coached_tier: backfillCoached,
-              llm_tier_downgrade: downgrade,
               response_token_count: metrics.response_token_count,
-              response_tip_count: metrics.response_tip_count,
+              response_tip_count: tipCount,
               response_char_count: metrics.response_char_count,
-              used_baseline_template: metrics.used_baseline_template,
+              used_baseline_template: usedFallback,
             })
             .eq('id', eventId)
           if (error) console.error('analysis_events update failed:', error)
@@ -586,6 +627,5 @@ After each coaching paragraph, also give 1-3 short bullet-point takeaways for so
     'X-Content-Type-Options': 'nosniff',
   }
   if (eventId) headers['X-Analysis-Event-Id'] = eventId
-
   return new NextResponse(stream, { headers })
 }

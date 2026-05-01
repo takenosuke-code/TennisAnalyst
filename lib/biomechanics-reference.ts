@@ -17,9 +17,8 @@
  *   Landlinger et al. (2010) "Key factors in the tennis forehand" - JSSM
  *   Whiteside et al. (2013) "Mechanics of the tennis forehand" - JSSM
  *   Abrams et al. (2011) "8-Stage model for evaluating the tennis serve" - JSSM
- *   Reid et al. (2024) "Kinematics of key points during tennis serve" - Frontiers
- *   Knudson & Blackwell (2000) "Trunk muscle activation in the tennis forehand"
- *   OnCourtAI analysis metrics (2024)
+ *   Jacquier-Bret & Gorce (2024) "Kinematics of key points during tennis serve" - Frontiers in Sports and Active Living
+ *   Keller, Schweizer & Gerber (2023) "Pay attention! Tennis coaching focus statements" - European Journal of Sport Science
  */
 
 // ---------------------------------------------------------------------------
