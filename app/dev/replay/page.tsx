@@ -352,7 +352,27 @@ export default function ReplayDevPage() {
         const onError = () => {
           sourceEl.removeEventListener('loadedmetadata', onReady)
           sourceEl.removeEventListener('error', onError)
-          reject(new Error('source video load error'))
+          // Most common failure on this code path is a codec the browser
+          // can't decode (HEVC mp4 from an iPhone Camera roll on Chrome,
+          // VP9 webm on older Safari, etc.). Surface the underlying
+          // MediaError code + a codec-aware hint so the dev page tells
+          // the user what to do instead of just "load error".
+          const mediaErr = sourceEl.error
+          const codeNames: Record<number, string> = {
+            1: 'MEDIA_ERR_ABORTED',
+            2: 'MEDIA_ERR_NETWORK',
+            3: 'MEDIA_ERR_DECODE',
+            4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
+          }
+          const codeName = mediaErr ? codeNames[mediaErr.code] ?? `code ${mediaErr.code}` : 'unknown'
+          const hint =
+            mediaErr?.code === 4
+              ? ' — likely HEVC (iPhone default) on a non-Safari browser. Re-encode to H.264 via QuickTime/HandBrake, or use Safari.'
+              : mediaErr?.code === 3
+                ? ' — file decoded partially then errored. May be corrupted; try a different clip.'
+                : ''
+          const detail = mediaErr?.message ? `: ${mediaErr.message}` : ''
+          reject(new Error(`source video load error (${codeName}${detail})${hint}`))
         }
         if (sourceEl.readyState >= 1) {
           resolve()
