@@ -90,7 +90,7 @@ export default function HomePage() {
           that draws the court lines, net, and both figures + ball.
           The text is purely decorative now — the ball doesn't collide
           with it. */}
-      <section className="bg-green-wash text-cream relative overflow-hidden min-h-screen">
+      <section className="bg-green-wash text-cream relative overflow-hidden min-h-[calc(100vh-5rem)]">
         {/* Rally + court overlay — drawn behind the text. min-h-screen
             keeps the court filling the viewport so the next section
             sits below the fold. The headline is absolutely positioned
