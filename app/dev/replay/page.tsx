@@ -130,6 +130,13 @@ export default function ReplayDevPage() {
   const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   // Ref into the captured stream so we can stop tracks on cleanup.
   const fileStreamRef = useRef<MediaStream | null>(null)
+  // Restore-fn for the getUserMedia monkey-patch installed in handleReplay.
+  // Held in a ref so every termination path (EOF, manual stop, start()
+  // error, unmount) can reach it. Calling it nulls itself out, so a
+  // double-call is a no-op. See the bug fix in the Phase E review: prior
+  // versions only restored from the EOF + start()-error paths, leaking
+  // the patch across pages whenever the user hit Stop or navigated away.
+  const restoreGetUserMediaRef = useRef<(() => void) | null>(null)
 
   // -----------------------------------------------------------------
   // Live store wiring (reads + writes)
@@ -409,20 +416,23 @@ export default function ReplayDevPage() {
     }
     const originalGetUserMedia = md.getUserMedia.bind(md)
     md.getUserMedia = async () => fileStream
-    const restoreGetUserMedia = () => {
+    // Park restore in a ref so every termination path (EOF, manual stop,
+    // start()-error, unmount) can reach it. Self-nulling makes repeat
+    // invocations safe.
+    restoreGetUserMediaRef.current = () => {
       try {
         md.getUserMedia = originalGetUserMedia
       } catch {
         // ignore — defensive
       }
+      restoreGetUserMediaRef.current = null
     }
 
     // EOF + error wiring: when the source clip ends, stop the live
-    // capture pipeline. The 'ended' listener also restores fetch/getUserMedia
-    // and surfaces the LiveSessionResult inline.
+    // capture pipeline. doStop reads the ref to restore getUserMedia.
     const onEnded = () => {
       sourceEl.removeEventListener('ended', onEnded)
-      void doStop(restoreGetUserMedia)
+      void doStop()
     }
     sourceEl.addEventListener('ended', onEnded)
 
@@ -442,7 +452,7 @@ export default function ReplayDevPage() {
       })
       setReplayState('replaying')
     } catch (err) {
-      restoreGetUserMedia()
+      restoreGetUserMediaRef.current?.()
       sourceEl.removeEventListener('ended', onEnded)
       setReplayState('error')
       setReplayError(
@@ -460,9 +470,10 @@ export default function ReplayDevPage() {
   ])
 
   // Centralised stop path. Used by the EOF handler and the manual Stop
-  // button. Always restores getUserMedia and stops file-stream tracks.
+  // button. Always restores getUserMedia (via ref) and stops file-stream
+  // tracks.
   const doStop = useCallback(
-    async (restoreGetUserMedia?: () => void) => {
+    async () => {
       setReplayState('stopping')
       let result: LiveSessionResult | null = null
       try {
@@ -484,7 +495,10 @@ export default function ReplayDevPage() {
       if (sourceEl) {
         try { sourceEl.pause() } catch { /* ignore */ }
       }
-      if (restoreGetUserMedia) restoreGetUserMedia()
+      // Restore the getUserMedia patch installed in handleReplay. Safe
+      // to call regardless of which termination path got here first;
+      // the ref nulls itself out after running.
+      restoreGetUserMediaRef.current?.()
       if (result) {
         setSessionResult({
           durationMs: result.durationMs,
@@ -501,19 +515,13 @@ export default function ReplayDevPage() {
 
   const handleStopManual = useCallback(() => {
     if (replayState !== 'replaying') return
-    void doStop(() => {
-      // We don't have a handle to the original getUserMedia in this
-      // path (it's captured in handleReplay's closure). The browser's
-      // navigator.mediaDevices.getUserMedia stays patched until the
-      // user navigates away; the per-replay onEnded path is the only
-      // canonical restore. Document the gap rather than silently leak.
-      console.warn(
-        '[replay-dev] manual stop: getUserMedia patch persists until next replay or page leave',
-      )
-    })
+    void doStop()
   }, [replayState, doStop])
 
-  // Cleanup on unmount: tear down stream, abort capture, revoke URL.
+  // Cleanup on unmount: tear down stream, abort capture, revoke URL,
+  // and critically — restore navigator.mediaDevices.getUserMedia so the
+  // patch doesn't leak across pages (next /live visit would otherwise
+  // get the stopped file stream instead of the real camera).
   useEffect(() => {
     return () => {
       try { abort() } catch { /* ignore */ }
@@ -523,6 +531,7 @@ export default function ReplayDevPage() {
         }
         fileStreamRef.current = null
       }
+      restoreGetUserMediaRef.current?.()
       if (fileObjectUrl) {
         URL.revokeObjectURL(fileObjectUrl)
       }
