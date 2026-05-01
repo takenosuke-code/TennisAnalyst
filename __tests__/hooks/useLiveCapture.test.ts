@@ -239,13 +239,20 @@ function faceOnlyLandmarks(): Landmark[] {
 // MediaRecorder spy that exposes its onstop hook so the hook's stop()
 // path can resolve the recorder.onstop promise. Not exercised in
 // these tests beyond start(), but the hook constructs one immediately.
+//
+// Phase F3 — `lastInstance` is a static slot that captures the most
+// recently constructed FakeMediaRecorder so memory-trim tests can drive
+// `ondataavailable` from outside (the hook keeps the recorder ref
+// private, but the global is enough for tests).
 class FakeMediaRecorder {
+  static lastInstance: FakeMediaRecorder | null = null
   state: 'inactive' | 'recording' = 'inactive'
   mimeType: string
   ondataavailable: ((ev: { data: Blob }) => void) | null = null
   onstop: (() => void) | null = null
   constructor(_stream: unknown, opts?: { mimeType?: string }) {
     this.mimeType = opts?.mimeType ?? 'video/webm'
+    FakeMediaRecorder.lastInstance = this
   }
   start() {
     this.state = 'recording'
@@ -755,5 +762,251 @@ describe('useLiveCapture — Phase E server extraction', () => {
     }
     expect(batchExtractMock).not.toHaveBeenCalled()
     expect(onSwing).not.toHaveBeenCalled()
+  })
+})
+
+// =====================================================================
+// Phase F3 — memory bounding (sliding-window slice in fireBatch).
+// =====================================================================
+//
+// `chunksRef.current` accumulates every MediaRecorder chunk for the
+// session — at ~2 Mbps × 30 minutes that's ~450 MB of Blob refs.
+// Pre-Phase-F3, fireBatch snapshotted the FULL chunk array on every
+// fire and `lib/liveSwingBatchExtractor.sliceToSubClip` materialized
+// the entire buffer via `await new Blob(chunks).arrayBuffer()` — that
+// peak alone could OOM-kill iOS Safari on long sessions.
+//
+// The fix: in fireBatch, slice the chunk buffer to ONLY chunks whose
+// recording-relative [startMs, endMs] window overlaps any pending
+// swing's window (with 1s padding either side). chunk[0] is always
+// included for the mp4 moov header. chunksRef itself stays whole so
+// the final stop() blob is complete.
+
+// Test-only registry mapping blob refs back to the index we fed them
+// at. Lets us reverse-engineer which chunks the hook included in its
+// sliding-window slice.
+const chunkIndexRegistry = new WeakMap<Blob, number>()
+
+describe('useLiveCapture — Phase F3 fireBatch memory bounding', () => {
+  beforeEach(() => {
+    detectMock.mockClear()
+    disposeMock.mockClear()
+    createPoseDetectorMock.mockClear()
+    batchExtractMock.mockClear()
+    pingModalWarmupMock.mockClear()
+    startWarmupHeartbeatMock.mockClear()
+    detectQueue.length = 0
+    swingQueue.length = 0
+    nextSwingIndexCounter = 0
+    batchExtractScript = null
+    installBrowserMocks()
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /**
+   * Drive `recorder.ondataavailable` directly against the captured
+   * FakeMediaRecorder instance. Fires `count` chunks of `sizeBytes`
+   * each, advancing fake time by `gapMs` between them so the hook's
+   * chunkTimestampsRef captures contiguous wall-clock-relative ranges.
+   *
+   * Each blob is registered in `chunkIndexRegistry` so the test can
+   * verify which chunks landed in the slice.
+   */
+  async function feedChunks(count: number, gapMs: number, sizeBytes = 1024) {
+    const recorder = FakeMediaRecorder.lastInstance
+    if (!recorder) throw new Error('FakeMediaRecorder.lastInstance is null')
+    for (let i = 0; i < count; i++) {
+      // Advance time first so performance.now() at the moment of the
+      // ondataavailable callback reflects this chunk's end.
+      vi.advanceTimersByTime(gapMs)
+      const payload = new Uint8Array(sizeBytes)
+      payload[0] = (i + 1) & 0xff
+      const blob = new Blob([payload], { type: recorder.mimeType })
+      chunkIndexRegistry.set(blob, i)
+      recorder.ondataavailable?.({ data: blob })
+    }
+  }
+
+  it('passes only the chunks covering pending swing windows + 1s padding to the extractor', async () => {
+    // Build a session where we feed 100 chunks of ~1s each (so the
+    // recording is ~100s long) BEFORE any swings fire. Then 4 swings
+    // land at known windows. The extractor mock captures the request
+    // and we assert blobChunks contains FAR fewer than 100 chunks —
+    // specifically only those whose [startMs, endMs] overlaps the
+    // padded swing windows + chunk[0].
+    //
+    // Swing windows (ms, recording-relative):
+    //   swing 1: [10_000, 10_500]
+    //   swing 2: [20_000, 20_500]
+    //   swing 3: [30_000, 30_500]
+    //   swing 4: [40_000, 40_500]
+    //
+    // With 1s padding either side, the overlapping windows are:
+    //   [9_000, 11_500], [19_000, 21_500], [29_000, 31_500],
+    //   [39_000, 41_500]
+    //
+    // Each chunk is ~1000ms wide, so we expect roughly 3 chunks per
+    // swing (the chunk straddling each swing plus its padding
+    // neighbours) + chunk[0] for the moov header. Definitely NOT all
+    // 100 chunks.
+    const swings: StreamedSwing[] = [
+      { swingIndex: 1, startFrameIndex: 0, endFrameIndex: 5, peakFrameIndex: 2,
+        startMs: 10_000, endMs: 10_500, frames: [] },
+      { swingIndex: 2, startFrameIndex: 0, endFrameIndex: 5, peakFrameIndex: 2,
+        startMs: 20_000, endMs: 20_500, frames: [] },
+      { swingIndex: 3, startFrameIndex: 0, endFrameIndex: 5, peakFrameIndex: 2,
+        startMs: 30_000, endMs: 30_500, frames: [] },
+      { swingIndex: 4, startFrameIndex: 0, endFrameIndex: 5, peakFrameIndex: 2,
+        startMs: 40_000, endMs: 40_500, frames: [] },
+    ]
+
+    for (const s of swings) {
+      detectQueue.push(fullBodyLandmarks())
+      swingQueue.push(s)
+    }
+
+    const onSwing = vi.fn<(s: StreamedSwing) => void>()
+    const { result } = renderHook(() =>
+      useLiveCapture({ onSwing, targetDetectionFps: 15 }),
+    )
+    const video = makeVideoEl()
+    await act(async () => {
+      await result.current.start(video)
+    })
+
+    // Feed 100 1-second chunks BEFORE any detection ticks fire. The
+    // recorder timestamps will run from 0 to 100_000 ms.
+    await act(async () => {
+      await feedChunks(100, 1000)
+    })
+
+    // Now drive 4 detection ticks which will queue 4 swings and fire
+    // a batch.
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(TICK_MS)
+        await flushMicrotasks()
+      })
+    }
+    await act(async () => {
+      await flushMicrotasks()
+    })
+
+    expect(batchExtractMock).toHaveBeenCalledTimes(1)
+    const req = batchExtractMock.mock.calls[0][0]
+
+    // Sanity: all 4 swings still in the request.
+    expect(req.swings.map((s) => s.swingIndex).sort()).toEqual([1, 2, 3, 4])
+
+    // Memory bound check: the slice MUST be much smaller than the full
+    // 100-chunk buffer. Allow generous headroom (chunk[0] + ~3 chunks
+    // per swing × 4 swings = ~13 chunks worst-case) but assert FAR less
+    // than 100.
+    expect(req.blobChunks.length).toBeLessThan(20)
+    expect(req.blobChunks.length).toBeGreaterThan(0)
+
+    // chunk[0] (moov header) MUST be included.
+    const passedIndices = req.blobChunks
+      .map((b) => chunkIndexRegistry.get(b))
+      .filter((i): i is number => typeof i === 'number')
+    expect(passedIndices).toContain(0)
+
+    // For each swing window, at least one chunk overlapping it must be
+    // included. Swing 1 covers [10_000, 10_500] → chunk index 9 or 10.
+    // Padding 1000 each side: [9_000, 11_500] → chunks 8-11 ish.
+    const includesNear = (target: number) =>
+      passedIndices.some((i) => Math.abs(i - target) <= 2)
+    expect(includesNear(10)).toBe(true)
+    expect(includesNear(20)).toBe(true)
+    expect(includesNear(30)).toBe(true)
+    expect(includesNear(40)).toBe(true)
+
+    // Chunks far from any swing window MUST be excluded. Index 50 is
+    // halfway between swings 2 (~20s) and 3 (~30s), well outside any
+    // padded window.
+    expect(passedIndices).not.toContain(50)
+    expect(passedIndices).not.toContain(60)
+    expect(passedIndices).not.toContain(70)
+  })
+
+  it('stop() produces a complete blob containing every chunk fed during the session', async () => {
+    // Feed 10 chunks of distinct sizes so we can verify the final blob
+    // size sums them all. chunksRef must NOT be trimmed — only the
+    // sliding-window slice that goes to extractBatchedSwingKeypoints is.
+    const onSwing = vi.fn<(s: StreamedSwing) => void>()
+    const { result } = renderHook(() =>
+      useLiveCapture({ onSwing, targetDetectionFps: 15 }),
+    )
+    const video = makeVideoEl()
+    await act(async () => {
+      await result.current.start(video)
+    })
+
+    // Each chunk has a different byte size so the total can be
+    // computed deterministically. Sum: 100 + 200 + ... + 1000 = 5500.
+    const recorder = FakeMediaRecorder.lastInstance
+    if (!recorder) throw new Error('FakeMediaRecorder.lastInstance is null')
+    let expectedTotal = 0
+    for (let i = 1; i <= 10; i++) {
+      vi.advanceTimersByTime(1000)
+      const size = i * 100
+      expectedTotal += size
+      const payload = new Uint8Array(size)
+      payload[0] = i
+      const blob = new Blob([payload], { type: recorder.mimeType })
+      recorder.ondataavailable?.({ data: blob })
+    }
+
+    let stopResult: Awaited<ReturnType<typeof result.current.stop>> = null
+    await act(async () => {
+      stopResult = await result.current.stop()
+    })
+
+    expect(stopResult).not.toBeNull()
+    // The final blob must hold ALL 10 chunks of bytes — chunksRef stays
+    // whole even after the sliding-window slice in fireBatch.
+    expect(stopResult!.blob.size).toBe(expectedTotal)
+  })
+
+  it('still slices correctly when no chunks have been fed yet (degenerate empty buffer)', async () => {
+    // Defensive: a session that fires a batch before any chunks have
+    // arrived (very fast detector + very small batch size in tests)
+    // must not crash on the empty chunkTimestampsRef. The extractor
+    // gets an empty blobChunks and the lib's empty-subclip path takes
+    // over.
+    for (let i = 0; i < 4; i++) {
+      detectQueue.push(fullBodyLandmarks())
+      swingQueue.push(makeSyntheticSwing(i + 1))
+    }
+    const onSwing = vi.fn<(s: StreamedSwing) => void>()
+    const { result } = renderHook(() =>
+      useLiveCapture({ onSwing, targetDetectionFps: 15 }),
+    )
+    const video = makeVideoEl()
+    await act(async () => {
+      await result.current.start(video)
+    })
+    // No feedChunks — the recorder never fires ondataavailable in this
+    // test. Drive the 4 swings.
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        vi.advanceTimersByTime(TICK_MS)
+        await flushMicrotasks()
+      })
+    }
+    await act(async () => {
+      await flushMicrotasks()
+    })
+
+    expect(batchExtractMock).toHaveBeenCalledTimes(1)
+    const req = batchExtractMock.mock.calls[0][0]
+    expect(req.blobChunks).toEqual([])
+    // All 4 swings still emitted (with on-device or server frames per
+    // the mock's default success path).
+    expect(onSwing).toHaveBeenCalledTimes(4)
   })
 })

@@ -205,6 +205,30 @@ export function useLiveCapture(
   const streamRef = useRef<MediaStream | null>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
+  // Phase F3 — parallel ref tracking each chunk's recording-relative
+  // [startMs, endMs] window. Populated in recorder.ondataavailable
+  // alongside chunksRef. Used by fireBatch to slice the chunk buffer to
+  // ONLY the window covering the pending swings (with 1s padding either
+  // side) before calling extractBatchedSwingKeypoints. This bounds the
+  // in-memory ArrayBuffer materialized inside sliceToSubClip from
+  // O(session-length) to O(batch-window-length) — a 30min × 2 Mbps
+  // recording would otherwise pile up ~450 MB of Blob refs and a
+  // matching-size buffer on every batch fire, OOM-killing iOS Safari
+  // (4-6 GB RAM).
+  //
+  // chunksRef itself is NEVER trimmed — the stop() path reconstructs the
+  // final LiveSessionResult.blob from chunksRef and that needs the full
+  // recording. We pay session-length memory for the chunk Blob refs
+  // (cheap, just refs to immutable opaque blobs) but never materialize
+  // them all into a single buffer at once. The Blob refs themselves
+  // hold the bytes lazily — the browser keeps them on disk-backed
+  // storage if memory pressure rises.
+  //
+  // chunk[0] is ALWAYS included in the slice because on iOS Safari
+  // MediaRecorder produces classic (not fragmented) mp4 where the moov
+  // header lives in chunk[0] only. Without it the mp4box demux path in
+  // sliceToSubClip can't parse the bytes.
+  const chunkTimestampsRef = useRef<{ startMs: number; endMs: number }[]>([])
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const videoElRef = useRef<HTMLVideoElement | null>(null)
   const rvfcHandleRef = useRef<number | null>(null)
@@ -360,6 +384,7 @@ export function useLiveCapture(
     framesRef.current = []
     swingsRef.current = []
     chunksRef.current = []
+    chunkTimestampsRef.current = []
     frameCounterRef.current = 0
     lastDetectAtRef.current = 0
     mediaTimeStartSecRef.current = 0
@@ -513,11 +538,29 @@ export function useLiveCapture(
 
     const recorder = new MediaRecorder(stream, { mimeType })
     recorder.ondataavailable = (ev) => {
-      if (ev.data && ev.data.size > 0) chunksRef.current.push(ev.data)
+      if (ev.data && ev.data.size > 0) {
+        // The chunk's content covers wall-clock [previous-chunk-end, now]
+        // anchored at recording start. swing.startMs / swing.endMs are on
+        // the same recording-relative axis (mediaTime - mediaTimeStart),
+        // and on a non-paused tab wall-clock and mediaTime track each
+        // other within tens of ms — well within the 1s padding the
+        // fireBatch slice applies. The first chunk's startMs is 0 by
+        // construction (recorder.start() returned immediately before the
+        // recording timeline began).
+        const nowMs = Math.max(0, performance.now() - startedAtRef.current)
+        const tsArr = chunkTimestampsRef.current
+        const prevEnd = tsArr.length > 0 ? tsArr[tsArr.length - 1]!.endMs : 0
+        chunksRef.current.push(ev.data)
+        tsArr.push({ startMs: prevEnd, endMs: nowMs })
+      }
     }
+    // Set startedAtRef BEFORE recorder.start() so any `ondataavailable`
+    // callback that fires before the synchronous code below resumes
+    // (defensive — recorder.start fires the first chunk ~1s later, but
+    // some test doubles fire synchronously) sees a valid anchor.
+    startedAtRef.current = performance.now()
     recorder.start(1000) // request a chunk every second so a mid-session crash keeps partial data
     recorderRef.current = recorder
-    startedAtRef.current = performance.now()
     // Snapshot the video element's media-timeline position right when
     // recording started. PoseFrame timestamps are computed as
     // (frameMediaTime - mediaTimeStartSec) * 1000 so they align with the
@@ -603,10 +646,64 @@ export function useLiveCapture(
         startMs: s.startMs,
         endMs: s.endMs,
       }))
-      // Snapshot the chunk buffer at fire time. Recorder keeps writing
-      // into the live ref; we want a stable view for the splice. It's
-      // safe to share Blob refs (Blob is immutable in the browser).
-      const blobChunks = chunksRef.current.slice()
+      // Phase F3 — sliding-window slice. Instead of snapshotting the
+      // ENTIRE chunk buffer (a 30min recording at 2 Mbps = ~450 MB of
+      // Blob refs that sliceToSubClip would then materialize via
+      // `await new Blob(chunks).arrayBuffer()` on every batch — iOS
+      // Safari OOM territory), we slice to ONLY the chunks whose
+      // [startMs, endMs] overlaps ANY pending swing's window with 1s
+      // padding either side. Chunks BETWEEN swings are dropped — even
+      // if the batch's earliest and latest swings span 30s, only the
+      // few chunks per swing are kept (typically 3-4 per swing × 4
+      // swings + chunk[0] ≈ 13-17 chunks max).
+      //
+      // chunk[0] is ALWAYS included regardless of overlap. iOS Safari's
+      // MediaRecorder produces classic (not fragmented) mp4 where the
+      // moov box lives in chunk[0] only; without it the mp4box demux
+      // path in sliceToSubClip can't parse the bytes. Including chunk[0]
+      // is cheap (~hundreds of KB) and is the difference between the
+      // mp4box production path working and falling back to raw-concat.
+      //
+      // Memory peak in this hot path drops from O(session-length) to
+      // O(swing-count × per-swing-window) ≈ 4 × 2s = 8s of chunks ≈
+      // 2-4 MB at 2 Mbps. The full chunksRef remains untouched so
+      // stop() can still rebuild the complete LiveSessionResult.blob
+      // from it.
+      const SLICE_PADDING_MS = 1000
+      const allChunks = chunksRef.current
+      const allTimestamps = chunkTimestampsRef.current
+      // Per-swing padded windows. A chunk is included if it overlaps
+      // ANY of these.
+      const swingWindows: Array<{ startMs: number; endMs: number }> =
+        batchSwings.map((s) => ({
+          startMs: s.startMs - SLICE_PADDING_MS,
+          endMs: s.endMs + SLICE_PADDING_MS,
+        }))
+
+      const blobChunks: Blob[] = []
+      for (let i = 0; i < allChunks.length; i++) {
+        const chunk = allChunks[i]
+        if (!chunk) continue
+        // chunkTimestampsRef may be shorter than chunksRef if a chunk
+        // arrived before its timestamp slot was appended (shouldn't
+        // happen in practice — same callback writes both — but defend
+        // against it: a missing timestamp means "include for safety").
+        const ts = allTimestamps[i]
+        if (i === 0 || !ts) {
+          // Always include chunk[0] for the mp4 moov header.
+          blobChunks.push(chunk)
+          continue
+        }
+        // Half-open intersection vs ANY swing's padded window.
+        let overlapsAny = false
+        for (const w of swingWindows) {
+          if (ts.endMs >= w.startMs && ts.startMs <= w.endMs) {
+            overlapsAny = true
+            break
+          }
+        }
+        if (overlapsAny) blobChunks.push(chunk)
+      }
       const recorderMime =
         recorderRef.current?.mimeType ?? mimeType ?? 'video/webm'
 
