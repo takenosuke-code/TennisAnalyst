@@ -335,10 +335,10 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
   })
 
   // -------------------------------------------------------------------------
-  // Empty-state branch
+  // Low-confidence branch (replaces the prior hard empty-state behavior)
   // -------------------------------------------------------------------------
 
-  it('empty-state: no observations -> friendly message + X-Analyze-Empty-State header + no LLM call', async () => {
+  it('low-confidence: no observations clear the floor -> still calls LLM, sets X-Analyze-Low-Confidence header', async () => {
     mockGetCoachingContext.mockResolvedValue({
       profile: {
         skill_tier: 'intermediate',
@@ -348,6 +348,11 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
       },
       skipped: false,
     })
+    // Mock LLM returns a clean two-section response. The route should
+    // run the fallback prompt against this and stream the result back.
+    responseQueue.push(
+      '## Primary cue\nStay with the same feel and trust your contact point.\n\n## Other things I noticed\n- The swing is hanging together, keep it grooved.',
+    )
 
     const { POST } = await import('@/app/api/analyze/route')
     const res = await POST(
@@ -357,12 +362,16 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
       }),
     )
     expect(res.status).toBe(200)
-    expect(res.headers.get('X-Analyze-Empty-State')).toBe('true')
+    // Soft warning header — no hard block.
+    expect(res.headers.get('X-Analyze-Low-Confidence')).toBe('true')
+    // Old empty-state header should NOT fire on the new path.
+    expect(res.headers.get('X-Analyze-Empty-State')).toBeNull()
     const body = await readStream(res)
-    expect(body).toMatch(/could not read your swing/i)
-    expect(body).toMatch(/from the side/i)
-    // Anthropic should NOT have been called.
-    expect(lastArgsBox.current).toBeNull()
+    // Coaching response actually rendered.
+    expect(body).toContain('## Primary cue')
+    expect(body).toContain('## Other things I noticed')
+    // Anthropic WAS called (low-confidence is no longer a hard block).
+    expect(lastArgsBox.current).not.toBeNull()
   })
 
   // -------------------------------------------------------------------------

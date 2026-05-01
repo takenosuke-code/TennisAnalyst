@@ -308,9 +308,13 @@ describe('extractObservations', () => {
   })
 
   it('halves rule applicability when shotType is null', () => {
-    // Cramped elbow + locked knees -> with shotType=null applicability=0.5,
-    // so confidence = 1 * margin * 0.5 = 0.5 * margin. Margin must exceed
-    // 1.2 to clear floor — impossible after clamp — so we should drop these.
+    // shotType=null -> applicability=0.5, so confidence = 1 * margin * 0.5.
+    // 2026-05 — confidence floor was lowered 0.6 → 0.2 (see CONFIDENCE_FLOOR
+    // doc), so observations with margin > ~0.4 now survive even with the
+    // halved applicability. The behavior we still want to assert: the
+    // applicability dampens confidence so it stays *strictly less than* the
+    // single-rule maximum (1.0). That keeps shot-type-known observations
+    // ranked above shot-type-unknown ones in pickPrimary.
     const frames = makeSwingAroundPeak(
       {
         right_elbow: 70,
@@ -326,9 +330,10 @@ describe('extractObservations', () => {
       },
     )
     const obs = extractObservations({ todaySummary: frames, shotType: null })
-    // With applicability 0.5 every observation's confidence ≤ 0.5, so all dropped.
-    expect(obs.find((o) => o.pattern === 'cramped_elbow')).toBeUndefined()
-    expect(obs.find((o) => o.pattern === 'locked_knees')).toBeUndefined()
+    // Applicability dampening still applies — every confidence stays ≤ 0.5.
+    for (const o of obs) {
+      expect(o.confidence).toBeLessThanOrEqual(0.5)
+    }
   })
 
   // -------------------------------------------------------------------------

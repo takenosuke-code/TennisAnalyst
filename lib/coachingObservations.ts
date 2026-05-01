@@ -75,7 +75,20 @@ export const SEVERITY_RANK: Record<Severity, number> = {
 }
 
 // Confidence floor. Below this, the observation is dropped (we don't trust it).
-export const CONFIDENCE_FLOOR = 0.6
+//
+// 2026-05 — lowered 0.6 → 0.2. The previous value rejected legitimate
+// borderline observations on visibly clear footage: confidence is the
+// product of visibility × threshold-margin × applicability, and even a
+// "moderate" deviation rarely produced a margin > 0.7. Result: even a
+// well-tracked, modestly-cramped elbow at 80° (threshold 90°) failed
+// the floor and got silently dropped, which cascaded into the empty-
+// state branch firing on clear shots from the side. A 0.2 floor now
+// only rejects truly poor measurements (vis < 0.2 or basically-no-
+// margin observations), which is what "we can't read this" actually
+// means. The route also no longer hard-blocks on empty observations —
+// it warns and runs a generic coaching call, so this floor is a soft
+// gate rather than a kill switch.
+export const CONFIDENCE_FLOOR = 0.2
 
 // ---------------------------------------------------------------------------
 // computeConfidence

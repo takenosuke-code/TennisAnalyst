@@ -82,7 +82,15 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
   // True when /api/analyze responded with the X-Analyze-Empty-State
   // header (pose was unreadable). Drives a softer, no-disclosure render
   // path — no Primary cue heading, no thumbs strip.
+  // 2026-05 — the route no longer hard-blocks; it always runs coaching
+  // and surfaces low-confidence via X-Analyze-Low-Confidence instead.
+  // isEmptyState is left in place as a safety net for any older route
+  // version still in flight, but it should rarely fire now.
   const [isEmptyState, setIsEmptyState] = useState(false)
+  // Soft warning when pose tracking was uneven — the route ran the LLM
+  // but flagged that the read may be less precise. Drives a banner
+  // above the normal three-section render.
+  const [isLowConfidence, setIsLowConfidence] = useState(false)
 
   // Effective frames: prop-passed `frames` win (baseline/compare path
   // sends them in directly), with the Zustand store as the fallback for
@@ -105,6 +113,7 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
       setFeedbackState('idle')
       setAnalysisEventId(null)
       setIsEmptyState(false)
+      setIsLowConfidence(false)
     }
   }, [feedback])
 
@@ -115,6 +124,7 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
     setAnalysisEventId(null)
     setFeedbackState('idle')
     setIsEmptyState(false)
+    setIsLowConfidence(false)
 
     const keypointsJson = {
       fps_sampled: 30,
@@ -160,6 +170,9 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
       // path before the body starts arriving.
       if (res.headers.get('X-Analyze-Empty-State') === 'true') {
         setIsEmptyState(true)
+      }
+      if (res.headers.get('X-Analyze-Low-Confidence') === 'true') {
+        setIsLowConfidence(true)
       }
 
       const reader = res.body.getReader()
@@ -296,20 +309,23 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
       )}
 
       {/* Body. Three render branches:
-          - empty-state (header X-Analyze-Empty-State === 'true')
-          - normal coaching: primary cue / other / show-your-work
+          - empty-state (legacy hard-block, header X-Analyze-Empty-State)
+          - normal coaching with optional low-confidence banner above
           - loading-no-text-yet: thinking indicator only */}
       {(loading || feedback) && (
         <div className="px-5 py-5">
           {isEmptyState ? (
             <EmptyStateMessage text={feedback} />
           ) : (
-            <CoachingSections
-              primary={sections.primary}
-              other={sections.other}
-              showWork={sections.showWork}
-              loading={loading}
-            />
+            <>
+              {isLowConfidence && <LowConfidenceBanner />}
+              <CoachingSections
+                primary={sections.primary}
+                other={sections.other}
+                showWork={sections.showWork}
+                loading={loading}
+              />
+            </>
           )}
         </div>
       )}
@@ -324,6 +340,22 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
 // ---------------------------------------------------------------------------
 // Section renderers
 // ---------------------------------------------------------------------------
+
+/** Soft warning banner shown above the coaching sections when the route
+ *  flagged X-Analyze-Low-Confidence. Pose tracking was uneven so the
+ *  read may be less precise; we still ran the analysis. Designed to be
+ *  unobtrusive — clay accent stripe + small text, no big alarm. */
+function LowConfidenceBanner() {
+  return (
+    <div className="mb-4 flex gap-3 bg-cream-soft border-l-2 border-clay px-3 py-2">
+      <span className="text-xs text-ink/75 leading-relaxed">
+        Pose tracking on this clip was uneven, so the read may be less precise
+        than usual. For sharper analysis next time, shoot from the side at
+        chest height with the player filling the frame.
+      </span>
+    </div>
+  )
+}
 
 /** Soft, sympathetic message when /api/analyze couldn't read the pose.
  *  No headers, no disclosure, no thumbs strip — just the body text. */

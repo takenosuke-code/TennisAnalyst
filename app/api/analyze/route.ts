@@ -74,10 +74,10 @@ Voice rules, no exceptions:
 // Stricter retry preamble — appended to the user prompt on a failed-output retry.
 const STRICT_RETRY_NOTE = `\n\nSTRICT RETRY: Your previous output included disallowed content (digits, em-dashes, or jargon). Rewrite from scratch with NO numbers, NO dashes other than hyphens inside compound words, and NO biomech terms. Use the exemplar voice exactly.`
 
-// Empty-state markdown shown when no observations clear the confidence floor.
-const EMPTY_STATE_MARKDOWN = `## We could not read your swing clearly
-
-We could not read your swing clearly enough to give specific coaching. Try shooting from the side at chest height, with the player filling the frame.`
+// Low-confidence path used to also prepend a markdown banner here, but
+// the UI now renders a styled banner above the sections from the
+// X-Analyze-Low-Confidence header — so embedding one in the body would
+// double up. The header alone is the signal now.
 
 // Patterns we reject in LLM output. Show your work is appended AFTER the
 // filter runs, so the digit pattern there does not trip it.
@@ -128,10 +128,11 @@ function renderObservationLine(o: Observation): string {
  * is concatenated AFTER the LLM body, so post-filter never inspects it.
  */
 function renderShowYourWork(
-  primary: Observation,
+  primary: Observation | null,
   secondary: Observation[],
 ): string {
-  const all = [primary, ...secondary]
+  const all = primary ? [primary, ...secondary] : secondary
+  if (all.length === 0) return ''
   const lines: string[] = ['', '## Show your work']
   for (const o of all) {
     const phase = o.phase
@@ -220,6 +221,55 @@ A short bulleted list (one bullet per secondary observation). Each bullet: imper
 }
 
 /**
+ * Generic-coaching prompt used when no observation cleared the confidence
+ * floor. The LLM gets the textual angle summary instead of structured
+ * observations, plus a directive to coach generally without inventing
+ * specific faults. Output format matches the observation path so the UI
+ * parser doesn't need a special case.
+ */
+function buildFallbackUserPrompt(args: {
+  userSummary: string
+  register: Register
+  shotType: ShotType | null
+  tier: SkillTier | null
+  focus: string | null
+}): string {
+  const { userSummary, register, shotType, tier, focus } = args
+
+  const tierHint = tier
+    ? `Player skill: ${tier}. Calibrate vocabulary to that level.`
+    : `Player skill: unknown. Use plain coaching language.`
+  const shotHint = shotType ? `Shot: ${shotType}.` : `Shot: not specified.`
+  const registerHint =
+    register === 'technical'
+      ? 'Use the technical register (skilled-player vocabulary, e.g. "load the trail leg").'
+      : 'Use the plain register (beginner-friendly vocabulary, e.g. "sit deeper into your back leg").'
+  const focusHint = focus
+    ? `Player asked: "${focus}". Address it in your primary cue when relevant.`
+    : ''
+
+  return `${tierHint}
+${shotHint}
+${registerHint}
+${focusHint}
+
+NO STRONG OBSERVATIONS. The auto-detection rules ran across this swing but no specific deviation cleared the confidence floor. Either the swing is mechanically clean, or the pose tracking was uneven.
+
+Your job: give general feel-based coaching from the angle data below. Do NOT invent specific faults. If the swing reads clean, say so and offer a single fine-tuning thought. If you genuinely can't tell, give one general feel cue any player benefits from.
+
+ANGLE SUMMARY (5 phase snapshots from the swing):
+${userSummary}
+
+FORMAT — respond with EXACTLY two sections, no other content:
+
+## Primary cue
+One short paragraph. Imperative, second person, no numbers, no jargon, no em-dashes. If the swing reads clean, lead with that.
+
+## Other things I noticed
+A short bulleted list (1-3 bullets) of general feel observations. If you genuinely have nothing to add, write a single bullet acknowledging the swing has otherwise hung together.`
+}
+
+/**
  * Buffer-and-validate one LLM call. Returns the cleaned body or null when
  * the post-filter rejected it.
  */
@@ -266,17 +316,25 @@ async function streamLlmBody(args: {
  * observations as one-liners. No LLM involvement.
  */
 function buildStaticFallback(args: {
-  primary: Observation
+  primary: Observation | null
   secondary: Observation[]
   exemplar: CueExemplar | null
   register: Register
 }): string {
   const { primary, secondary, exemplar, register } = args
-  const cueText = exemplar
-    ? register === 'technical'
-      ? exemplar.technical
-      : exemplar.plain
-    : `Focus on ${patternHumanLabel(primary.pattern)} on the next ball.`
+
+  // No primary observation = low-confidence path. Cue is generic, framed
+  // around the swing reading clean rather than around a specific fault we
+  // couldn't trust enough to call out.
+  let cueText: string
+  if (exemplar) {
+    cueText = register === 'technical' ? exemplar.technical : exemplar.plain
+  } else if (primary) {
+    cueText = `Focus on ${patternHumanLabel(primary.pattern)} on the next ball.`
+  } else {
+    cueText =
+      'The swing is reading clean. Stay with the same rhythm and trust the contact point you are finding right now.'
+  }
 
   const lines: string[] = []
   lines.push('## Primary cue')
@@ -449,48 +507,15 @@ export async function POST(request: NextRequest) {
 
   const encoder = new TextEncoder()
 
-  // -----------------------------------------------------------------------
-  // Empty-state branch: no observations clear the confidence floor. Stream
-  // the friendly "couldn't read your swing" message and skip Anthropic.
-  // -----------------------------------------------------------------------
-  if (!primary) {
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(encoder.encode(EMPTY_STATE_MARKDOWN))
-        controller.close()
-
-        if (eventId) {
-          const metrics = extractResponseMetrics({
-            tier: profile?.skill_tier ?? null,
-            toolInput: null,
-            markdownText: EMPTY_STATE_MARKDOWN,
-            outputTokens: 0,
-          })
-          after(async () => {
-            const { error } = await supabaseAdmin
-              .from('analysis_events')
-              .update({
-                response_token_count: metrics.response_token_count,
-                response_tip_count: 0,
-                response_char_count: metrics.response_char_count,
-                used_baseline_template: false,
-              })
-              .eq('id', eventId)
-            if (error) console.error('analysis_events update failed:', error)
-          })
-        }
-      },
-    })
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-cache',
-      'X-Content-Type-Options': 'nosniff',
-      'X-Analyze-Empty-State': 'true',
-    }
-    if (eventId) headers['X-Analysis-Event-Id'] = eventId
-    return new NextResponse(stream, { headers })
-  }
+  // Whether we're running the soft-fallback path. True when no observations
+  // cleared the confidence floor — instead of blocking the user with the
+  // old empty-state response, we now ALWAYS run the LLM (with a generic
+  // coaching prompt) and surface a low-confidence banner so the UI can
+  // hint that the read may be less precise. User feedback: clear side-on
+  // shots were getting blocked because borderline-but-real observations
+  // didn't clear the strict 0.6 floor; the floor is now 0.2 and this
+  // fallback handles the residual "still no observations" case gracefully.
+  const isLowConfidence = !primary
 
   // -----------------------------------------------------------------------
   // Coaching branch: build prompt, call LLM, post-filter, fall back to static.
@@ -500,47 +525,59 @@ export async function POST(request: NextRequest) {
   const tierTokens = tier ? TIER_MAX_TOKENS[tier] : DEFAULT_MAX_TOKENS
   const maxTokens = isShotMode ? Math.min(tierTokens, 600) : tierTokens
 
-  // Choose 3-5 exemplars for the prompt. Combine primary + first secondary
-  // exemplars, capped at 5, deduped.
-  const exemplarSet: CueExemplar[] = []
-  const seen = new Set<CueExemplar>()
-  for (const ex of findExemplars(primary, 3)) {
-    if (!seen.has(ex)) {
-      seen.add(ex)
-      exemplarSet.push(ex)
+  // Build the user prompt. Two paths:
+  //   - Normal: structured observations + 3-5 exemplars.
+  //   - Fallback (isLowConfidence): generic coaching from the angle summary.
+  let userPrompt: string
+  if (primary) {
+    const exemplarSet: CueExemplar[] = []
+    const seen = new Set<CueExemplar>()
+    for (const ex of findExemplars(primary, 3)) {
+      if (!seen.has(ex)) {
+        seen.add(ex)
+        exemplarSet.push(ex)
+      }
     }
-  }
-  for (const o of secondary) {
-    for (const ex of findExemplars(o, 1)) {
+    for (const o of secondary) {
+      for (const ex of findExemplars(o, 1)) {
+        if (exemplarSet.length >= 5) break
+        if (!seen.has(ex)) {
+          seen.add(ex)
+          exemplarSet.push(ex)
+        }
+      }
       if (exemplarSet.length >= 5) break
-      if (!seen.has(ex)) {
-        seen.add(ex)
-        exemplarSet.push(ex)
+    }
+    // Top up with generic exemplars from the same register if the matched set
+    // is short.
+    if (exemplarSet.length < 3) {
+      for (const ex of CUE_EXEMPLARS) {
+        if (exemplarSet.length >= 3) break
+        if (!seen.has(ex)) {
+          seen.add(ex)
+          exemplarSet.push(ex)
+        }
       }
     }
-    if (exemplarSet.length >= 5) break
-  }
-  // Top up with generic exemplars from the same register if the matched set
-  // is short.
-  if (exemplarSet.length < 3) {
-    for (const ex of CUE_EXEMPLARS) {
-      if (exemplarSet.length >= 3) break
-      if (!seen.has(ex)) {
-        seen.add(ex)
-        exemplarSet.push(ex)
-      }
-    }
-  }
 
-  const userPrompt = buildUserPrompt({
-    primary,
-    secondary,
-    exemplars: exemplarSet,
-    register,
-    shotType: resolvedShotType,
-    tier,
-    focus,
-  })
+    userPrompt = buildUserPrompt({
+      primary,
+      secondary,
+      exemplars: exemplarSet,
+      register,
+      shotType: resolvedShotType,
+      tier,
+      focus,
+    })
+  } else {
+    userPrompt = buildFallbackUserPrompt({
+      userSummary,
+      register,
+      shotType: resolvedShotType,
+      tier,
+      focus,
+    })
+  }
 
   // The LLM call is buffered (not streamed straight to the client) so we can
   // run the post-filter and re-roll on rejection. Streaming AND retries are
@@ -579,16 +616,29 @@ export async function POST(request: NextRequest) {
 
       if (cleanedBody === null) {
         usedFallback = true
+        // exemplarSet is only populated in the structured (primary-present)
+        // path; the fallback prompt builder doesn't construct one. Pull a
+        // generic exemplar from the global table when we're in low-
+        // confidence mode so the static fallback still has a phrasing
+        // anchor instead of the generic-pattern text.
+        const fallbackExemplar = primary
+          ? findExemplars(primary, 1)[0] ?? CUE_EXEMPLARS[0] ?? null
+          : CUE_EXEMPLARS[0] ?? null
         cleanedBody = buildStaticFallback({
           primary,
           secondary,
-          exemplar: exemplarSet[0] ?? null,
+          exemplar: fallbackExemplar,
           register,
         })
       }
 
       const showWork = renderShowYourWork(primary, secondary)
-      const fullResponse = `${cleanedBody}\n${showWork}`
+      // Low-confidence path emits no "Show your work" block (no
+      // observations cleared the floor). The warning is purely a header
+      // signal; UI renders the banner above the sections.
+      const fullResponse = showWork
+        ? `${cleanedBody}\n${showWork}`
+        : cleanedBody
       controller.enqueue(encoder.encode(fullResponse))
       if (lastError) {
         controller.enqueue(encoder.encode(`\n\n[ERROR] ${lastError}`))
@@ -627,5 +677,8 @@ export async function POST(request: NextRequest) {
     'X-Content-Type-Options': 'nosniff',
   }
   if (eventId) headers['X-Analysis-Event-Id'] = eventId
+  // Soft signal so the UI can render a hint banner. Replaces the prior
+  // hard X-Analyze-Empty-State that blocked the whole response.
+  if (isLowConfidence) headers['X-Analyze-Low-Confidence'] = 'true'
   return new NextResponse(stream, { headers })
 }
