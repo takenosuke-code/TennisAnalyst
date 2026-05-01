@@ -104,7 +104,7 @@ export default function HomePage() {
             regardless of viewport height. */}
         <div className="absolute left-0 right-0 top-1/2 -translate-y-full px-5 sm:px-8 text-center pointer-events-none">
           <div className="max-w-3xl mx-auto">
-            <p className="text-xs sm:text-sm uppercase tracking-[0.18em] text-cream/70 mb-5">
+            <p className="text-xs sm:text-sm uppercase tracking-[0.18em] text-cream/70 mb-2">
               AI Pose Tracking · For Tennis
             </p>
             <h1
@@ -124,9 +124,9 @@ export default function HomePage() {
             headline. pointer-events restored on this block so the
             buttons remain clickable; the headline block is decorative
             so it stays pointer-events-none. */}
-        <div className="absolute left-0 right-0 top-1/2 px-5 sm:px-8 text-center pt-10 lg:pt-14">
+        <div className="absolute left-0 right-0 top-1/2 px-5 sm:px-8 text-center pt-4 lg:pt-6">
           <div className="max-w-3xl mx-auto">
-            <p className="text-cream/80 text-lg sm:text-xl max-w-2xl mx-auto mb-10 leading-relaxed">
+            <p className="text-cream/80 text-lg sm:text-xl max-w-2xl mx-auto mb-6 leading-relaxed">
               Drop a video. We read your joint angles, save your best day, and tell
               you what drifted in plain English. No clipboards, no stopwatches,
               no jargon.
