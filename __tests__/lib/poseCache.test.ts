@@ -149,7 +149,11 @@ describe('poseCache', () => {
   // setCachedPose
   // -------------------------------------------------------------------------
   describe('setCachedPose', () => {
-    it('writes via upsert with onConflict=sha256 + ignoreDuplicates', async () => {
+    it('writes via real upsert (onConflict=sha256, NO ignoreDuplicates)', async () => {
+      // We deliberately use a real upsert (not ON CONFLICT DO NOTHING)
+      // so a row written under an old model_version is overwritten
+      // when re-extracted under a new one. The absence of
+      // `ignoreDuplicates: true` is the load-bearing detail.
       mockUpsert.mockResolvedValueOnce({ error: null })
       await setCachedPose(SHA, SAMPLE_POSE, 'rtmpose-modal')
       expect(mockFrom).toHaveBeenCalledWith('pose_cache')
@@ -160,10 +164,11 @@ describe('poseCache', () => {
         pose_json: SAMPLE_POSE,
         model_version: 'rtmpose-modal',
       })
-      expect(options).toEqual({
-        onConflict: 'sha256',
-        ignoreDuplicates: true,
-      })
+      expect(options).toEqual({ onConflict: 'sha256' })
+      // Explicit guard: a future "fix" that re-introduces
+      // ignoreDuplicates would silently re-break the model-upgrade
+      // path, so we pin its absence.
+      expect(options).not.toHaveProperty('ignoreDuplicates')
     })
 
     it('throws on missing sha256', async () => {
@@ -189,46 +194,97 @@ describe('poseCache', () => {
       )
     })
 
-    it('concurrent setCachedPose calls for same sha256: both resolve, no error from the duplicate', async () => {
-      // Postgres ON CONFLICT (sha256) DO NOTHING returns no error and
-      // no inserted row when the second writer hits a duplicate. We
-      // assert both calls resolve cleanly — the second one is a
-      // silent no-op and must not throw.
+    it('concurrent setCachedPose calls for same sha256: both resolve cleanly', async () => {
+      // Postgres ON CONFLICT (sha256) DO UPDATE is race-safe: two
+      // concurrent writers for the same (sha256, model_version) pair
+      // hold byte-equivalent payloads, so whichever lands second just
+      // overwrites with identical data. We assert both calls resolve
+      // cleanly — neither is allowed to throw.
       mockUpsert.mockResolvedValue({ error: null })
       const a = setCachedPose(SHA, SAMPLE_POSE, 'rtmpose-modal')
       const b = setCachedPose(SHA, SAMPLE_POSE, 'rtmpose-modal')
       await expect(Promise.all([a, b])).resolves.toBeDefined()
       expect(mockUpsert).toHaveBeenCalledTimes(2)
-      // Both calls used the conflict-tolerant options.
+      // Both calls used the real-upsert options (no ignoreDuplicates).
       for (const [, opts] of mockUpsert.mock.calls) {
-        expect(opts).toEqual({
-          onConflict: 'sha256',
-          ignoreDuplicates: true,
-        })
+        expect(opts).toEqual({ onConflict: 'sha256' })
       }
     })
 
-    it('different model_versions for the same sha256: BOTH attempts use the same PK so the second is a no-op', async () => {
-      // Documented semantics: PK is sha256 only. The cache stores ONE
-      // row per content hash, model_version is a tag. The "latest
-      // wins" knob is owned by the read-side gate (getCachedPose
-      // expectedModelVersion arg) — old rows become misses on
-      // version mismatch and get rewritten on the next extraction
-      // when we explicitly UPSERT (not in this minimal contract).
-      // For setCachedPose: ON CONFLICT DO NOTHING means the row that
-      // landed first sticks. This test pins that behavior.
+    it('model_version upgrade (v1 then v2) hands the v2 payload to upsert — caller relies on real-upsert semantics so the new row OVERWRITES the old', async () => {
+      // Regression test for the cache-bypass-after-model-upgrade bug.
+      // Earlier code used ON CONFLICT DO NOTHING here, which made the
+      // second call a silent no-op — the v1 row stuck around forever
+      // and the read-side gate (which compares model_version) treated
+      // it as a permanent miss for any client expecting v2. After the
+      // fix, setCachedPose passes onConflict='sha256' WITHOUT
+      // ignoreDuplicates, which postgrest-js maps to a real
+      // INSERT ... ON CONFLICT DO UPDATE. We can't observe the DB
+      // mutation under a mock, but we can pin two invariants:
+      //   1. The v2 call carries the v2 payload + model_version.
+      //   2. The options object is the real-upsert form, not
+      //      ignoreDuplicates: true (which would re-break the bug).
       mockUpsert.mockResolvedValue({ error: null })
-      await setCachedPose(SHA, SAMPLE_POSE, 'rtmpose-m')
-      await setCachedPose(SHA, SAMPLE_POSE, 'rtmpose-l')
-      // Both calls hit upsert with their respective model_versions —
-      // the database-side ON CONFLICT decides which one persists.
+
+      const POSE_V1: KeypointsJson = {
+        fps_sampled: 30,
+        frame_count: 1,
+        schema_version: 3,
+        frames: [
+          {
+            frame_index: 0,
+            timestamp_ms: 0,
+            landmarks: [],
+            joint_angles: { right_elbow: 90 },
+          },
+        ],
+      }
+      const POSE_V2: KeypointsJson = {
+        fps_sampled: 30,
+        frame_count: 1,
+        schema_version: 3,
+        frames: [
+          {
+            frame_index: 0,
+            timestamp_ms: 0,
+            landmarks: [],
+            // Different content than v1 so an accidental "first writer
+            // wins" would surface as a payload mismatch.
+            joint_angles: { right_elbow: 105 },
+          },
+        ],
+      }
+
+      await setCachedPose(SHA, POSE_V1, 'v1')
+      await setCachedPose(SHA, POSE_V2, 'v2')
+
       expect(mockUpsert).toHaveBeenCalledTimes(2)
-      expect(mockUpsert.mock.calls[0][0]).toMatchObject({
-        model_version: 'rtmpose-m',
+
+      const [v1Payload, v1Opts] = mockUpsert.mock.calls[0]
+      const [v2Payload, v2Opts] = mockUpsert.mock.calls[1]
+
+      // First call: v1 payload + v1 model_version.
+      expect(v1Payload).toMatchObject({
+        sha256: SHA,
+        pose_json: POSE_V1,
+        model_version: 'v1',
       })
-      expect(mockUpsert.mock.calls[1][0]).toMatchObject({
-        model_version: 'rtmpose-l',
+
+      // Second call MUST hand v2 payload + v2 model_version to
+      // upsert — and MUST do so with options that map to a real
+      // upsert (not DO NOTHING). Together those are the contract the
+      // read-side gate depends on for cache freshness.
+      expect(v2Payload).toMatchObject({
+        sha256: SHA,
+        pose_json: POSE_V2,
+        model_version: 'v2',
       })
+
+      // Real-upsert options: onConflict only, no ignoreDuplicates.
+      expect(v1Opts).toEqual({ onConflict: 'sha256' })
+      expect(v2Opts).toEqual({ onConflict: 'sha256' })
+      expect(v1Opts).not.toHaveProperty('ignoreDuplicates')
+      expect(v2Opts).not.toHaveProperty('ignoreDuplicates')
     })
   })
 })

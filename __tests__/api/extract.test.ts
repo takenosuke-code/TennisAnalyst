@@ -25,13 +25,38 @@ vi.mock('@/lib/supabase/server', () => ({
 // pose_cache hooks. Default to "miss" so all the existing tests that
 // don't set sha256 (or do but want the live extraction path) keep
 // working. Cache-specific tests below override per-call.
+//
+// Why we mock with vi.fn() directly (not via wrapper closures): the
+// real setCachedPose validates its three arguments (sha256, poseJson,
+// modelVersion) and throws on missing sha256/modelVersion. An earlier
+// version of this mock declared `setCachedPose: () => mockSetCachedPose()`,
+// which DROPPED every argument the route actually passed — so a route
+// regression that "forgot" to pass modelVersion would still pass tests.
+// Spying directly with the real signature lets us assert
+// `toHaveBeenCalledWith(sha, pose, modelVersion)`.
 const mockGetCachedPose = vi.fn<(sha: string, mv?: string) => Promise<unknown>>(
   async () => null,
 )
-const mockSetCachedPose = vi.fn<() => Promise<void>>(async () => undefined)
+const mockSetCachedPose = vi.fn<
+  (sha256: string, poseJson: unknown, modelVersion: string) => Promise<void>
+>(async () => undefined)
 vi.mock('@/lib/poseCache', () => ({
-  getCachedPose: (sha: string, mv?: string) => mockGetCachedPose(sha, mv),
-  setCachedPose: () => mockSetCachedPose(),
+  getCachedPose: mockGetCachedPose,
+  setCachedPose: mockSetCachedPose,
+  // Re-export the helper that route.ts uses to project a stored
+  // ModalExtractResponse down to a KeypointsJson when it writes back
+  // to user_sessions. The mocked-out version mirrors the real one.
+  poseJsonToKeypointsJson: (p: {
+    fps_sampled: number
+    frame_count: number
+    frames: unknown[]
+    schema_version?: number
+  }) => ({
+    fps_sampled: p.fps_sampled,
+    frame_count: p.frame_count,
+    frames: p.frames,
+    schema_version: p.schema_version,
+  }),
 }))
 
 // supabaseAdmin mock for the cache-hit short-circuit path that writes

@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { supabaseAdmin } from '@/lib/supabase'
-import { getCachedPose, setCachedPose } from '@/lib/poseCache'
-import type { KeypointsJson } from '@/lib/supabase'
+import {
+  getCachedPose,
+  setCachedPose,
+  poseJsonToKeypointsJson,
+  type ModalExtractResponse,
+} from '@/lib/poseCache'
 
 // POST /api/extract — proxy that asks Railway (or Modal directly) to run
 // server-side pose extraction on an already-uploaded Vercel Blob.
@@ -119,11 +123,18 @@ export async function POST(request: NextRequest) {
     try {
       const cached = await getCachedPose(sha256, currentModelVersion())
       if (cached) {
+        // The cached value is now the full Modal response shape
+        // (includes optional video_fps, duration_ms, timing,
+        // pose_backend). user_sessions.keypoints_json is typed as the
+        // narrower KeypointsJson — project down to that shape so we
+        // don't store unexpected keys in a column other consumers
+        // might assume is shape-stable.
+        const keypointsForSession = poseJsonToKeypointsJson(cached)
         const { error: updErr } = await supabaseAdmin
           .from('user_sessions')
           .update({
             status: 'complete',
-            keypoints_json: cached,
+            keypoints_json: keypointsForSession,
           })
           .eq('id', sessionId)
           .eq('blob_url', blobUrl) // ownership check; matches /api/sessions
@@ -250,19 +261,26 @@ async function handleBatchEphemeral(
   }
 
   // Phase E: cache hit on the batch-ephemeral path returns the stored
-  // keypoints inline (same shape the client expects from Modal). When
-  // sha256 is missing or invalid we just skip the lookup.
+  // keypoints inline. The cached object now holds the full Modal
+  // response (frames, fps_sampled, frame_count, schema_version,
+  // video_fps, duration_ms, pose_backend, timing) so it round-trips
+  // byte-for-byte to the client — no field-by-field reshaping that
+  // could drop optional metadata the client relies on for telemetry.
+  // When sha256 is missing or invalid we just skip the lookup.
   const modelVersion = currentModelVersion()
   if (typeof sha256 === 'string' && sha256.length === 64) {
     try {
       const cached = await getCachedPose(sha256, modelVersion)
       if (cached) {
+        // Spread the cached response as-is, then stamp `cached: true`
+        // so the client (liveSwingBatchExtractor + similar) can
+        // distinguish a hit from a miss for telemetry. Don't override
+        // pose_backend on hit — the cached value already records which
+        // backend produced these keypoints; rewriting it to
+        // 'pose-cache' would lose that signal.
         return NextResponse.json({
           ...cached,
-          fps_sampled: cached.fps_sampled ?? 30,
-          frames: cached.frames ?? [],
-          pose_backend: 'pose-cache',
-          cache_hit: true,
+          cached: true,
         })
       }
     } catch (err) {
@@ -305,26 +323,50 @@ async function handleBatchEphemeral(
     const fps_sampled = typeof m.fps_sampled === 'number' ? m.fps_sampled : 30
     const pose_backend = typeof m.pose_backend === 'string' ? m.pose_backend : 'rtmpose-modal'
 
-    // Populate the cache for next time. Race-safe: ON CONFLICT DO
-    // NOTHING means a concurrent extraction of the same hash is a
-    // silent no-op for the second writer. We swallow errors here —
-    // a cache write failure shouldn't propagate to the user.
+    // Populate the cache for next time. Race-safe: setCachedPose now
+    // uses ON CONFLICT (sha256) DO UPDATE — concurrent extractions
+    // of the same hash both succeed; the later write overwrites the
+    // earlier with byte-equivalent payload (same model, same bytes).
+    // We swallow errors here — a cache write failure shouldn't
+    // propagate to the user.
+    //
+    // Frame validation gate: a future Modal regression that returns
+    // malformed frames would otherwise poison the cache with a
+    // permanent garbage row (the hash never changes for the same
+    // bytes, so we'd serve the bad row forever). validateFrames()
+    // checks each frame's required fields; on failure we LOG, SKIP
+    // the cache write, but still return the response to the client
+    // — the user already has their result; we just don't memoize
+    // garbage.
     if (typeof sha256 === 'string' && sha256.length === 64) {
-      const poseJson: KeypointsJson = {
-        fps_sampled,
-        frame_count:
-          typeof m.frame_count === 'number' ? m.frame_count : frames.length,
-        // Frames are validated as an array above; the deeper PoseFrame
-        // shape comes from Modal which we trust as much as the
-        // existing analyze pipeline does.
-        frames: frames as KeypointsJson['frames'],
-        schema_version:
-          (m.schema_version as KeypointsJson['schema_version']) ?? 3,
-      }
-      try {
-        await setCachedPose(sha256, poseJson, modelVersion)
-      } catch (cacheErr) {
-        console.error('[extract] setCachedPose failed (non-fatal):', cacheErr)
+      const validation = validateFrames(frames)
+      if (!validation.ok) {
+        console.error(
+          '[extract] Modal returned malformed frames; skipping cache write:',
+          validation.reason,
+          { sha256, frameIndex: validation.frameIndex },
+        )
+      } else {
+        // Store the FULL Modal response (not just the KeypointsJson
+        // subset). Cache hits round-trip the entire response so the
+        // client sees the same shape regardless of hit/miss, including
+        // optional video_fps, duration_ms, timing, pose_backend.
+        const poseJson: ModalExtractResponse = {
+          ...m,
+          fps_sampled,
+          frame_count:
+            typeof m.frame_count === 'number' ? m.frame_count : frames.length,
+          // Frames have been validated above; safe to assert the type.
+          frames: frames as ModalExtractResponse['frames'],
+          schema_version:
+            (m.schema_version as ModalExtractResponse['schema_version']) ?? 3,
+          pose_backend,
+        }
+        try {
+          await setCachedPose(sha256, poseJson, modelVersion)
+        } catch (cacheErr) {
+          console.error('[extract] setCachedPose failed (non-fatal):', cacheErr)
+        }
       }
     }
 

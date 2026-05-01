@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
-import StrokeRibbon, {
-  type DetectedStroke,
-  type StrokeQualityResult,
-  type StrokeComparisonResult,
-} from '@/components/StrokeRibbon'
+import StrokeRibbon from '@/components/StrokeRibbon'
+import type {
+  DetectedStroke,
+  StrokeQualityResult,
+  StrokeComparisonResult,
+} from '@/lib/strokeAnalysis'
 
 // ---------------------------------------------------------------------------
 // Fixture helpers

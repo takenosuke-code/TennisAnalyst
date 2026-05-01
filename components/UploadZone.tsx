@@ -143,15 +143,21 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     setStatusMsg('Uploading video...')
 
     // 0b. Kick off the SHA-256 content hash in a Web Worker, in
-    //     parallel with the upload below. The hash is over `uploadFile`
-    //     (the *post-transcode* bytes) so re-uploads of the same source
-    //     clip — which we'll transcode identically — share a cache key.
+    //     parallel with the upload below. The hash is over the ORIGINAL
+    //     `file` (NOT the post-transcode `uploadFile`). WebCodecs
+    //     transcode is non-deterministic across hardware/browser
+    //     versions — same source clip on two devices produces different
+    //     post-transcode bytes, so hashing post-transcode would defeat
+    //     cross-device cache hits. Hashing the source file means two
+    //     users uploading the same source clip share the same cache
+    //     key. Transcode-param drift is bounded by `model_version`
+    //     (bump it when transcode changes) so the cache busts cleanly.
     //     The Promise resolves while the upload is still in flight; we
     //     await it just before /api/extract so the server can short-
     //     circuit on a cache hit. A hashing failure (CSP, missing
     //     subtle.crypto, OOM) is non-fatal: we continue with sha256
     //     unset and the server falls through to a real extraction.
-    const sha256Promise: Promise<string | null> = hashFileInWorker(uploadFile)
+    const sha256Promise: Promise<string | null> = hashFileInWorker(file)
       .catch((err) => {
         console.warn('[UploadZone] sha256 hash failed, cache disabled for this upload:', err)
         return null

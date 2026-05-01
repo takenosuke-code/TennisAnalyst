@@ -1,5 +1,16 @@
 import type { PoseFrame, Landmark } from './supabase'
 import { LANDMARK_INDICES } from './jointAngles'
+import type {
+  DetectedStroke,
+  StrokeRejectReason,
+  StrokeQualityResult,
+} from './strokeAnalysis'
+
+// Re-export so existing callers (and the strokeQuality.test.ts suite that
+// imports `type { DetectedStroke, StrokeQualityResult } from
+// '@/lib/strokeQuality'`) keep resolving these names through this module.
+// The canonical declarations live in lib/strokeAnalysis.ts.
+export type { DetectedStroke, StrokeRejectReason, StrokeQualityResult }
 
 /**
  * Per-stroke quality scoring + rejection gate.
@@ -26,21 +37,15 @@ import { LANDMARK_INDICES } from './jointAngles'
  *     z-score statistics, but a row is still returned for them.
  */
 
-export interface DetectedStroke {
-  strokeId: string
-  startFrame: number
-  endFrame: number
-  peakFrame: number
-  fps: number
-}
-
-export type StrokeRejectReason =
-  | 'low_visibility'
-  | 'camera_pan'
-  | 'camera_zoom'
-  | 'too_short'
-  | 'missing_data'
-
+// DetectedStroke, StrokeRejectReason, and StrokeQualityResult moved to
+// lib/strokeAnalysis.ts (single source of truth across the stroke
+// pipeline). Imported + re-exported above for backwards compatibility
+// with existing callers.
+//
+// StrokeQualityComponents is an internal helper that's no longer
+// referenced from a type declaration in this file — the canonical
+// StrokeQualityResult inlines the same shape — but we keep the export
+// to avoid breaking any external consumer that may import it.
 export interface StrokeQualityComponents {
   /** Raw peak wrist speed (linear), not z-scored. Units = coord/sec. */
   peakWristSpeed: number
@@ -48,15 +53,6 @@ export interface StrokeQualityComponents {
   kineticChainTimingError: number
   /** Variance of dominant-arm elbow joint angle over the contact window. */
   wristAngleVariance: number
-}
-
-export interface StrokeQualityResult {
-  strokeId: string
-  /** z-scored across non-rejected strokes; higher = better; NaN if rejected. */
-  score: number
-  rejected: boolean
-  rejectReason?: StrokeRejectReason
-  components: StrokeQualityComponents
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +285,13 @@ function peakWristSpeed(
 
 /**
  * Compute the timestamp (ms) of peak |angular velocity| of the given joint
- * angle within the window. Returns null if not enough samples are present.
+ * angle within the window. Uses a central-difference estimator
+ * v[i] = (angle[i+1] - angle[i-1]) / (t[i+1] - t[i-1]) so the velocity is
+ * sampled at frame i itself rather than between i-1 and i. Boundary frames
+ * (i=0 and i=last) are skipped — if the window has fewer than 3 frames the
+ * function returns null and the caller falls through to the missing_data
+ * rejection. Samples with non-positive dt (clock glitches with duplicate or
+ * out-of-order timestamps) are also skipped.
  */
 function peakAngularVelocityMs(
   windowFrames: PoseFrame[],
@@ -297,14 +299,15 @@ function peakAngularVelocityMs(
 ): number | null {
   let peakV = 0
   let peakMs: number | null = null
-  for (let i = 1; i < windowFrames.length; i++) {
+  for (let i = 1; i < windowFrames.length - 1; i++) {
     const prev = windowFrames[i - 1].joint_angles[angleKey]
-    const curr = windowFrames[i].joint_angles[angleKey]
-    if (prev == null || curr == null) continue
+    const next = windowFrames[i + 1].joint_angles[angleKey]
+    if (prev == null || next == null) continue
     const dt =
-      (windowFrames[i].timestamp_ms - windowFrames[i - 1].timestamp_ms) / 1000
+      (windowFrames[i + 1].timestamp_ms - windowFrames[i - 1].timestamp_ms) /
+      1000
     if (dt <= 0) continue
-    const v = Math.abs(curr - prev) / dt
+    const v = Math.abs(next - prev) / dt
     if (v > peakV) {
       peakV = v
       peakMs = windowFrames[i].timestamp_ms

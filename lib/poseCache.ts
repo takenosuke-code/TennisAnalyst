@@ -4,30 +4,75 @@
 //
 // Contract:
 //   getCachedPose(sha256, modelVersion?) — returns the cached
-//     KeypointsJson for the given byte hash, or null on miss. When
-//     `modelVersion` is provided, a stored row whose model_version
+//     ModalExtractResponse for the given byte hash, or null on miss.
+//     When `modelVersion` is provided, a stored row whose model_version
 //     doesn't match is treated as a miss (so model upgrades naturally
 //     invalidate stale entries without manual cache busts).
 //
 //   setCachedPose(sha256, poseJson, modelVersion) — writes the cache
-//     entry. Uses INSERT ... ON CONFLICT (sha256) DO NOTHING so two
-//     concurrent extractions of the same file race-safely (one wins,
-//     one no-ops). Never throws on conflict; throws on real DB
-//     errors (network, RLS, schema mismatch) so the caller decides
-//     whether to swallow or surface.
+//     entry. Uses INSERT ... ON CONFLICT (sha256) DO UPDATE so a row
+//     written by an older `model_version` is *replaced* when a newer
+//     extraction lands. Without that, after a model upgrade every
+//     prior hash would re-extract on every upload (read-side miss
+//     because model_version differs, write-side no-op because PK
+//     already exists) — i.e. a permanent cache bypass for legacy
+//     content. Concurrent writes for the SAME (sha256, model_version)
+//     converge to one winner — both payloads are byte-equivalent so
+//     "second writer wins" is fine. Concurrent writes with DIFFERENT
+//     model_versions: latest writer wins, which is also fine because
+//     either model is acceptable to serve.
+//
+//   Never throws on conflict; throws on real DB errors (network, RLS,
+//   schema mismatch) so the caller decides whether to swallow or
+//   surface.
 //
 // Why this lives in lib/ and not app/api/:
 // Two API routes need it (today: /api/extract; tomorrow: any
 // re-extraction trigger we add). Keeping the cache logic in a single
 // file with one well-tested contract avoids drift between callers.
 
-import type { KeypointsJson } from '@/lib/supabase'
+import type { KeypointsJson, PoseFrame } from '@/lib/supabase'
 import { supabaseAdmin } from '@/lib/supabase'
 
-// Re-exported alias matching the task description's vocabulary. The
-// canonical type lives in lib/supabase.ts; aliasing here keeps callers
-// from importing both modules just to spell the type.
-export type PoseJSON = KeypointsJson
+// Full Modal `/extract_pose` response shape. Superset of KeypointsJson
+// with optional fields we want to preserve through the cache so that
+// cache-hit responses match cache-miss responses byte-for-byte to the
+// client (frame_count, schema_version, video_fps, duration_ms, timing,
+// pose_backend). Stored as the entire jsonb pose_json column.
+//
+// `frames` is the canonical PoseFrame[]; the rest are optional because
+// older Modal builds don't populate them and the client treats them as
+// soft signals (telemetry, diagnostic chip).
+export type ModalExtractResponse = {
+  fps_sampled: number
+  frame_count: number
+  frames: PoseFrame[]
+  schema_version?: 1 | 2 | 3
+  video_fps?: number
+  duration_ms?: number
+  pose_backend?: string
+  timing?: Record<string, number>
+  // Allow forward-compat fields without forcing a type bump every time
+  // Modal grows the response.
+  [key: string]: unknown
+}
+
+// Re-exported alias matching the task description's vocabulary. Now
+// the canonical Modal-response shape rather than the narrower
+// KeypointsJson, so cache hits round-trip the full response.
+export type PoseJSON = ModalExtractResponse
+
+// Kept for callers (route.ts) that still need to materialize a
+// KeypointsJson for `user_sessions.keypoints_json`. Pulls only the
+// canonical fields off a stored ModalExtractResponse.
+export function poseJsonToKeypointsJson(p: ModalExtractResponse): KeypointsJson {
+  return {
+    fps_sampled: p.fps_sampled,
+    frame_count: p.frame_count,
+    frames: p.frames,
+    schema_version: p.schema_version,
+  }
+}
 
 /**
  * Look up a cached pose-extraction result by content hash.
@@ -37,8 +82,8 @@ export type PoseJSON = KeypointsJson
  *   `model_version` are treated as misses (so a model upgrade
  *   transparently invalidates the cache for that hash). Omit to
  *   accept any stored model version.
- * @returns the stored KeypointsJson, or null if the row is missing or
- *   the model_version doesn't match.
+ * @returns the stored ModalExtractResponse, or null if the row is
+ *   missing or the model_version doesn't match.
  */
 export async function getCachedPose(
   sha256: string,
@@ -67,11 +112,11 @@ export async function getCachedPose(
   if (!data) return null
 
   // Model-version gate. A row whose model_version doesn't match the
-  // current server default is stale — treat as miss and let the next
-  // extraction overwrite it (the setter uses ON CONFLICT DO NOTHING,
-  // so we'd actually need an explicit UPSERT to overwrite — see note
-  // there. For now: stale rows get garbage-collected by the SQL
-  // truncate during model upgrades.)
+  // current server default is stale — treat as miss. The next
+  // extraction will overwrite it via the real upsert path in
+  // setCachedPose (ON CONFLICT (sha256) DO UPDATE), so legacy rows
+  // get replaced transparently rather than turning into a permanent
+  // cache bypass for that hash.
   if (expectedModelVersion && data.model_version !== expectedModelVersion) {
     return null
   }
@@ -81,8 +126,18 @@ export async function getCachedPose(
 
 /**
  * Persist a pose-extraction result to the cache. Race-safe: concurrent
- * inserts of the same sha256 from two extractions resolve via Postgres
- * ON CONFLICT — first writer wins, the rest no-op.
+ * inserts of the same sha256 from two extractions converge — last
+ * writer wins via Postgres ON CONFLICT (sha256) DO UPDATE. Both
+ * payloads are byte-equivalent for the same (bytes, model) pair, so
+ * "last wins" produces the same row as "first wins" in the steady
+ * state.
+ *
+ * Critical: this is a real upsert, not ON CONFLICT DO NOTHING. After
+ * a model upgrade, the read-side gate in getCachedPose treats rows
+ * with the old model_version as a miss. Re-extraction lands here, and
+ * the new (sha256, model_version, pose_json) tuple OVERWRITES the
+ * stale row instead of being silently dropped. Without that, every
+ * legacy hash would be a permanent cache bypass after each upgrade.
  *
  * Throws on real database errors. Callers in the extract route should
  * catch and continue: failing to populate the cache shouldn't fail the
@@ -101,17 +156,19 @@ export async function setCachedPose(
     throw new Error('setCachedPose: modelVersion is required')
   }
 
-  // upsert(..., { onConflict: 'sha256', ignoreDuplicates: true }) maps
-  // to "INSERT ... ON CONFLICT (sha256) DO NOTHING" in postgrest-js.
-  // The duplicate path returns no rows and no error — exactly the
-  // "second writer is a silent no-op" semantics we want.
+  // upsert(..., { onConflict: 'sha256' }) without `ignoreDuplicates`
+  // maps to "INSERT ... ON CONFLICT (sha256) DO UPDATE SET ..." in
+  // postgrest-js — i.e. a real upsert that replaces the row on
+  // conflict. This is intentional: we want a newer model_version's
+  // payload to overwrite an older one, and a newer extraction's
+  // payload to overwrite a stale one for the same model_version.
   const { error } = await supabaseAdmin.from('pose_cache').upsert(
     {
       sha256,
       pose_json: poseJson,
       model_version: modelVersion,
     },
-    { onConflict: 'sha256', ignoreDuplicates: true },
+    { onConflict: 'sha256' },
   )
 
   if (error) {

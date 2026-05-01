@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { detectStrokes, deriveFps, STROKE_DEFAULTS } from '@/lib/swingDetect'
-import type { DetectedStroke } from '@/lib/swingDetect'
+import type { DetectedStroke } from '@/lib/strokeAnalysis'
 import type { PoseFrame, JointAngles, Landmark } from '@/lib/supabase'
 import { LANDMARK_INDICES } from '@/lib/jointAngles'
 import { makeFrame, makeStandingPose, makeRestFrames } from '../helpers'

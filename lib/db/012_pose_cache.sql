@@ -19,19 +19,30 @@
 --   PK = sha256 only. The `model_version` column is checked on READ,
 --   not part of the key. When we swap RTMPose-M for RTMPose-L, the read
 --   path treats a row whose model_version doesn't match the current
---   server-side default as a miss, and the next extraction overwrites
---   it via ON CONFLICT. This keeps the table at one row per file
---   regardless of how many times the model rolls forward — old rows
---   become orphaned misses and get garbage-collected by the next hit.
+--   server-side default as a miss, and the next extraction OVERWRITES
+--   it via ON CONFLICT (sha256) DO UPDATE (see lib/poseCache.ts:
+--   setCachedPose). This keeps the table at one row per file regardless
+--   of how many times the model rolls forward — old rows are replaced
+--   in place by the first extraction after the upgrade.
+--
+--   Earlier revisions used ON CONFLICT DO NOTHING here, which
+--   silently dropped the rewrite — the read-side miss would re-extract
+--   on Modal, but the write-side no-op left the stale row in place, so
+--   every subsequent upload of that hash also re-extracted. After a
+--   model bump that meant the cache effectively turned itself off for
+--   every legacy hash. Real upsert is required for cache freshness;
+--   the race-safety argument below still holds because both writers
+--   hold byte-equivalent payloads for the same (bytes, model) pair.
+--
 --   Alternative would be a composite PK (sha256, model_version), but
 --   that grows unboundedly.
 --
 -- Race-safety: setCachedPose() uses INSERT ... ON CONFLICT (sha256) DO
--- NOTHING. Two users uploading the same file simultaneously each
--- trigger their own extraction; whichever finishes first wins the
--- INSERT, the second is a silent no-op. Acceptable: extraction is
--- idempotent (same bytes -> same keypoints up to RNG, and RTMPose is
--- deterministic), and "do the work twice once" is cheaper than
+-- UPDATE. Two users uploading the same file simultaneously each
+-- trigger their own extraction; whichever PostgREST request lands
+-- second overwrites the first. Acceptable: extraction is idempotent
+-- (same bytes -> same keypoints, RTMPose is deterministic), and "do
+-- the work twice and let the second writer win" is cheaper than
 -- coordinating a lock.
 
 CREATE TABLE IF NOT EXISTS pose_cache (

@@ -218,7 +218,7 @@ describe('POST /api/compare-strokes', () => {
         worst: {
           strokeId: 's4',
           reasoning:
-            `Your worst stroke leaked structure in the load and the shoulders barely turned, so the legs had no spring and the chest stayed open early [${worstObsId1},${worstObsId2}]. Sit deeper into the back leg and finish the unit turn before you swing forward to bring the structure back [${worstObsId1}].`,
+            `Your worst stroke leaked structure in the load and shoulders barely turned, so the legs had no spring and the chest opened early [${worstObsId1},${worstObsId2}]. Sit deeper into the back leg before swinging forward [${worstObsId1}].`,
           citations: [worstObsId1, worstObsId2],
           citedCues: [
             cueIdFor('shallow_knee_load', 'loading', 'plain'),
@@ -285,7 +285,7 @@ describe('POST /api/compare-strokes', () => {
         worst: {
           strokeId: 's4',
           reasoning:
-            `Your worst stroke leaked structure in the load and the shoulders barely turned, so the legs had no spring and the chest stayed open early [${worstObsId1},${worstObsId2}]. Sit deeper into the back leg and finish the unit turn before you swing forward to bring the structure back [${worstObsId1}].`,
+            `Your worst stroke leaked structure in the load and shoulders barely turned, so the legs had no spring and the chest opened early [${worstObsId1},${worstObsId2}]. Sit deeper into the back leg before swinging forward [${worstObsId1}].`,
           citations: [worstObsId1, worstObsId2],
           citedCues: [],
         },
@@ -305,7 +305,7 @@ describe('POST /api/compare-strokes', () => {
         worst: {
           strokeId: 's4',
           reasoning:
-            `Your worst stroke leaked structure in the load and the shoulders barely turned, so the legs had no spring and the chest stayed open early [${worstObsId1},${worstObsId2}]. Sit deeper into the back leg and finish the unit turn before you swing forward to bring the structure back [${worstObsId1}].`,
+            `Your worst stroke leaked structure in the load and shoulders barely turned, so the legs had no spring and the chest opened early [${worstObsId1},${worstObsId2}]. Sit deeper into the back leg before swinging forward [${worstObsId1}].`,
           citations: [worstObsId1, worstObsId2],
           citedCues: [],
         },
@@ -565,6 +565,173 @@ describe('POST /api/compare-strokes', () => {
     expect(res.status).toBe(200)
     const json = await res.json()
     expect(json.best?.strokeId).toBe('s0')
+    expect(responseQueue.length).toBe(0)
+  })
+
+  // -------------------------------------------------------------------
+  // Tightened word budget: 22 words used to be valid (old 20-55), now invalid
+  // -------------------------------------------------------------------
+
+  it('22-word reasoning (was valid under 20-55) now triggers retry under 25-45 budget', async () => {
+    const strokes = spreadStrokes()
+    const bestObsId = observationId('s0', strokes[0].observations[0])
+    const worstObsId1 = observationId('s4', strokes[4].observations[0])
+
+    // First attempt: best.reasoning is exactly 22 words (excl. brackets) —
+    // valid under the old 20-55 budget, invalid under the new 25-45 budget.
+    responseQueue.push({
+      kind: 'tool_use',
+      input: {
+        best: {
+          strokeId: 's0',
+          reasoning:
+            `Your best stroke held the racket arm long and the contact point sat in front [${bestObsId}]. Trust the reach and groove next basket [${bestObsId}].`,
+          citations: [bestObsId],
+          citedCues: [],
+        },
+        worst: {
+          strokeId: 's4',
+          reasoning:
+            `Your worst stroke leaked structure in the load and the legs had no spring at all when contact came around [${worstObsId1}]. Sit deeper into the back leg before the next ball and the structure returns to the swing [${worstObsId1}].`,
+          citations: [worstObsId1],
+          citedCues: [],
+        },
+      },
+    })
+    // Retry: clean (35-ish words on best, in budget).
+    responseQueue.push({
+      kind: 'tool_use',
+      input: {
+        best: {
+          strokeId: 's0',
+          reasoning:
+            `Your best stroke kept the racket arm long and the contact point in front of the hip every single time [${bestObsId}]. Trust this reach and groove the same shape across the next basket so the pattern keeps repeating [${bestObsId}].`,
+          citations: [bestObsId],
+          citedCues: [],
+        },
+        worst: {
+          strokeId: 's4',
+          reasoning:
+            `Your worst stroke leaked structure in the load and the legs had no spring at all when contact came around [${worstObsId1}]. Sit deeper into the back leg before the next ball and the structure returns to the swing [${worstObsId1}].`,
+          citations: [worstObsId1],
+          citedCues: [],
+        },
+      },
+    })
+
+    const { POST } = await import('@/app/api/compare-strokes/route')
+    const res = await POST(makeReq({ strokes }))
+    expect(res.status).toBe(200)
+    const json = await res.json()
+    expect(json.best?.strokeId).toBe('s0')
+    // Both responses consumed -> retry happened on the 22-word attempt.
+    expect(responseQueue.length).toBe(0)
+  })
+
+  // -------------------------------------------------------------------
+  // 30-word reasoning is in budget under both old (20-55) and new (25-45)
+  // -------------------------------------------------------------------
+
+  it('30-word reasoning (in budget under both old and new) passes on first attempt', async () => {
+    const strokes = spreadStrokes()
+    const bestObsId = observationId('s0', strokes[0].observations[0])
+    const worstObsId1 = observationId('s4', strokes[4].observations[0])
+
+    // First attempt: best is exactly 30 words, worst is 28 — both in [25,45].
+    responseQueue.push({
+      kind: 'tool_use',
+      input: {
+        best: {
+          strokeId: 's0',
+          reasoning:
+            `Your best stroke kept the racket arm long and the contact point sat in front of the hip [${bestObsId}]. Trust this reach and groove the same shape across the next basket [${bestObsId}].`,
+          citations: [bestObsId],
+          citedCues: [],
+        },
+        worst: {
+          strokeId: 's4',
+          reasoning:
+            `Your worst stroke leaked structure in the load and the legs lacked spring at the contact window [${worstObsId1}]. Sit deeper into the back leg before the next ball today [${worstObsId1}].`,
+          citations: [worstObsId1],
+          citedCues: [],
+        },
+      },
+    })
+
+    const { POST } = await import('@/app/api/compare-strokes/route')
+    const res = await POST(makeReq({ strokes }))
+    expect(res.status).toBe(200)
+    const json = await res.json()
+    expect(json.isConsistent).toBe(false)
+    expect(json.best?.strokeId).toBe('s0')
+    expect(json.worst?.strokeId).toBe('s4')
+    // No retry: the queue should be empty (only one push), confirming the
+    // 30-word reasoning passed validation.
+    expect(responseQueue.length).toBe(0)
+  })
+
+  // -------------------------------------------------------------------
+  // Mid-sentence fabricated bracket id triggers retry
+  // -------------------------------------------------------------------
+
+  it('fabricated mid-sentence [id] triggers retry even when end-anchored tag is valid', async () => {
+    const strokes = spreadStrokes()
+    const bestObsId = observationId('s0', strokes[0].observations[0])
+    const worstObsId1 = observationId('s4', strokes[4].observations[0])
+    const worstObsId2 = observationId('s4', strokes[4].observations[1])
+
+    // First attempt: best.reasoning has a fabricated mid-sentence bracket
+    // tag that the end-anchored regex would otherwise miss. The trailing
+    // [bestObsId] is real; only [s0_fake_obs_pattern] is fabricated.
+    responseQueue.push({
+      kind: 'tool_use',
+      input: {
+        best: {
+          strokeId: 's0',
+          reasoning:
+            `Your back leg [s0_fake_obs_pattern] loaded clean and the contact point sat in front of the hip every time [${bestObsId}]. Trust this reach and groove the same shape across the next basket so the pattern keeps repeating [${bestObsId}].`,
+          citations: [bestObsId],
+          citedCues: [],
+        },
+        worst: {
+          strokeId: 's4',
+          reasoning:
+            `Your worst stroke leaked structure in the load and shoulders barely turned, so the legs had no spring and the chest opened early [${worstObsId1},${worstObsId2}]. Sit deeper into the back leg before swinging forward [${worstObsId1}].`,
+          citations: [worstObsId1, worstObsId2],
+          citedCues: [],
+        },
+      },
+    })
+    // Retry: all bracketed tokens are valid observation_ids.
+    responseQueue.push({
+      kind: 'tool_use',
+      input: {
+        best: {
+          strokeId: 's0',
+          reasoning:
+            `Your best stroke kept the racket arm long and the contact point in front of the hip every single time [${bestObsId}]. Trust this reach and groove the same shape across the next basket so the pattern keeps repeating [${bestObsId}].`,
+          citations: [bestObsId],
+          citedCues: [],
+        },
+        worst: {
+          strokeId: 's4',
+          reasoning:
+            `Your worst stroke leaked structure in the load and shoulders barely turned, so the legs had no spring and the chest opened early [${worstObsId1},${worstObsId2}]. Sit deeper into the back leg before swinging forward [${worstObsId1}].`,
+          citations: [worstObsId1, worstObsId2],
+          citedCues: [],
+        },
+      },
+    })
+
+    const { POST } = await import('@/app/api/compare-strokes/route')
+    const res = await POST(makeReq({ strokes }))
+    expect(res.status).toBe(200)
+    const json = await res.json()
+    expect(json.isConsistent).toBe(false)
+    expect(json.best?.strokeId).toBe('s0')
+    // Final reasoning must NOT contain the fabricated id.
+    expect(json.best?.reasoning).not.toContain('s0_fake_obs_pattern')
+    // Both responses consumed -> retry happened on the fabricated id.
     expect(responseQueue.length).toBe(0)
   })
 

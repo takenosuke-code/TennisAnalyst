@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import {
-  scoreStrokes,
-  type DetectedStroke,
-  type StrokeQualityResult,
-} from '@/lib/strokeQuality'
+import { scoreStrokes } from '@/lib/strokeQuality'
+import type {
+  DetectedStroke,
+  StrokeQualityResult,
+} from '@/lib/strokeAnalysis'
 import type { PoseFrame, JointAngles, Landmark } from '@/lib/supabase'
 import { LANDMARK_INDICES } from '@/lib/jointAngles'
 import { makeFrame, makeLandmark } from '../helpers'
@@ -449,6 +449,25 @@ describe('scoreStrokes — components', () => {
   it('kineticChainTimingError = 0 for the median-lag stroke and nonzero for outliers', () => {
     // Three strokes: shoulderPeak - hipPeak lags of 33ms, 99ms (median), 165ms.
     // The middle one should have 0 timing error.
+    //
+    // peakAngularVelocityMs uses a central-difference estimator
+    // v[i] = (angle[i+1] - angle[i-1]) / (t[i+1] - t[i-1]). Each fixture
+    // has a single-frame angle spike (delta != 0) at hipPeakAtFrame /
+    // shoulderPeakAtFrame, so |angle[i+1] - angle[i-1]| is maximal at both
+    // i = peakFrame - 1 (first encountered, wins ties) and i = peakFrame + 1.
+    // The first hit wins, so the reported peak timestamp is timestamp at
+    // frame (peakFrame - 1). The lag = (shoulderPeakAtFrame - hipPeakAtFrame)
+    // * intervalMs because both reported timestamps shift back by one frame
+    // and that shift cancels in the difference.
+    //
+    //   stroke a: shoulderPeak - hipPeak = 6 - 5  = 1 frame  -> lag = 33ms
+    //   stroke b: shoulderPeak - hipPeak = 48 - 45 = 3 frames -> lag = 99ms
+    //   stroke c: shoulderPeak - hipPeak = 90 - 85 = 5 frames -> lag = 165ms
+    //
+    //   sessionMedianLag = 99ms
+    //   error(a) = |33 - 99|  = 66ms
+    //   error(b) = |99 - 99|  = 0ms
+    //   error(c) = |165 - 99| = 66ms
     const a = makeCleanStrokeFrames(0, 20, {
       wristTravel: 0.3,
       hipPeakAtFrame: 5,

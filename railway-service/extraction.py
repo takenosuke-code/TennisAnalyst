@@ -206,15 +206,56 @@ PASS1_SAMPLE_FPS = 8
 # happen closer than ~500ms in tennis (even rapid volleys at the net
 # pause briefly between hits). Used to suppress secondary peaks from a
 # single swing's wind-up + follow-through showing up as separate peaks.
+# MUST match the JS default in lib/swingDetect.ts STROKE_DEFAULTS.
 STROKE_REFRACTORY_MS = 500.0
 
 # Pre/post pad (ms) around each detected peak. The window must include
-# the wind-up before contact and the follow-through after. Tuned to
-# match `lib/jointAngles.ts:detectSwings` swing extents seen in
-# practice — backswing top is typically 800-1000ms before contact and
-# follow-through completes within ~500ms of contact.
+# the wind-up before contact and the follow-through after. MUST match
+# the JS defaults in lib/swingDetect.ts (prePadMs=1000, postPadMs=500).
 STROKE_PRE_PAD_MS = 1000.0
 STROKE_POST_PAD_MS = 500.0
+
+# Smoothing window (frames) for the centered moving average over wrist
+# speed. MUST match JS STROKE_DEFAULTS.smoothingFrames (5).
+STROKE_SMOOTHING_FRAMES = 5
+
+# Adaptive threshold multiplier on the (p90 - median) spread. MUST
+# match JS STROKE_DEFAULTS.thresholdK (1.0).
+STROKE_THRESHOLD_K = 1.0
+
+# Minimum frame distance between two raw peaks before refractory dedup.
+# MUST match JS STROKE_DEFAULTS.minPeakDistanceFrames (3). Refractory
+# does the heavy lifting; this exists so two real peaks 300ms apart
+# (≈9 frames at 30fps) can both make it past peak-finding before
+# refractory chooses one.
+STROKE_MIN_PEAK_DISTANCE_FRAMES = 3
+
+# Tuple of all peak-pick + padding constants. Order is load-bearing:
+# the SHA256 of str(TWO_PASS_PARAMS) is appended to Modal's per-clip
+# cache key on two-pass requests, so any tuning of these values
+# implicitly invalidates stale cached keypoints. Don't reorder fields
+# without bumping POSE_CACHE_MODEL_VERSION as well.
+TWO_PASS_PARAMS = (
+    STROKE_REFRACTORY_MS,
+    STROKE_PRE_PAD_MS,
+    STROKE_POST_PAD_MS,
+    STROKE_SMOOTHING_FRAMES,
+    STROKE_THRESHOLD_K,
+)
+
+
+def two_pass_params_hash() -> str:
+    """Return an 8-char SHA256 prefix of the TWO_PASS_PARAMS tuple.
+
+    Used to extend Modal's per-clip cache key when a request runs the
+    two-pass orchestrator. Tuning any peak-pick constant rotates this
+    hash, so a same-blob retry after a tuning deploy gets fresh
+    keypoints rather than stale cached ones from the old constants.
+    """
+    import hashlib
+
+    return hashlib.sha256(str(TWO_PASS_PARAMS).encode()).hexdigest()[:8]
+
 
 # Two-pass falls back to a full single-pass when fewer than this many
 # strokes are detected in pass 1. Small candidate counts mean the
@@ -391,40 +432,60 @@ def _detect_strokes_from_wrist(
     refractory_ms: float = STROKE_REFRACTORY_MS,
     pre_pad_ms: float = STROKE_PRE_PAD_MS,
     post_pad_ms: float = STROKE_POST_PAD_MS,
-    smoothing_window: int = 3,
+    smoothing_window: int = STROKE_SMOOTHING_FRAMES,
+    threshold_k: float = STROKE_THRESHOLD_K,
+    min_peak_distance_frames: int = STROKE_MIN_PEAK_DISTANCE_FRAMES,
 ) -> list[tuple[int, int, int]]:
-    """Reimplementation of the JS wrist-velocity peak-pick logic.
+    """Faithful Python port of `detectStrokes` in lib/swingDetect.ts.
 
-    The JS swing detector (lib/swingDetect*.ts, contracted via the
-    DetectedStroke shape) operates on the same wrist-trajectory signal,
-    so we reproduce the same algorithm in Python rather than round-trip
-    via JS:
+    The JS swing detector is the source of truth: this function
+    reproduces its algorithm bit-for-bit so the server-side stroke
+    candidate windows (used to gate Modal's heavy pose pass) match
+    what the browser would compute on the same wrist signal.
 
-      1. Compute frame-to-frame wrist speed (||Δposition|| / Δt) where
-         both endpoints have a tracked wrist. Frames with missing wrist
-         on either side contribute speed=0.
-      2. Smooth the speed series with a small moving average.
-      3. Pick local peaks above an adaptive threshold (median + k *
-         (p90 - median)).
-      4. Apply a refractory: peaks within `refractory_ms` of a stronger
-         neighbor are suppressed (only the stronger one survives).
-      5. Pad each surviving peak to a window: peak - pre_pad_ms to
-         peak + post_pad_ms. Convert ms boundaries to original-video
-         frame indices using `video_fps`.
+      1. Compute frame-to-frame wrist speed (||Δposition|| / Δt). Frames
+         where either endpoint is missing wrist tracking contribute 0.
+      2. Smooth with a centered moving-average of `smoothing_window`
+         frames (default 5; matches JS STROKE_DEFAULTS.smoothingFrames).
+      3. Compute the adaptive threshold from the SMOOTHED signal:
+         `median + threshold_k * (p90 - median)`. Empty spread =>
+         Infinity threshold (no peaks).
+      4. Find local maxima: a sample is a local max iff it dominates
+         BOTH immediate neighbors (`v >= left and v >= right` with at
+         least one strict inequality, which lets plateaus' first index
+         survive). Apply a min-distance dedup: if a candidate is within
+         `min_peak_distance_frames` of the previously accepted peak,
+         keep whichever has the larger smoothed speed.
+      5. Refractory: sort accepted candidates by smoothed speed
+         DESCENDING and walk in that order, accepting a peak only if
+         no already-accepted peak is within `refractoryFrames`.
+         `refractoryFrames = max(1, round(refractory_ms/1000 * sample_fps))`,
+         where `sample_fps` is derived from the input timestamps' median
+         delta — NOT `video_fps`. (The detector operates on pass-1
+         sample indices; `video_fps` is only used at the end to convert
+         peak/pad timestamps back to original-video frame indices.)
+      6. Pad each surviving peak to a (peak - pre_pad_ms, peak +
+         post_pad_ms) window in milliseconds, then convert to
+         original-video frame indices via `video_fps`. Pre/post pad
+         frames use math.ceil (matches JS Math.ceil) so a small ms pad
+         never clips to 0 frames.
 
     Returns a list of (start_frame, end_frame, peak_frame) tuples in
-    ORIGINAL-VIDEO frame indices (not pass-1 sample indices), sorted
-    by start_frame. Frame indices are clipped at 0 below; callers
-    clip at the upper bound (total frames) as needed.
+    ORIGINAL-VIDEO frame indices, sorted by start_frame. Frame indices
+    are clamped at 0 below; callers clamp at the upper bound (total
+    frames) as needed.
     """
     n = len(timestamps_ms)
-    if n < 3:
+    if n < 2:
         return []
     if len(wrists) != n:
         raise ValueError("timestamps_ms and wrists must be same length")
 
     # Step 1: frame-to-frame wrist speed in normalized-coords-per-second.
-    # Speed series has length n; speeds[0] = 0 by convention.
+    # Speeds[0] = 0 (no previous frame to diff against). Mirrors
+    # computeWristSpeeds() in lib/swingDetect.ts: a missing/occluded
+    # wrist endpoint yields 0 rather than NaN so the smoother doesn't
+    # poison neighbours.
     speeds: list[float] = [0.0] * n
     for i in range(1, n):
         a = wrists[i - 1]
@@ -440,114 +501,139 @@ def _detect_strokes_from_wrist(
         dy = b[1] - a[1]
         speeds[i] = ((dx * dx + dy * dy) ** 0.5) / dt_s
 
-    # Step 2: smooth with a small moving average. smoothing_window=3
-    # smooths single-frame YOLO/RTMPose noise without flattening the
-    # peak.
+    # Step 2: centered moving average. Half-window = floor(W/2) so a
+    # window of 5 looks at i±2. Edges use whatever neighbours exist
+    # (not zero-padded). Matches smooth() in lib/swingDetect.ts.
     half = max(0, smoothing_window // 2)
-    smoothed: list[float] = []
+    smoothed: list[float] = [0.0] * n
     for i in range(n):
         lo = max(0, i - half)
-        hi = min(n, i + half + 1)
-        smoothed.append(sum(speeds[lo:hi]) / (hi - lo))
+        hi = min(n - 1, i + half)
+        s = 0.0
+        c = 0
+        for j in range(lo, hi + 1):
+            s += speeds[j]
+            c += 1
+        smoothed[i] = s / c if c > 0 else 0.0
 
-    # Step 3: adaptive threshold. Combines two thresholds to handle
-    # the full range of realistic clips:
-    #
-    #   * relative_threshold = median + 0.5 * (p90 - median).
-    #     Sensitive to dynamic-but-busy clips where median speed is
-    #     well above zero (continuous rallying, fast hand movement
-    #     between shots). On a dense-motion clip this anchors the
-    #     threshold to the local activity floor.
-    #
-    #   * fraction_of_max = 0.3 * max(smoothed).
-    #     Critical for sparse clips where ~95% of frames are idle and
-    #     only a handful of strokes punctuate the timeline. On a sparse
-    #     clip the median+0.5*spread threshold collapses to ~p90 levels
-    #     because p90 itself is barely above noise (only the top 10%
-    #     of frames carry real motion); without the fraction-of-max
-    #     gate, we'd then accept dozens of noise-floor local maxima.
-    #
-    # `max(...)` of both takes the stricter floor — ensures a peak
-    # must clear BOTH "above the local activity floor" and "at least
-    # 30% of the loudest sample in the clip".
+    # Step 3: adaptive threshold over smoothed signal.
+    # threshold = median + threshold_k * (p90 - median). Spread <= 0
+    # (perfectly flat clip) bumps to +inf so no peaks fire — same
+    # flat-signal early-out the JS path uses.
     sorted_s = sorted(smoothed)
     median = sorted_s[len(sorted_s) // 2]
     p90 = sorted_s[min(len(sorted_s) - 1, int(len(sorted_s) * 0.9))]
-    spread = p90 - median
-    max_speed = max(smoothed)
-    if max_speed <= 0 or spread <= 0:
-        # Flat signal; no real motion. No strokes detected.
+    spread = max(0.0, p90 - median)
+    if spread <= 0:
         return []
-    relative_threshold = median + 0.5 * spread
-    fraction_of_max = 0.3 * max_speed
-    threshold = max(relative_threshold, fraction_of_max)
+    threshold = median + threshold_k * spread
 
-    # Find local maxima above threshold. Require a strong local
-    # maximum: peak must dominate a 5-sample window (i±2). At pass-1
-    # 8fps this is ±250ms — well below any real swing duration so the
-    # true peak's smoothed value still tops the window, but enough to
-    # filter noise-floor wiggles that have a single-sample local max
-    # without persistent prominence.
-    peaks: list[tuple[int, float]] = []  # (sample_idx, speed)
-    for i in range(2, n - 2):
-        if smoothed[i] < threshold:
+    # Refractory operates on the sample-series cadence, not the original
+    # video fps. Derive sample_fps from the timestamps' median delta —
+    # mirrors deriveFps() in lib/swingDetect.ts. Falls back to video_fps
+    # (and ultimately 30) when timestamps are too short / degenerate.
+    sample_fps = _derive_sample_fps(timestamps_ms, fallback=video_fps)
+
+    refractory_frames = max(1, round((refractory_ms / 1000.0) * sample_fps))
+    min_peak_distance = min(min_peak_distance_frames, refractory_frames)
+
+    # Step 4: local maxima with min-distance dedup. Mirrors
+    # findLocalMaxima() in lib/swingDetect.ts.
+    raw_peaks: list[int] = []
+    for i in range(n):
+        v = smoothed[i]
+        if v < threshold:
             continue
-        if (
-            smoothed[i] >= smoothed[i - 1]
-            and smoothed[i] >= smoothed[i + 1]
-            and smoothed[i] >= smoothed[i - 2]
-            and smoothed[i] >= smoothed[i + 2]
-        ):
-            peaks.append((i, smoothed[i]))
+        # Local max: not less than either immediate neighbour AND
+        # strictly greater than at least one of them (handles plateaus
+        # by keeping the first index of the plateau). Edge frames see
+        # -infinity on the missing side, so they pass the >=
+        # comparison automatically.
+        left = smoothed[i - 1] if i > 0 else float("-inf")
+        right = smoothed[i + 1] if i < n - 1 else float("-inf")
+        is_local_max = (
+            v >= left
+            and v >= right
+            and (v > left or v > right or n == 1)
+        )
+        if not is_local_max:
+            continue
+        # Min-distance dedup: if the previous accepted peak is within
+        # min_peak_distance, keep the taller. Greedy forward pass.
+        if raw_peaks:
+            last = raw_peaks[-1]
+            if i - last < min_peak_distance:
+                if smoothed[i] > smoothed[last]:
+                    raw_peaks[-1] = i
+                continue
+        raw_peaks.append(i)
 
-    if not peaks:
+    if not raw_peaks:
         return []
 
-    # Step 4: refractory. Walk peaks in time order, keeping a peak only
-    # if no STRONGER peak has fired within the last `refractory_ms`. A
-    # stronger neighbor within the window suppresses this one entirely
-    # (mirrors the standard refractory-period algorithm from EMG onset
-    # detection — see liveSwingDetector for the JS-side equivalent).
-    peaks.sort(key=lambda p: p[0])
-    kept: list[tuple[int, float]] = []
-    for sample_idx, speed in peaks:
-        ts = timestamps_ms[sample_idx]
-        # Suppress this peak if any kept peak within refractory was
-        # stronger or equal. Conversely, if THIS peak is stronger than a
-        # recent kept peak, evict the kept one and replace it.
-        suppressed = False
-        i = len(kept) - 1
-        while i >= 0:
-            prev_idx, prev_speed = kept[i]
-            prev_ts = timestamps_ms[prev_idx]
-            if ts - prev_ts > refractory_ms:
+    # Step 5: refractory. Sort candidates by smoothed speed DESCENDING
+    # and greedily accept the strongest, blocking any candidate within
+    # refractory_frames of an already-accepted peak. Mirrors
+    # applyRefractory() in lib/swingDetect.ts.
+    by_strength = sorted(raw_peaks, key=lambda i: smoothed[i], reverse=True)
+    accepted: list[int] = []
+    for p in by_strength:
+        blocked = False
+        for a in accepted:
+            if abs(p - a) < refractory_frames:
+                blocked = True
                 break
-            if prev_speed >= speed:
-                suppressed = True
-                break
-            # This peak is stronger: evict the prior weaker peak.
-            kept.pop(i)
-            i -= 1
-        if not suppressed:
-            kept.append((sample_idx, speed))
+        if not blocked:
+            accepted.append(p)
+    accepted.sort()
 
-    # Step 5: pad each surviving peak to a (start, end, peak) window
-    # in ORIGINAL-VIDEO frame indices.
+    # Step 6: pad each surviving peak to (start_ms, end_ms) and convert
+    # to original-video frame indices via video_fps. math.ceil for
+    # pre/post pad matches JS Math.ceil.
     if video_fps <= 0:
         video_fps = 30.0  # defensive — caller should always pass real fps
 
-    windows: list[tuple[int, int, int]] = []
-    for sample_idx, _speed in kept:
-        peak_ts_ms = timestamps_ms[sample_idx]
-        start_ms = max(0.0, peak_ts_ms - pre_pad_ms)
-        end_ms = peak_ts_ms + post_pad_ms
+    pre_pad_frames = math.ceil((pre_pad_ms / 1000.0) * video_fps)
+    post_pad_frames = math.ceil((post_pad_ms / 1000.0) * video_fps)
 
-        start_frame = int(round((start_ms / 1000.0) * video_fps))
-        end_frame = int(round((end_ms / 1000.0) * video_fps))
-        peak_frame = int(round((peak_ts_ms / 1000.0) * video_fps))
+    windows: list[tuple[int, int, int]] = []
+    for sample_idx in accepted:
+        peak_ts_ms = timestamps_ms[sample_idx]
+        peak_frame = round((peak_ts_ms / 1000.0) * video_fps)
+        start_frame = peak_frame - pre_pad_frames
+        end_frame = peak_frame + post_pad_frames
         windows.append((max(0, start_frame), max(0, end_frame), max(0, peak_frame)))
 
     return windows
+
+
+def _derive_sample_fps(timestamps_ms: list[float], fallback: float) -> float:
+    """Derive sample-series fps from timestamp deltas.
+
+    Faithful port of `deriveFps` in lib/swingDetect.ts. Uses the median
+    Δt (robust to a few duplicated/dropped frames) and snaps integer
+    nearby (within 0.05fps) so canonical 8/30/60fps captures hit
+    integer frame arithmetic. Falls back to `fallback` (and ultimately
+    30) when timestamps are too short or all equal.
+    """
+    if len(timestamps_ms) < 2:
+        return fallback if fallback > 0 else 30.0
+    diffs = [
+        timestamps_ms[i] - timestamps_ms[i - 1]
+        for i in range(1, len(timestamps_ms))
+        if (timestamps_ms[i] - timestamps_ms[i - 1]) > 0
+        and math.isfinite(timestamps_ms[i] - timestamps_ms[i - 1])
+    ]
+    if not diffs:
+        return fallback if fallback > 0 else 30.0
+    diffs.sort()
+    median_dt = diffs[len(diffs) // 2]
+    if not median_dt or median_dt <= 0:
+        return fallback if fallback > 0 else 30.0
+    fps = 1000.0 / median_dt
+    if abs(fps - round(fps)) < 0.05:
+        return float(round(fps))
+    return fps
 
 
 def _merge_windows(
@@ -685,6 +771,7 @@ def _extract_with_rtmpose(
     # Replaces the previous frame-difference motion pre-pass — the
     # two-pass orchestrator passes pose-derived stroke windows here,
     # which are tighter and more discriminative than raw motion peaks.
+    total_window_sec = 0.0
     if candidate_windows:
         # Extract just (start, end) for the in-window check; peak isn't
         # used here.
@@ -692,7 +779,7 @@ def _extract_with_rtmpose(
             (s, e) for s, e, _p in candidate_windows
         ]
         total_window_frames = sum(e - s for s, e in check_windows)
-        total_window_sec = total_window_frames / video_fps if video_fps > 0 else 0
+        total_window_sec = total_window_frames / video_fps if video_fps > 0 else 0.0
         clip_pct = (
             100 * total_window_sec / duration_sec_est
             if duration_sec_est > 0
@@ -707,13 +794,23 @@ def _extract_with_rtmpose(
     else:
         check_windows = []
 
-    if duration_sec_est > 120:
+    # Choose the duration that drives the fps cap. Single-pass uses the
+    # full clip duration (existing behavior). Two-pass with candidate
+    # windows uses the SUMMED window duration: with ~15-25% coverage on
+    # match tape, even a 5-min clip's actual heavy work is ~45-75s, so
+    # capping at 8fps the way we do for full 5-min single-pass leaves
+    # the natural sample_fps on the table without budget pressure.
+    cap_basis_sec = total_window_sec if candidate_windows else duration_sec_est
+
+    if cap_basis_sec > 120:
         effective_sample_fps = min(sample_fps, 8)
-    elif duration_sec_est > 60:
+    elif cap_basis_sec > 60:
         effective_sample_fps = min(sample_fps, 12)
-    elif duration_sec_est > 30:
+    elif cap_basis_sec > 30:
         effective_sample_fps = min(sample_fps, 18)
     else:
+        # Short candidate-window total OR short single-pass clip: don't
+        # cap — let the caller's requested sample_fps through.
         effective_sample_fps = sample_fps
 
     frame_interval = max(1, int(video_fps / effective_sample_fps))

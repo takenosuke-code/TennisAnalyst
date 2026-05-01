@@ -42,21 +42,26 @@ def _build_wrist_trajectory(
     n_peaks: int = 6,
     seed: int = 0,
 ) -> tuple[list[float], list[tuple[float, float] | None]]:
-    """Construct a synthetic wrist trajectory: noisy idle floor with
-    `n_peaks` injected peaks. Returns (timestamps_ms, wrists).
+    """Construct a synthetic wrist trajectory: tiny-noise idle floor
+    with `n_peaks` injected peaks. Returns (timestamps_ms, wrists).
 
-    The detector requires both `spread > 0` and `max > 0`, so a
-    completely flat trajectory plus a few isolated peaks fails the
-    threshold algorithm in pathological ways (90% of samples are
-    identical → p90 = median → spread = 0). The small noise floor
-    here mimics what real RTMPose-on-video looks like during idle
-    frames.
+    The detector requires `spread > 0`, so a completely flat trajectory
+    plus a few isolated peaks would fail the threshold guard (90% of
+    samples identical → p90 = median → spread = 0). We add a tiny
+    deterministic noise floor so spread > 0 but the peak threshold
+    (median + 1.0 · (p90 - median)) sits well above the noise. Noise
+    amplitude must be << peak amplitude for the JS-parity threshold
+    to cleanly separate them.
     """
     import random
     rng = random.Random(seed)
     timestamps_ms = [i * sample_dt_ms for i in range(n_samples)]
+    # Small noise floor: amplitude ±0.0005 in normalized coords. At
+    # ~0.005-norm/sample_dt_ms speed this stays an order of magnitude
+    # below the peak (which moves 0.3 norm/sample). Without this, the
+    # JS-parity p90 threshold sometimes lets noise wiggles through.
     wrists: list[tuple[float, float] | None] = [
-        (0.3 + rng.uniform(-0.005, 0.005), 0.5 + rng.uniform(-0.005, 0.005))
+        (0.3 + rng.uniform(-0.0005, 0.0005), 0.5 + rng.uniform(-0.0005, 0.0005))
         for _ in range(n_samples)
     ]
     for k in range(n_peaks):

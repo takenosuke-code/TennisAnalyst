@@ -1,45 +1,21 @@
 'use client'
 
 import { useCallback, useId, useMemo, useRef } from 'react'
+import type {
+  DetectedStroke,
+  StrokeRejectReason,
+  StrokeQualityResult,
+  StrokeComparisonResult,
+} from '@/lib/strokeAnalysis'
 
-// ---------------------------------------------------------------------------
-// Types — mirror the contract documented in the task brief. Kept local to
-// the component for now; if a downstream consumer needs them they can be
-// promoted to lib/strokeAnalysis.ts (or wherever the upstream pipeline
-// lives) in a follow-up.
-// ---------------------------------------------------------------------------
-
-export interface DetectedStroke {
-  strokeId: string
-  startFrame: number
-  endFrame: number
-  peakFrame: number
-  fps: number
-}
-
-export type StrokeRejectReason =
-  | 'low_visibility'
-  | 'camera_pan'
-  | 'camera_zoom'
-  | 'too_short'
-
-export interface StrokeQualityResult {
-  strokeId: string
-  score: number // z-scored, higher = better. NaN when rejected.
-  rejected: boolean
-  rejectReason?: StrokeRejectReason
-  components: {
-    peakWristSpeed: number
-    kineticChainTimingError: number
-    wristAngleVariance: number
-  }
-}
-
-export interface StrokeComparisonResult {
-  best: { strokeId: string; reasoning: string; citations: string[] } | null
-  worst: { strokeId: string; reasoning: string; citations: string[] } | null
-  isConsistent: boolean
-  consistentCue?: string
+// Re-export the canonical types so existing test imports
+// (`import type { … } from '@/components/StrokeRibbon'`) keep resolving.
+// The single source of truth lives in lib/strokeAnalysis.ts.
+export type {
+  DetectedStroke,
+  StrokeRejectReason,
+  StrokeQualityResult,
+  StrokeComparisonResult,
 }
 
 export interface StrokeRibbonProps {
@@ -94,11 +70,17 @@ function formatScore(score: number): string {
   return '0.0'
 }
 
+// `Record<StrokeRejectReason, string>` (rather than `Partial<…>`) makes
+// this map exhaustive: if a future StrokeRejectReason is added in
+// lib/strokeAnalysis.ts and not mirrored here, tsc will fail on a
+// missing key. That's the compile-time guard the cross-cutting audit
+// asked for.
 const REJECT_LABEL: Record<StrokeRejectReason, string> = {
   low_visibility: 'Low visibility',
   camera_pan: 'Camera panned',
   camera_zoom: 'Camera zoomed',
   too_short: 'Stroke too short',
+  missing_data: 'Incomplete tracking',
 }
 
 // ---------------------------------------------------------------------------

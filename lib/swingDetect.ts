@@ -1,4 +1,10 @@
 import type { PoseFrame, Landmark } from './supabase'
+import type { DetectedStroke } from './strokeAnalysis'
+
+// Re-export so consumers that have always imported DetectedStroke from
+// '@/lib/swingDetect' (or via the '@/lib/jointAngles' re-export) keep
+// working. The canonical declaration lives in lib/strokeAnalysis.ts.
+export type { DetectedStroke } from './strokeAnalysis'
 
 // MediaPipe Pose landmark indices for the wrists. Inlined rather than
 // imported from `./jointAngles` to keep the dependency graph one-way:
@@ -35,19 +41,6 @@ const LM_RIGHT_WRIST = 16
 //      Convert ms → frames using the actual fps derived from timestamps,
 //      not a hardcoded 30. Clamp to [0, totalFrames-1].
 // ---------------------------------------------------------------------------
-
-export interface DetectedStroke {
-  /** `stroke_${index}` where index is zero-based in peakFrame ascending order. */
-  strokeId: string
-  /** Inclusive start frame index after pre-padding (clamped to ≥ 0). */
-  startFrame: number
-  /** Inclusive end frame index after post-padding (clamped to ≤ totalFrames-1). */
-  endFrame: number
-  /** Frame index of the wrist-speed peak that anchored this stroke. */
-  peakFrame: number
-  /** Effective fps used for ms ↔ frame conversion. */
-  fps: number
-}
 
 export interface DetectStrokesOptions {
   /**

@@ -32,6 +32,13 @@ import {
 import { CUE_EXEMPLARS, type CueExemplar } from '@/lib/cueExemplars'
 import type { ShotType } from '@/lib/shotTypeConfig'
 import { VALID_SHOT_TYPES } from '@/lib/shotTypeConfig'
+import type { StrokeComparisonResult } from '@/lib/strokeAnalysis'
+
+// Re-export so any existing import path (e.g.
+// `import type { StrokeComparisonResult } from
+// '@/app/api/compare-strokes/route'`) keeps resolving. The canonical
+// declaration lives in lib/strokeAnalysis.ts.
+export type { StrokeComparisonResult }
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -49,8 +56,8 @@ export const TIE_THRESHOLD = 0.7
 
 // Word-count budget for each per-stroke reasoning paragraph. Both stated in
 // the system prompt AND validated post-parse (defense in depth).
-const MIN_REASONING_WORDS = 20
-const MAX_REASONING_WORDS = 55
+const MIN_REASONING_WORDS = 25
+const MAX_REASONING_WORDS = 45
 
 // Hard cap on cues quoted per stroke. Echoes the prompt rule.
 const MAX_CUES_PER_STROKE = 2
@@ -69,12 +76,8 @@ interface StrokeInput {
   observations: Observation[]
 }
 
-export interface StrokeComparisonResult {
-  best: { strokeId: string; reasoning: string; citations: string[] } | null
-  worst: { strokeId: string; reasoning: string; citations: string[] } | null
-  isConsistent: boolean
-  consistentCue?: string
-}
+// StrokeComparisonResult moved to lib/strokeAnalysis.ts (single source
+// of truth across the stroke pipeline). Imported + re-exported above.
 
 // ---------------------------------------------------------------------------
 // Validation helpers
@@ -540,15 +543,36 @@ function validateOne(
         }
       }
     }
+    // Mid-sentence bracket guard: the end-anchored CITATION_TAG_RE only
+    // covers the trailing tag, so a sentence like
+    //   "Your back leg [fabricated] loaded clean here [real_obs]."
+    // would otherwise sneak the fabricated id past validation. Walk every
+    // bracketed token in the sentence and reject any id outside validObs.
+    for (const tagMatch of sentence.matchAll(ALL_CITATION_TAGS_RE)) {
+      const inner = tagMatch[0].slice(1, -1)
+      const tagIds = inner
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+      for (const id of tagIds) {
+        if (!validObs.has(id)) {
+          return {
+            ok: false,
+            reason: `${side}.reasoning contains bracketed id "${id}" which is not in the input observation set. Every [bracketed] token must be a real observation_id.`,
+          }
+        }
+      }
+    }
   }
   // Citations array must be a subset of validObs and must include every id
   // referenced inside the reasoning sentences.
   const allRefIds = new Set<string>()
   for (const sentence of sentences) {
-    const m = sentence.match(CITATION_TAG_RE)
-    if (!m) continue
-    for (const id of m[1].split(',').map((s) => s.trim()).filter(Boolean)) {
-      allRefIds.add(id)
+    for (const tagMatch of sentence.matchAll(ALL_CITATION_TAGS_RE)) {
+      const inner = tagMatch[0].slice(1, -1)
+      for (const id of inner.split(',').map((s) => s.trim()).filter(Boolean)) {
+        allRefIds.add(id)
+      }
     }
   }
   for (const c of emitted.citations) {
