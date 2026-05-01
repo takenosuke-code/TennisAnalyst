@@ -36,8 +36,27 @@ function safeBlobFilename(name: string): string {
 }
 
 const ComparisonLayout = dynamic(() => import('@/components/ComparisonLayout'), { ssr: false })
-const MetricsComparison = dynamic(() => import('@/components/MetricsComparison'), { ssr: false })
 const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), { ssr: false })
+const SwingChainOverlay = dynamic(() => import('@/components/SwingChainOverlay'), { ssr: false })
+
+/**
+ * Stub for camera-similarity detection. Agent B owns
+ * `lib/cameraNormalization.ts` and may not have shipped
+ * `computeCameraSimilarity` yet, so this returns null deterministically
+ * and the page renders no warning. Once the lib lands, swap the impl
+ * here — the call site below is wrapped in try/catch so a future
+ * import error never blanks the page. The args are intentionally
+ * accepted (and silenced via void) so consumers can wire real frames
+ * through without touching the call site.
+ */
+function computeCameraWarning(
+  baseline: PoseFrame[],
+  today: PoseFrame[],
+): string | null {
+  void baseline
+  void today
+  return null
+}
 
 export default function BaselineComparePage() {
   const { baselines, activeBaseline, loading, error, refresh } = useBaselineStore()
@@ -100,7 +119,12 @@ export default function BaselineComparePage() {
     return activeBaseline
   }, [baselines, selectedBaselineId, activeBaseline])
 
-  const baselineFrames = selectedBaseline?.keypoints_json?.frames ?? []
+  // Memoised so downstream useMemo deps don't recompute on every render
+  // (a fresh `[]` literal would otherwise change identity each render).
+  const baselineFrames = useMemo<PoseFrame[]>(
+    () => selectedBaseline?.keypoints_json?.frames ?? [],
+    [selectedBaseline]
+  )
 
   // Detect swings within today's uploaded clip. Multi-swing clips
   // (e.g. "I just hit 12 forehands and uploaded the rally") get
@@ -108,19 +132,26 @@ export default function BaselineComparePage() {
   const todaySwings = useMemo(() => detectSwings(todayFrames), [todayFrames])
   const hasMultipleTodaySwings = todaySwings.length > 1
 
-  // The frames actually fed into ComparisonLayout / MetricsComparison /
-  // the LLM. When the user picks a specific swing, slice to it. When
-  // there's only one swing, use the whole clip (detectSwings returns
-  // the whole array as a single segment in that case anyway). Slicing
-  // is what lets phase sync work on every swing the user picks: phases
-  // re-detect cleanly on a 30-frame slice in a way they cannot on a
-  // 3000-frame multi-swing rally.
+  // The frames actually fed into ComparisonLayout / LLM. When the user
+  // picks a specific swing, slice to it. When there's only one swing,
+  // use the whole clip.
   const todayFramesForCompare = useMemo<PoseFrame[]>(() => {
     if (selectedTodaySwing != null && todaySwings[selectedTodaySwing - 1]) {
       return todaySwings[selectedTodaySwing - 1].frames
     }
     return todayFrames
   }, [selectedTodaySwing, todaySwings, todayFrames])
+
+  // Camera-similarity warning (graceful future hook). Wrapped in
+  // try/catch so a downstream throw never blanks the page; if the
+  // helper hasn't been written yet we silently render nothing.
+  const cameraWarning = useMemo<string | null>(() => {
+    try {
+      return computeCameraWarning(baselineFrames, todayFramesForCompare)
+    } catch {
+      return null
+    }
+  }, [baselineFrames, todayFramesForCompare])
 
   // Clean up any object URL on unmount / replacement
   useEffect(() => {
@@ -289,15 +320,16 @@ export default function BaselineComparePage() {
   if (!loading && baselines.length === 0 && !error) {
     return (
       <div className="max-w-2xl mx-auto px-4 py-16 text-center">
-        <div className="text-5xl mb-3">🎾</div>
-        <h1 className="text-2xl font-black text-white mb-2">No Baseline Saved Yet</h1>
-        <p className="text-white/50 mb-6">
+        <h1 className="font-display font-extrabold text-3xl text-cream mb-3">
+          No baseline saved yet.
+        </h1>
+        <p className="text-cream/70 mb-6">
           Analyze a swing first, then mark it as your baseline. You&apos;ll then be able to
           see how future swings stack up.
         </p>
         <Link
           href="/analyze"
-          className="inline-block px-6 py-3 bg-emerald-500 hover:bg-emerald-400 text-white font-semibold rounded-xl transition-colors"
+          className="inline-flex items-center justify-center px-7 py-3.5 rounded-full bg-clay hover:bg-[#c4633f] text-cream text-sm font-semibold tracking-wide transition-colors"
         >
           Analyze a swing
         </Link>
@@ -309,22 +341,24 @@ export default function BaselineComparePage() {
     <div className="max-w-7xl mx-auto px-4 py-8">
       <div className="mb-8 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-black text-white mb-2">Beat Your Last Swing</h1>
-          <p className="text-white/50">
+          <h1 className="font-display font-extrabold text-3xl sm:text-4xl text-cream mb-2 leading-tight">
+            Beat Your Last Swing
+          </h1>
+          <p className="text-cream/70">
             Your best day on the left. Today&apos;s swing on the right.
           </p>
         </div>
         <Link
           href="/baseline"
-          className="shrink-0 text-sm text-white/60 hover:text-white transition-colors"
+          className="shrink-0 text-sm text-cream/70 hover:text-cream transition-colors"
         >
           Manage baselines →
         </Link>
       </div>
 
       {error && (
-        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 mb-6">
-          <p className="text-red-300 text-sm">{error}</p>
+        <div className="border border-clay/40 bg-clay/10 p-4 mb-6">
+          <p className="text-clay-soft text-sm">{error}</p>
         </div>
       )}
 
@@ -337,10 +371,10 @@ export default function BaselineComparePage() {
                 <button
                   key={b.id}
                   onClick={() => setSelectedBaselineId(b.id)}
-                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
+                  className={`px-3 py-1.5 text-xs font-medium tracking-wide transition-colors ${
                     b.id === selectedBaseline?.id
-                      ? 'bg-emerald-500 text-white'
-                      : 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
+                      ? 'bg-clay text-cream'
+                      : 'bg-cream/10 text-cream/70 hover:bg-cream/20 hover:text-cream'
                   }`}
                 >
                   {b.label} · {b.shot_type}
@@ -349,11 +383,7 @@ export default function BaselineComparePage() {
             </div>
           )}
 
-          {/* Upload zone for today's swing. Use the local uploadBusy
-              state (covers the whole pipeline incl. Railway) instead of
-              the hook's isProcessing (browser-extractor only) — without
-              this the Railway path runs invisibly for 30-60s with no
-              progress UI and the user thinks the page is broken. */}
+          {/* Upload zone for today's swing. */}
           {!hasToday && (
             <div
               onDragOver={(e) => {
@@ -363,10 +393,10 @@ export default function BaselineComparePage() {
               onDragLeave={() => setDragging(false)}
               onDrop={handleDrop}
               onClick={() => !uploadBusy && fileInputRef.current?.click()}
-              className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all ${
+              className={`border-2 border-dashed p-12 text-center cursor-pointer transition-colors ${
                 dragging
-                  ? 'border-emerald-400 bg-emerald-500/10'
-                  : 'border-white/20 hover:border-white/40 hover:bg-white/5'
+                  ? 'border-clay bg-clay/10'
+                  : 'border-cream/20 hover:border-cream/40 hover:bg-cream/5'
               } ${uploadBusy ? 'cursor-not-allowed opacity-80' : ''}`}
             >
               <input
@@ -383,40 +413,39 @@ export default function BaselineComparePage() {
               />
               {uploadBusy ? (
                 <div className="space-y-3">
-                  <p className="text-white">
+                  <p className="text-cream">
                     {uploadStatus || `Processing today's swing… ${progress}%`}
                   </p>
-                  <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
+                  <div className="w-full bg-cream/10 h-1.5 overflow-hidden">
                     <div
-                      className="h-full bg-emerald-400 rounded-full transition-all"
+                      className="h-full bg-clay transition-all"
                       style={{ width: isProcessing ? `${progress}%` : '40%' }}
                     />
                   </div>
                 </div>
               ) : (
                 <div>
-                  <div className="text-4xl mb-3">🎬</div>
-                  <p className="text-white font-medium">Upload today&apos;s swing</p>
-                  <p className="text-white/40 text-sm mt-1">MP4, MOV, WebM</p>
+                  <p className="text-cream font-medium">Upload today&apos;s swing</p>
+                  <p className="text-cream/50 text-sm mt-1">MP4, MOV, WebM</p>
                 </div>
               )}
             </div>
           )}
           {uploadError && (
-            <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4">
-              <p className="text-red-300 text-sm">{uploadError}</p>
+            <div className="border border-clay/40 bg-clay/10 p-4">
+              <p className="text-clay-soft text-sm">{uploadError}</p>
             </div>
           )}
 
           {/* Side-by-side comparison */}
           {canCompare && selectedBaseline && (
-            <div className="rounded-2xl border border-white/10 overflow-hidden bg-black">
-              <div className="p-3 border-b border-white/5 flex items-center justify-between">
+            <div className="border border-cream/10 overflow-hidden bg-ink">
+              <div className="p-3 border-b border-cream/10 flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <p className="text-sm text-white/60">
-                    <span className="text-emerald-300">{selectedBaseline.label}</span>
-                    <span className="text-white/30"> vs </span>
-                    <span className="text-white">Today</span>
+                  <p className="text-sm text-cream/70">
+                    <span className="text-clay-soft">{selectedBaseline.label}</span>
+                    <span className="text-cream/40"> vs </span>
+                    <span className="text-cream">Today</span>
                   </p>
                   <BackendChip
                     backend={todayExtractorBackend}
@@ -431,7 +460,7 @@ export default function BaselineComparePage() {
                     setTodayExtractorBackend(null)
                     setTodayFallbackReason(null)
                   }}
-                  className="text-xs text-white/40 hover:text-white"
+                  className="text-xs text-cream/50 hover:text-cream"
                 >
                   Upload different video
                 </button>
@@ -458,14 +487,14 @@ export default function BaselineComparePage() {
             </div>
           )}
 
-          {canCompare && (
-            <MetricsComparison
-              userFrames={baselineFrames}
-              proFrames={todayFramesForCompare}
-              shotType={selectedBaseline?.shot_type ?? null}
-              userLabel="Baseline"
-              proLabel="Today"
-            />
+          {/* Soft camera-angle warning. Stubbed until Agent B's
+              computeCameraSimilarity ships — currently always null and
+              renders nothing. Wrapping is in the useMemo above so a
+              future throw doesn't break the page. */}
+          {canCompare && cameraWarning && (
+            <div className="border border-hard-court/40 bg-hard-court/10 p-3">
+              <p className="text-cream/80 text-sm">{cameraWarning}</p>
+            </div>
           )}
 
           {canCompare && selectedBaseline && (
@@ -476,16 +505,24 @@ export default function BaselineComparePage() {
               baselineLabel={selectedBaseline.label}
             />
           )}
+
+          {canCompare && (
+            <SwingChainOverlay
+              caption="Power flows up the chain — hips first, wrist last. The cleaner the wave, the more effortless the shot."
+            />
+          )}
         </div>
 
         <div className="space-y-4">
           <JointTogglePanel />
 
           {selectedBaseline && (
-            <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-              <h3 className="text-sm font-semibold text-white mb-2">Comparing Against</h3>
-              <p className="text-white font-medium truncate">{selectedBaseline.label}</p>
-              <p className="text-white/50 text-xs capitalize mt-0.5">
+            <div className="border border-cream/10 bg-cream/5 p-4">
+              <h3 className="font-display font-bold text-sm text-cream mb-2">
+                Comparing against
+              </h3>
+              <p className="text-cream font-medium truncate">{selectedBaseline.label}</p>
+              <p className="text-cream/60 text-xs capitalize mt-0.5">
                 {selectedBaseline.shot_type} ·{' '}
                 {new Date(selectedBaseline.created_at).toLocaleDateString()}
               </p>

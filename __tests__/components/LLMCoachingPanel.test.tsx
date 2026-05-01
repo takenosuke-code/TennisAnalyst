@@ -20,7 +20,7 @@ let mockPoseState = {
 vi.mock('@/store', () => ({
   useAnalysisStore: Object.assign(
     vi.fn(() => mockAnalysisState),
-    { getState: vi.fn(() => ({ feedback: '' })) }
+    { getState: vi.fn(() => ({ feedback: mockAnalysisState.feedback })) }
   ),
   usePoseStore: vi.fn(() => mockPoseState),
 }))
@@ -44,6 +44,20 @@ function streamingResponse(chunks: string[], headers: Record<string, string> = {
   })
   return new Response(body, { status: 200, headers })
 }
+
+const FIXTURE_THREE_SECTIONS = [
+  '## Primary cue',
+  'Stay low through contact and let the racket finish over your shoulder.',
+  '',
+  '## Other things I noticed',
+  '- Your hip rotation kicked in slightly later than usual.',
+  '- Front foot loaded a touch less.',
+  '',
+  '## Show your work',
+  '- **Right elbow at contact**: 132° on baseline, 112° today (drifted 20°)',
+  '- **Right knee at loading**: 149° on baseline, 165° today (drifted 16°)',
+  '',
+].join('\n')
 
 describe('LLMCoachingPanel', () => {
   const originalFetch = globalThis.fetch
@@ -78,13 +92,14 @@ describe('LLMCoachingPanel', () => {
     globalThis.fetch = originalFetch
   })
 
+  // --- Initial / button state ---------------------------------------------
+
   it('disables Analyze Swing when no frames are loaded', () => {
     mockPoseState.framesData = []
 
     render(<LLMCoachingPanel />)
 
     const analyzeBtn = screen.getByText('Analyze Swing')
-    expect(analyzeBtn).toBeInTheDocument()
     expect(analyzeBtn.closest('button')).toBeDisabled()
   })
 
@@ -97,13 +112,13 @@ describe('LLMCoachingPanel', () => {
     expect(btn.closest('button')).not.toBeDisabled()
   })
 
-  it('shows loading state (spinner) during analysis', () => {
+  it('shows loading label while analysis runs', () => {
     mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
     mockAnalysisState.loading = true
 
     render(<LLMCoachingPanel />)
 
-    expect(screen.getByText('Analyzing...')).toBeInTheDocument()
+    expect(screen.getByText(/Analyzing/i)).toBeInTheDocument()
   })
 
   it('shows "Form Analysis" label when compareMode is custom', () => {
@@ -118,28 +133,8 @@ describe('LLMCoachingPanel', () => {
     expect(screen.getByText(/May 3 rally/)).toBeInTheDocument()
   })
 
-  it('renders feedback text correctly', () => {
-    mockAnalysisState.feedback = '## Great Form\nYour **backswing** is solid.'
-
-    render(<LLMCoachingPanel />)
-
-    expect(screen.getByText('Expand')).toBeInTheDocument()
-  })
-
-  it('expand/collapse toggle works', () => {
-    mockAnalysisState.feedback = 'Some coaching feedback here.'
-
-    render(<LLMCoachingPanel />)
-
-    const expandBtn = screen.getByText('Expand')
-    fireEvent.click(expandBtn)
-
-    expect(screen.getByText('Collapse')).toBeInTheDocument()
-    expect(screen.getByText('Some coaching feedback here.')).toBeInTheDocument()
-  })
-
   it('re-analyze button appears after first analysis', () => {
-    mockAnalysisState.feedback = 'Analysis complete.'
+    mockAnalysisState.feedback = '## Primary cue\nGreat shape today.'
     mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
 
     render(<LLMCoachingPanel />)
@@ -147,33 +142,88 @@ describe('LLMCoachingPanel', () => {
     expect(screen.getByText('Re-analyze')).toBeInTheDocument()
   })
 
-  it('shows markdown headers as h3 elements when panel is expanded', () => {
-    mockAnalysisState.feedback = '## Swing Analysis\nLooks good.'
+  // --- Three-section parser ------------------------------------------------
+
+  it('renders all three sections from a complete fixture markdown string', () => {
+    mockAnalysisState.feedback = FIXTURE_THREE_SECTIONS
 
     render(<LLMCoachingPanel />)
 
-    fireEvent.click(screen.getByText('Expand'))
+    // Primary cue
+    expect(screen.getByText('Primary cue')).toBeInTheDocument()
+    expect(
+      screen.getByText(/Stay low through contact/)
+    ).toBeInTheDocument()
 
-    expect(screen.getByText('Swing Analysis')).toBeInTheDocument()
-    expect(screen.getByText('Swing Analysis').tagName).toBe('H3')
+    // Other observations
+    expect(screen.getByText('Other things I noticed')).toBeInTheDocument()
+    expect(
+      screen.getByText(/Your hip rotation kicked in slightly later/)
+    ).toBeInTheDocument()
+
+    // Show your work disclosure
+    const showWork = screen.getByText('Show your work')
+    expect(showWork).toBeInTheDocument()
+    // The disclosure should be a <details>/<summary>; collapsed by default.
+    const details = showWork.closest('details')
+    expect(details).toBeTruthy()
+    expect(details?.open).toBe(false)
   })
 
-  it('renders bold text in markdown', () => {
-    mockAnalysisState.feedback = 'Your **technique** is improving.'
+  it('renders bold inline markdown inside Show your work', () => {
+    mockAnalysisState.feedback = FIXTURE_THREE_SECTIONS
 
     render(<LLMCoachingPanel />)
 
-    fireEvent.click(screen.getByText('Expand'))
+    // The right-elbow label is bold in the fixture.
+    const strong = screen.getByText('Right elbow at contact')
+    expect(strong.tagName).toBe('STRONG')
+  })
 
-    const strongEl = screen.getByText('technique')
-    expect(strongEl.tagName).toBe('STRONG')
+  it('progressive render: shows Primary cue before later sections arrive', () => {
+    // Only the first section is in the buffer so far.
+    mockAnalysisState.feedback = '## Primary cue\nKeep your head still through contact.'
+
+    render(<LLMCoachingPanel />)
+
+    expect(screen.getByText('Primary cue')).toBeInTheDocument()
+    expect(screen.queryByText('Other things I noticed')).not.toBeInTheDocument()
+    expect(screen.queryByText('Show your work')).not.toBeInTheDocument()
+  })
+
+  // --- Empty-state branch --------------------------------------------------
+
+  it('renders the empty-state body when X-Analyze-Empty-State header is true', async () => {
+    mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock.mockResolvedValueOnce(
+      streamingResponse(
+        [
+          "We couldn't read your swing clearly enough to give specific coaching.\nTry shooting from the side at chest height, with the player filling the frame.",
+        ],
+        { 'X-Analyze-Empty-State': 'true' }
+      )
+    )
+
+    render(<LLMCoachingPanel />)
+    await act(async () => {
+      fireEvent.click(screen.getByText('Analyze Swing'))
+    })
+
+    expect(
+      screen.getByText(/We couldn.t read your swing clearly enough/)
+    ).toBeInTheDocument()
+    // No Primary-cue heading, no disclosure in empty state.
+    expect(screen.queryByText('Primary cue')).not.toBeInTheDocument()
+    expect(screen.queryByText('Show your work')).not.toBeInTheDocument()
   })
 
   // --- Thumbs feedback strip ----------------------------------------------
 
   it('does not render thumbs strip while loading (even with feedback)', () => {
     mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
-    mockAnalysisState.feedback = 'partial...'
+    mockAnalysisState.feedback = '## Primary cue\npartial...'
     mockAnalysisState.loading = true
 
     render(<LLMCoachingPanel />)
@@ -194,9 +244,8 @@ describe('LLMCoachingPanel', () => {
     mockUseUser.mockReturnValue({ user: null, loading: false })
     mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
 
-    // Simulate a completed analysis: event id header present, stream closed.
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
-      streamingResponse(['feedback body'], { 'X-Analysis-Event-Id': 'evt-1' })
+      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-1' })
     )
 
     render(<LLMCoachingPanel />)
@@ -204,7 +253,6 @@ describe('LLMCoachingPanel', () => {
       fireEvent.click(screen.getByText('Analyze Swing'))
     })
 
-    // Even after a successful analyze, signed-out users should never see the strip.
     expect(screen.queryByText('Was this coaching right for you?')).not.toBeInTheDocument()
   })
 
@@ -212,11 +260,9 @@ describe('LLMCoachingPanel', () => {
     mockPoseState.framesData = [{ frame_index: 0, timestamp_ms: 0, landmarks: [], joint_angles: {} }]
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
-    // First call: /api/analyze streaming response with event id header.
     fetchMock.mockResolvedValueOnce(
-      streamingResponse(['coaching text'], { 'X-Analysis-Event-Id': 'evt-42' })
+      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-42' })
     )
-    // Second call: PATCH feedback endpoint.
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
 
     render(<LLMCoachingPanel />)
@@ -224,7 +270,6 @@ describe('LLMCoachingPanel', () => {
       fireEvent.click(screen.getByText('Analyze Swing'))
     })
 
-    // Strip should now be visible.
     expect(screen.getByText('Was this coaching right for you?')).toBeInTheDocument()
 
     await act(async () => {
@@ -248,7 +293,7 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse(['coaching'], { 'X-Analysis-Event-Id': 'evt-hard' })
+      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-hard' })
     )
     fetchMock.mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
 
@@ -275,7 +320,7 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse(['coaching'], { 'X-Analysis-Event-Id': 'evt-easy' })
+      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-easy' })
     )
     fetchMock.mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
 
@@ -302,7 +347,7 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse(['coaching'], { 'X-Analysis-Event-Id': 'evt-ok' })
+      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-ok' })
     )
     fetchMock.mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
 
@@ -326,9 +371,8 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse(['coaching'], { 'X-Analysis-Event-Id': 'evt-err' })
+      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-err' })
     )
-    // PATCH returns 500.
     fetchMock.mockResolvedValueOnce(new Response('nope', { status: 500 }))
 
     render(<LLMCoachingPanel />)
@@ -343,7 +387,6 @@ describe('LLMCoachingPanel', () => {
       expect(screen.getByText(/Couldn.t save/)).toBeInTheDocument()
     })
 
-    // Buttons should still be present and enabled for retry.
     const spotOn = screen.getByText('👍 Spot on').closest('button')!
     expect(spotOn).not.toBeDisabled()
     const tooAdv = screen.getByText('⬇️ Too advanced').closest('button')!
@@ -355,7 +398,7 @@ describe('LLMCoachingPanel', () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock.mockResolvedValueOnce(
-      streamingResponse(['coaching'], { 'X-Analysis-Event-Id': 'evt-reset' })
+      streamingResponse([FIXTURE_THREE_SECTIONS], { 'X-Analysis-Event-Id': 'evt-reset' })
     )
     fetchMock.mockResolvedValueOnce(new Response('{"ok":true}', { status: 200 }))
 
@@ -376,7 +419,6 @@ describe('LLMCoachingPanel', () => {
     }
     rerender(<LLMCoachingPanel />)
 
-    // Thank-you and strip should both be gone while the next analysis runs.
     expect(screen.queryByText('Thanks — logged.')).not.toBeInTheDocument()
     expect(screen.queryByText('Was this coaching right for you?')).not.toBeInTheDocument()
   })
