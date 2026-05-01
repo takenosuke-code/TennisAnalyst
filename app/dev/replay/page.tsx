@@ -110,11 +110,20 @@ async function transcodeToH264(
   await ffmpeg.writeFile('input', await fetchFile(input))
   // Strip audio (-an) — Modal extracts pose from video frames only.
   // ultrafast preset because dev iteration; output isn't re-encoded.
+  // Fragmented mp4 output. ffmpeg.wasm sometimes Abort()s after
+  // encoding all frames but before finalizing the output's moov atom —
+  // logged seen in production with H.264 inputs. Fragmented mp4 writes
+  // self-contained moof+mdat fragments, so even if the wasm aborts
+  // before the final moov flush, the output is still demuxable.
+  // empty_moov+default_base_moof+frag_keyframe is the standard fmp4
+  // flag combo. faststart guarantees the file plays without seeking
+  // to the tail.
   const exitCode = await ffmpeg.exec([
     '-i', 'input',
     '-c:v', 'libx264',
     '-preset', 'ultrafast',
     '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart+empty_moov+default_base_moof+frag_keyframe',
     '-an',
     'output.mp4',
   ])
@@ -135,18 +144,20 @@ async function transcodeToH264(
   })
 }
 
-// Quickly verify a File is actually playable by the browser before
-// we hand it to handleReplay. Mounts it into a throwaway <video>
-// element off-screen and waits for `loadedmetadata` (good) or `error`
-// (bad). 4s budget — anything that takes longer is broken.
+// Verify a File is actually playable by the browser before we hand
+// it to handleReplay. Waits for `canplay` not just `loadedmetadata`
+// — a corrupted file can have a parseable moov atom (loadedmetadata
+// fires) but fail to decode any frames (canplay never fires). 6s
+// budget — fragmented mp4 outputs need a beat longer than plain mp4
+// to reach canplay.
 function probePlayability(file: File): Promise<{ ok: true } | { ok: false; reason: string }> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file)
     const v = document.createElement('video')
     v.muted = true
-    v.preload = 'metadata'
+    v.preload = 'auto'
     const cleanup = () => {
-      v.removeEventListener('loadedmetadata', onOk)
+      v.removeEventListener('canplay', onOk)
       v.removeEventListener('error', onErr)
       URL.revokeObjectURL(url)
     }
@@ -163,13 +174,13 @@ function probePlayability(file: File): Promise<{ ok: true } | { ok: false; reaso
       cleanup()
       resolve({ ok: false, reason: code ? (codeName[code] ?? `code ${code}`) : 'unknown' })
     }
-    v.addEventListener('loadedmetadata', onOk)
+    v.addEventListener('canplay', onOk)
     v.addEventListener('error', onErr)
     v.src = url
     setTimeout(() => {
       cleanup()
-      resolve({ ok: false, reason: 'timeout (>4s)' })
-    }, 4000)
+      resolve({ ok: false, reason: 'timeout (>6s) — output may be present but undecodable' })
+    }, 6000)
   })
 }
 
