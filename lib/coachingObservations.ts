@@ -674,6 +674,31 @@ function compareDrift(
 }
 
 // ---------------------------------------------------------------------------
+// Observation IDs
+//
+// We need a stable, content-addressable id for each Observation row so the
+// /api/compare-strokes route can force the LLM to cite which row each
+// sentence is talking about. Format:
+//   `${strokeId}_${joint}_${phase}_${pattern}`
+//
+// (joint, pattern) alone collides across phases — e.g. a `drift_from_baseline`
+// row can appear at both 'contact' (elbow drift) and 'loading' (knee drift).
+// Adding phase to the tuple uniques them. strokeId scopes the id so two
+// strokes that happen to expose the same fault don't collide either.
+//
+// Pure derivation, no hashing — keeps the id human-readable in logs and
+// avoids dragging a crypto dep into a route that only needs disambiguation,
+// not opacity.
+// ---------------------------------------------------------------------------
+
+export function observationId(
+  strokeId: string,
+  obs: Pick<Observation, 'joint' | 'phase' | 'pattern'>,
+): string {
+  return `${strokeId}_${obs.joint}_${obs.phase}_${obs.pattern}`
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 

@@ -324,6 +324,13 @@ describe('detectSwings', () => {
       peakDelta: number,
     ): PoseFrame[] => {
       const out: PoseFrame[] = []
+      // Wrist amplitude scales with peakDelta. The hard swing
+      // (peakDelta=60) sweeps the wrist through a wide arc; the soft
+      // swings (peakDelta=12) move the wrist a fifth as far. The
+      // detector's mean+1·std threshold sits between the two — it
+      // catches the soft swings as long as one big swing's high-speed
+      // window doesn't dominate the normalization.
+      const amplitude = 0.45 * (peakDelta / 60)
       for (let i = 0; i < numFrames; i++) {
         const t = i / Math.max(1, numFrames - 1)
         const ramp = t < 0.5 ? t * 2 : (1 - t) * 2
@@ -336,7 +343,20 @@ describe('detectSwings', () => {
           hip_rotation: 10 + e * 0.4,
           trunk_rotation: 10 + e * 0.4,
         }
-        out.push(makeFrame(i, startMs + i * 33, makeStandingPose(), angles))
+        // Asymmetric wrist arc returning to the rest x at swing
+        // boundaries so back-to-back rest/swing fixtures don't spike
+        // velocity at the seams.
+        const wristX =
+          t < 0.5
+            ? 0.4 + amplitude * (t * 2) ** 1.5
+            : 0.4 + amplitude * (1 - (t - 0.5) * 2) ** 1.5
+        const wristY = 0.55 - 0.05 * Math.sin(Math.PI * t) * (peakDelta / 60)
+        const landmarks = makeStandingPose().map((lm) =>
+          lm.id === LANDMARK_INDICES.RIGHT_WRIST
+            ? { ...lm, x: wristX, y: wristY }
+            : lm,
+        )
+        out.push(makeFrame(i, startMs + i * 33, landmarks, angles))
       }
       return out
     }

@@ -215,7 +215,7 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
       })
       // Clean coach reply with the new two-section format.
       responseQueue.push(
-        '## Primary cue\nTurn your shoulders earlier and let the racket follow.\n\n## Other things I noticed\n- Set the back leg before the bounce.',
+        '## Quick Read\n- Shoulders fire late.\n- Back leg sets after the bounce.\n\n## Primary cue\nTurn your shoulders earlier and let the racket follow.\n\n## Other things I noticed\n- Set the back leg before the bounce.\n\n## Recommended drills\n- Shadow swings focused on early shoulder turn.\n- Slow drop hits with a clear back-leg load.',
       )
 
       const { POST } = await import('@/app/api/analyze/route')
@@ -252,7 +252,7 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
       skipped: false,
     })
     responseQueue.push(
-      '## Primary cue\nQuick advice.\n\n## Other things I noticed\n- Stay sideways.',
+      '## Quick Read\n- Quick read, stay sideways.\n\n## Primary cue\nQuick advice.\n\n## Other things I noticed\n- Stay sideways.\n\n## Recommended drills\n- Mini-tennis at the service line.',
     )
 
     const { POST } = await import('@/app/api/analyze/route')
@@ -274,7 +274,7 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
   // Response shape
   // -------------------------------------------------------------------------
 
-  it('emits "## Primary cue", "## Other things I noticed", and "## Show your work" sections', async () => {
+  it('emits Quick Read, Primary cue, Other things I noticed, Recommended drills, and Show your work sections in order', async () => {
     mockGetCoachingContext.mockResolvedValue({
       profile: {
         skill_tier: 'intermediate',
@@ -285,7 +285,7 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
       skipped: false,
     })
     responseQueue.push(
-      '## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.',
+      '## Quick Read\n- Shoulders late.\n- Knees stay tall.\n\n## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.\n\n## Recommended drills\n- Mini-tennis with relaxed legs.',
     )
 
     const { POST } = await import('@/app/api/analyze/route')
@@ -297,9 +297,16 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
     )
     expect(res.status).toBe(200)
     const body = await readStream(res)
-    expect(body).toContain('## Primary cue')
-    expect(body).toContain('## Other things I noticed')
-    expect(body).toContain('## Show your work')
+    const qrIdx = body.indexOf('## Quick Read')
+    const primaryIdx = body.indexOf('## Primary cue')
+    const otherIdx = body.indexOf('## Other things I noticed')
+    const drillsIdx = body.indexOf('## Recommended drills')
+    const showIdx = body.indexOf('## Show your work')
+    expect(qrIdx).toBeGreaterThan(-1)
+    expect(primaryIdx).toBeGreaterThan(qrIdx)
+    expect(otherIdx).toBeGreaterThan(primaryIdx)
+    expect(drillsIdx).toBeGreaterThan(otherIdx)
+    expect(showIdx).toBeGreaterThan(drillsIdx)
   })
 
   it('numbers only appear in the "## Show your work" section', async () => {
@@ -313,7 +320,7 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
       skipped: false,
     })
     responseQueue.push(
-      '## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.',
+      '## Quick Read\n- Shoulders late.\n\n## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.\n\n## Recommended drills\n- Mini-tennis at the service line.',
     )
 
     const { POST } = await import('@/app/api/analyze/route')
@@ -348,10 +355,10 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
       },
       skipped: false,
     })
-    // Mock LLM returns a clean two-section response. The route should
+    // Mock LLM returns a clean four-section response. The route should
     // run the fallback prompt against this and stream the result back.
     responseQueue.push(
-      '## Primary cue\nStay with the same feel and trust your contact point.\n\n## Other things I noticed\n- The swing is hanging together, keep it grooved.',
+      '## Quick Read\n- The swing reads clean.\n- Rhythm is holding up well.\n\n## Primary cue\nStay with the same feel and trust your contact point.\n\n## Other things I noticed\n- The swing is hanging together, keep it grooved.\n\n## Recommended drills\n- Steady mini-tennis to lock in the feel.',
     )
 
     const { POST } = await import('@/app/api/analyze/route')
@@ -390,10 +397,10 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
     })
     // First attempt: contains a digit. Second attempt: clean.
     responseQueue.push(
-      '## Primary cue\nTurn 30 degrees earlier.\n\n## Other things I noticed\n- Bend.',
+      '## Quick Read\n- Bad output 30 degrees.\n\n## Primary cue\nTurn 30 degrees earlier.\n\n## Other things I noticed\n- Bend.\n\n## Recommended drills\n- A drill.',
     )
     responseQueue.push(
-      '## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.',
+      '## Quick Read\n- Shoulders fire late.\n\n## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.\n\n## Recommended drills\n- Slow drop hits with a clean turn.',
     )
 
     const { POST } = await import('@/app/api/analyze/route')
@@ -435,10 +442,13 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
       }),
     )
     const body = await readStream(res)
-    // Static fallback emits a Primary cue + Other things I noticed structure
-    // built from CueExemplar text — none of the disallowed strings.
+    // Static fallback emits Quick Read + Primary cue + Other things I noticed +
+    // Recommended drills structure built from CueExemplar text — none of the
+    // disallowed strings.
+    expect(body).toContain('## Quick Read')
     expect(body).toContain('## Primary cue')
     expect(body).toContain('## Other things I noticed')
+    expect(body).toContain('## Recommended drills')
     expect(body).toContain('## Show your work')
     const showIdx = body.indexOf('## Show your work')
     const beforeShow = body.slice(0, showIdx)
@@ -458,10 +468,10 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
     })
     // Em-dash is in the first attempt; second attempt is clean.
     responseQueue.push(
-      '## Primary cue\nTurn your shoulders \u2014 then drive forward.\n\n## Other things I noticed\n- Bend the knees.',
+      '## Quick Read\n- Shoulders \u2014 late.\n\n## Primary cue\nTurn your shoulders \u2014 then drive forward.\n\n## Other things I noticed\n- Bend the knees.\n\n## Recommended drills\n- Easy drill.',
     )
     responseQueue.push(
-      '## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.',
+      '## Quick Read\n- Shoulders fire late.\n\n## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.\n\n## Recommended drills\n- Slow drop hits with a clean turn.',
     )
 
     const { POST } = await import('@/app/api/analyze/route')

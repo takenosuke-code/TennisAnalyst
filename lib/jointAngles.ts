@@ -1,4 +1,5 @@
 import type { Landmark, JointAngles, PoseFrame } from './supabase'
+import { detectStrokes } from './swingDetect'
 
 // MediaPipe Pose landmark indices
 export const LANDMARK_INDICES = {
@@ -166,54 +167,52 @@ export type SwingSegment = {
 }
 
 /**
- * Detect individual swings in a sequence of frames by tracking
- * wrist movement velocity and joint angle changes.
- * Returns segments of high activity separated by rest periods.
+ * Detect individual swings in a sequence of frames.
+ *
+ * Backwards-compatible wrapper around `detectStrokes()` (lib/swingDetect.ts).
+ * The underlying algorithm is the wrist-velocity peak-pick rewrite — see
+ * the doc comment in lib/swingDetect.ts for design notes. This wrapper
+ * preserves the long-standing `SwingSegment[]` shape that downstream UI
+ * code (SwingSelector, SwingBaselineGrid, baseline/compare,
+ * coachingObservations, analyze/page) was written against.
+ *
+ * The legacy hysteresis-tuning options (`restThreshold`, `enterThreshold`,
+ * `exitThreshold`, `mergeGapFrames`) are accepted-and-ignored to keep the
+ * call-site contract intact. They have no analogue in the new algorithm —
+ * peak-picking + refractory + biomechanical padding replaces hysteresis +
+ * region-merging + fixed pre/post pad.
+ *
+ * `minSwingFrames` is still honored: short clips below the floor return a
+ * single whole-clip segment so callers built around "always have something
+ * to render" don't crash on micro-clips.
  */
 export function detectSwings(
   allFrames: PoseFrame[],
   opts: {
     minSwingFrames?: number
-    /**
-     * Single-threshold legacy knob. When set, used as the enter
-     * threshold and the exit is derived as enter / 4 (matches the
-     * 4:1 hysteresis ratio recommended by the EMG-onset literature).
-     * Pass `enterThreshold` / `exitThreshold` directly for finer
-     * control.
-     */
+    /** @deprecated Hysteresis-era knob; ignored under the peak-pick algorithm. */
     restThreshold?: number
+    /** @deprecated Hysteresis-era knob; ignored under the peak-pick algorithm. */
     enterThreshold?: number
+    /** @deprecated Hysteresis-era knob; ignored under the peak-pick algorithm. */
     exitThreshold?: number
+    /** @deprecated Hysteresis-era knob; ignored under the peak-pick algorithm. */
     mergeGapFrames?: number
+    /** Override fps when timestamps are unreliable. */
+    fps?: number
+    /** Profile dominant-hand override forwarded to detectStrokes. */
+    dominantHand?: 'left' | 'right' | null
   } = {}
 ): SwingSegment[] {
-  // Hysteresis (Schmitt-trigger) thresholds. Tennis activity profiles
-  // dip mid-swing — at the top of the backswing where the racket
-  // reverses direction, and through the decelerating follow-through.
-  // A single threshold splits a real swing across those valleys; two
-  // thresholds (enter HIGH, exit LOW) tolerate them. The 4:1 ratio
-  // is the canonical value from EMG onset/offset detection (see
-  // PMC10594734) and sits comfortably between the swing's peak and
-  // its internal valleys without merging genuinely separate shots.
-  //
-  // Defaults: enter = 0.40, exit = 0.10 of the (P90 − median) spread.
-  // The legacy `restThreshold` knob still works — when provided we
-  // use it as the enter and derive exit = enter / 4.
-  const enterFrac =
-    opts.enterThreshold ?? opts.restThreshold ?? 0.4
-  const exitFrac =
-    opts.exitThreshold ??
-    (opts.restThreshold !== undefined ? opts.restThreshold / 4 : 0.1)
-  // mergeGapFrames bumped 5 → 14 so a ~470 ms valley (longer than the
-  // backswing-top reversal) closes, but the 1 s+ gap between truly
-  // distinct shots in a rally stays open.
-  const { minSwingFrames = 12, mergeGapFrames = 14 } = opts
+  const { minSwingFrames = 12 } = opts
 
+  // Whole-clip fallback for very short inputs — preserves the legacy
+  // "always return something" behavior callers rely on.
   if (allFrames.length < minSwingFrames) {
     return [{
       index: 1,
       startFrame: 0,
-      endFrame: allFrames.length - 1,
+      endFrame: Math.max(0, allFrames.length - 1),
       startMs: allFrames[0]?.timestamp_ms ?? 0,
       endMs: allFrames[allFrames.length - 1]?.timestamp_ms ?? 0,
       peakFrame: Math.floor(allFrames.length / 2),
@@ -221,126 +220,16 @@ export function detectSwings(
     }]
   }
 
-  // Compute per-frame "activity" score based on joint angle rate of change
-  const activity: number[] = [0]
-  for (let i = 1; i < allFrames.length; i++) {
-    const prev = allFrames[i - 1].joint_angles
-    const curr = allFrames[i].joint_angles
-    let delta = 0
-    const keys: (keyof typeof curr)[] = [
-      'right_elbow', 'left_elbow', 'right_shoulder', 'left_shoulder',
-      'hip_rotation', 'trunk_rotation',
-    ]
-    for (const k of keys) {
-      if (prev[k] != null && curr[k] != null) {
-        delta += Math.abs((curr[k] as number) - (prev[k] as number))
-      }
-    }
-    activity.push(delta)
-  }
+  const strokes = detectStrokes(allFrames, {
+    fps: opts.fps,
+    dominantHand: opts.dominantHand,
+  })
 
-  // Smooth activity with a 5-frame moving average
-  const smoothed: number[] = []
-  const halfWin = 2
-  for (let i = 0; i < activity.length; i++) {
-    let sum = 0
-    let count = 0
-    for (let j = Math.max(0, i - halfWin); j <= Math.min(activity.length - 1, i + halfWin); j++) {
-      sum += activity[j]
-      count++
-    }
-    smoothed.push(sum / count)
-  }
-
-  // Adaptive thresholds = median + frac × (P90 − median), with two fracs:
-  // enter (HIGH) and exit (LOW). P90 instead of max so one explosive
-  // swing in a long rally doesn't inflate the bar past softer shots —
-  // mirrors the same trick LiveSwingDetector.thresholdStats already
-  // uses (lib/liveSwingDetector.ts:263-286).
-  const sorted = [...smoothed].sort((a, b) => a - b)
-  const median = sorted[Math.floor(sorted.length / 2)]
-  const p90 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))]
-  const spread = p90 - median
-  const enterT = median + enterFrac * spread
-  const exitT = median + exitFrac * spread
-
-  // Find regions via hysteresis: enter when activity rises above HIGH,
-  // exit only when it drops below LOW. Tolerates internal dips smaller
-  // than (HIGH − LOW) without splitting the region — exactly the
-  // mechanic that stops a single swing from fragmenting at the
-  // backswing-top valley.
-  const regions: { start: number; end: number; peakIdx: number; peakVal: number }[] = []
-  let inRegion = false
-  let regionStart = 0
-  let peakIdx = 0
-  let peakVal = 0
-
-  for (let i = 0; i < smoothed.length; i++) {
-    const v = smoothed[i]
-    if (!inRegion) {
-      if (v >= enterT) {
-        inRegion = true
-        regionStart = i
-        peakIdx = i
-        peakVal = v
-      }
-    } else {
-      if (v > peakVal) {
-        peakIdx = i
-        peakVal = v
-      }
-      if (v < exitT) {
-        regions.push({ start: regionStart, end: i - 1, peakIdx, peakVal })
-        inRegion = false
-      }
-    }
-  }
-  if (inRegion) {
-    regions.push({ start: regionStart, end: smoothed.length - 1, peakIdx, peakVal })
-  }
-
-  // Merge regions that are close together
-  const merged: typeof regions = []
-  for (const r of regions) {
-    if (merged.length > 0 && r.start - merged[merged.length - 1].end <= mergeGapFrames) {
-      const last = merged[merged.length - 1]
-      last.end = r.end
-      if (r.peakVal > last.peakVal) {
-        last.peakIdx = r.peakIdx
-        last.peakVal = r.peakVal
-      }
-    } else {
-      merged.push({ ...r })
-    }
-  }
-
-  // Asymmetric biomechanical padding. The high-activity span detected
-  // above is the *acceleration through follow-through* portion; the
-  // backswing/loading runs ~600 ms before that with much lower angle-
-  // delta activity (joints are loading, not whipping), so it falls
-  // below threshold and gets clipped. Pad more before than after to
-  // capture the full motion envelope ~ 670 ms / 500 ms at 30 fps.
-  const padBefore = 20
-  const padAfter = 15
-  const segments: SwingSegment[] = []
-  let idx = 1
-  for (const r of merged) {
-    if (r.end - r.start + 1 < minSwingFrames) continue
-    const start = Math.max(0, r.start - padBefore)
-    const end = Math.min(allFrames.length - 1, r.end + padAfter)
-    segments.push({
-      index: idx++,
-      startFrame: start,
-      endFrame: end,
-      startMs: allFrames[start].timestamp_ms,
-      endMs: allFrames[end].timestamp_ms,
-      peakFrame: r.peakIdx,
-      frames: allFrames.slice(start, end + 1),
-    })
-  }
-
-  // If no swings detected, return the whole video as one segment
-  if (segments.length === 0) {
+  if (strokes.length === 0) {
+    // No peaks survived — fall through to the whole-clip segment so the
+    // analyze / baseline UIs don't render an empty state for clips
+    // where the fixture is genuinely flat (synthetic tests, very still
+    // setups). Real-world rallies always have peaks.
     return [{
       index: 1,
       startFrame: 0,
@@ -352,8 +241,26 @@ export function detectSwings(
     }]
   }
 
-  return segments
+  // Adapt DetectedStroke[] to SwingSegment[]. peakFrame from
+  // DetectedStroke is an absolute frame index — same semantics as
+  // SwingSegment.peakFrame. Consumers like SwingBaselineGrid use
+  // `swing.frames[swing.peakFrame - swing.startFrame]` so we preserve
+  // that invariant by carrying the absolute index through.
+  return strokes.map((s, i) => ({
+    index: i + 1, // 1-based for legacy consumers
+    startFrame: s.startFrame,
+    endFrame: s.endFrame,
+    startMs: allFrames[s.startFrame]?.timestamp_ms ?? 0,
+    endMs: allFrames[s.endFrame]?.timestamp_ms ?? 0,
+    peakFrame: s.peakFrame,
+    frames: allFrames.slice(s.startFrame, s.endFrame + 1),
+  }))
 }
+
+// Re-export the new stroke detector + types so callers wanting the
+// strict contract can import them from the same module.
+export { detectStrokes, deriveFps } from './swingDetect'
+export type { DetectedStroke, DetectStrokesOptions } from './swingDetect'
 
 // Sample N evenly-spaced frames from a keypoints sequence
 export function sampleKeyFrames(frames: PoseFrame[], count = 5): PoseFrame[] {

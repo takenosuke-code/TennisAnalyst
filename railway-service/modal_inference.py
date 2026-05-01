@@ -300,6 +300,24 @@ def extract_pose(payload: dict):
     # URLs change per signed token, content doesn't.
     cache_key = hashlib.sha256(r.content[:256 * 1024]).hexdigest()
     cache_key = f"{cache_key}:fps={sample_fps}"
+    # Append a hash of the two-pass peak-pick + padding constants so a
+    # tuning change to refractory_ms / pre_pad / post_pad / smoothing /
+    # threshold_k transparently invalidates stale cached keypoints
+    # without requiring a manual POSE_CACHE_MODEL_VERSION bump. The
+    # public extract_pose entrypoint always invokes the orchestrator
+    # (extract_keypoints_from_video defaults two_pass=True), so every
+    # request that takes the candidate-windows path keys with the
+    # current hash. Defined in extraction.py to keep the param tuple
+    # and the hash function in lockstep with the detector itself.
+    try:
+        from extraction import two_pass_params_hash
+        cache_key = f"{cache_key}:tp={two_pass_params_hash()}"
+    except Exception as e:  # noqa: BLE001
+        # Don't take the request down on a cache-key extension error —
+        # log loudly and key on the legacy (sha256:fps) shape so the
+        # request still completes. This bypasses the two-pass-params
+        # invalidation but keeps inference flowing.
+        print(f"[extract] two_pass_params_hash unavailable (non-fatal): {e}")
     try:
         cached = clip_cache.get(cache_key)
     except Exception as e:  # noqa: BLE001

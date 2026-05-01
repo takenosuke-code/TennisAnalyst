@@ -20,16 +20,18 @@ type Correction = 'correct' | 'too_easy' | 'too_hard'
 type FeedbackState = 'idle' | 'sending' | 'sent' | 'error'
 
 // Section names emitted by /api/analyze. The route streams markdown with
-// these three H2 headers in this order; the parser below splits the
-// accumulated text into them. Anything outside the canonical three is
+// these H2 headers in this order; the parser below splits the
+// accumulated text into them. Anything outside the canonical set is
 // dropped on the floor (the route is the contract; if it adds a section
 // later, surface it here).
+const QUICK_READ = 'Quick Read'
 const PRIMARY = 'Primary cue'
 const OTHER = 'Other things I noticed'
+const DRILLS = 'Recommended drills'
 const SHOW_WORK = 'Show your work'
 
 /**
- * Split streamed markdown into the three canonical sections. Operates on
+ * Split streamed markdown into the canonical sections. Operates on
  * the WHOLE accumulated string (not per-chunk) so a chunk that lands
  * mid-header (e.g. "## Pri" then "mary cue\n…") still parses correctly
  * once the next chunk arrives.
@@ -38,14 +40,23 @@ const SHOW_WORK = 'Show your work'
  * uses this to progressively reveal sections as they stream in.
  */
 function parseSections(text: string): {
+  quickRead: string | null
   primary: string | null
   other: string | null
+  drills: string | null
   showWork: string | null
 } {
-  if (!text) return { primary: null, other: null, showWork: null }
+  if (!text)
+    return {
+      quickRead: null,
+      primary: null,
+      other: null,
+      drills: null,
+      showWork: null,
+    }
 
   // Split on H2 headers. The first chunk before any header is dropped
-  // (the API contract starts with "## Primary cue").
+  // (the API contract starts with "## Quick Read").
   const parts = text.split(/^## /m)
   // parts[0] is the prelude before the first header; ignore.
   const sections: Record<string, string> = {}
@@ -64,8 +75,10 @@ function parseSections(text: string): {
     }
   }
   return {
+    quickRead: sections[QUICK_READ] ?? null,
     primary: sections[PRIMARY] ?? null,
     other: sections[OTHER] ?? null,
+    drills: sections[DRILLS] ?? null,
     showWork: sections[SHOW_WORK] ?? null,
   }
 }
@@ -320,8 +333,10 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
             <>
               {isLowConfidence && <LowConfidenceBanner />}
               <CoachingSections
+                quickRead={sections.quickRead}
                 primary={sections.primary}
                 other={sections.other}
+                drills={sections.drills}
                 showWork={sections.showWork}
                 loading={loading}
               />
@@ -370,26 +385,41 @@ function EmptyStateMessage({ text }: { text: string }) {
   )
 }
 
-/** Primary cue + Other observations + collapsible Show-your-work.
- *  Sections render progressively: primary appears as soon as its body
- *  starts streaming, even before "Other" arrives. */
+/** Quick Read + Primary cue + Other observations + Recommended drills + collapsible
+ *  Show-your-work. Sections render progressively as they stream in.
+ *  Visual hierarchy (per user direction):
+ *   - Quick Read: skim-first card at top, clay accent.
+ *   - Primary cue: scaled-down body paragraph, less shouty than before.
+ *   - Other things I noticed: now the loud section — heavier heading,
+ *     panel background, slightly larger bullets.
+ *   - Recommended drills: clear pre-disclosure section, ink-soft tint.
+ *   - Show your work: collapsed details element. */
 function CoachingSections({
+  quickRead,
   primary,
   other,
+  drills,
   showWork,
   loading,
 }: {
+  quickRead: string | null
   primary: string | null
   other: string | null
+  drills: string | null
   showWork: string | null
   loading: boolean
 }) {
   // If nothing has parsed yet but we're still loading, show a thinking
   // indicator so the panel doesn't look frozen.
-  const nothingYet = primary == null && other == null && showWork == null
+  const nothingYet =
+    quickRead == null &&
+    primary == null &&
+    other == null &&
+    drills == null &&
+    showWork == null
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       {nothingYet && loading && (
         <p className="text-ink/50 text-sm flex items-center gap-2">
           <span className="inline-block w-1.5 h-4 bg-clay animate-pulse" />
@@ -397,26 +427,47 @@ function CoachingSections({
         </p>
       )}
 
-      {primary != null && (
+      {quickRead != null && (
         <div className="bg-cream-soft border-l-4 border-clay p-5">
-          <p className="text-[11px] uppercase tracking-[0.18em] text-ink/50 mb-2">
+          <p className="text-[11px] uppercase tracking-[0.18em] text-clay mb-3 font-semibold">
+            Quick Read
+          </p>
+          <BulletList markdown={quickRead} />
+          {loading && quickRead.trim() && (
+            <span className="inline-block w-1.5 h-4 bg-clay animate-pulse mt-1" />
+          )}
+        </div>
+      )}
+
+      {primary != null && (
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.18em] text-ink/50 mb-1.5">
             Primary cue
           </p>
-          <p className="font-display text-xl sm:text-2xl text-ink leading-snug">
+          <p className="text-base text-ink/85 leading-relaxed">
             {primary.trim()}
             {loading && primary.trim() && (
-              <span className="inline-block w-1.5 h-5 bg-clay animate-pulse ml-1 align-middle" />
+              <span className="inline-block w-1.5 h-4 bg-clay animate-pulse ml-1 align-middle" />
             )}
           </p>
         </div>
       )}
 
       {other != null && (
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.18em] text-ink/50 mb-2">
-            Other things I noticed
+        <div className="bg-green-wash/10 border border-ink/10 p-5">
+          <p className="text-xs uppercase tracking-[0.18em] text-ink font-bold mb-3">
+            Other Things I Noticed
           </p>
-          <BulletList markdown={other} />
+          <BulletList markdown={other} prominent />
+        </div>
+      )}
+
+      {drills != null && (
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.18em] text-ink/50 mb-2 font-semibold">
+            Recommended drills
+          </p>
+          <BulletList markdown={drills} />
         </div>
       )}
 
@@ -455,7 +506,15 @@ function Caret() {
 /** Render a markdown bullet list. Supports `- ` and `* ` markers, plus
  *  inline **bold**. Anything that isn't a bullet is rendered as a
  *  paragraph (some sections occasionally narrate before listing). */
-function BulletList({ markdown, dense = false }: { markdown: string; dense?: boolean }) {
+function BulletList({
+  markdown,
+  dense = false,
+  prominent = false,
+}: {
+  markdown: string
+  dense?: boolean
+  prominent?: boolean
+}) {
   const lines = markdown.split('\n').map((l) => l.trimEnd())
   const items: { kind: 'bullet' | 'para'; text: string }[] = []
   for (const raw of lines) {
@@ -472,15 +531,25 @@ function BulletList({ markdown, dense = false }: { markdown: string; dense?: boo
   const bullets = items.filter((i) => i.kind === 'bullet')
   const paras = items.filter((i) => i.kind === 'para')
 
+  const paraClass = prominent
+    ? 'text-base text-ink/85 leading-relaxed'
+    : 'text-sm text-ink/75 leading-relaxed'
+
+  const ulClass = dense
+    ? 'list-disc pl-5 space-y-0.5 text-xs text-ink/75 leading-relaxed marker:text-ink/30'
+    : prominent
+      ? 'list-disc pl-5 space-y-1.5 text-base text-ink/85 leading-relaxed marker:text-clay'
+      : 'list-disc pl-5 space-y-1 text-sm text-ink/75 leading-relaxed marker:text-ink/30'
+
   return (
     <div className={dense ? 'space-y-1' : 'space-y-1.5'}>
       {paras.map((p, i) => (
-        <p key={`p-${i}`} className="text-sm text-ink/75 leading-relaxed">
+        <p key={`p-${i}`} className={paraClass}>
           <InlineMarkdown text={p.text} />
         </p>
       ))}
       {bullets.length > 0 && (
-        <ul className={`list-disc pl-5 ${dense ? 'space-y-0.5 text-xs' : 'space-y-1 text-sm'} text-ink/75 leading-relaxed marker:text-ink/30`}>
+        <ul className={ulClass}>
           {bullets.map((b, i) => (
             <li key={`b-${i}`}>
               <InlineMarkdown text={b.text} />

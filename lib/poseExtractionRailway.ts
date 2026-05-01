@@ -31,6 +31,12 @@ export type RailwayExtractOptions = {
   // row (and flips status to 'complete' or 'error') when it finishes.
   sessionId: string
   blobUrl: string
+  // Optional lowercase-hex SHA-256 of the source file bytes. When
+  // present, the server consults the pose_cache table and short-
+  // circuits with the cached keypoints if the bytes were extracted
+  // before — saving the full Modal extraction wallclock. Omit to
+  // bypass the cache.
+  sha256?: string
   // Called with 0..100. Since Railway's /extract is fire-and-poll,
   // we can't emit real progress — this callback just advances through
   // best-guess checkpoints (25, 50, 75) over time. The UI shouldn't
@@ -87,7 +93,7 @@ function buildExtractResultFromKeypoints(
 export async function extractPoseViaRailway(
   opts: RailwayExtractOptions,
 ): Promise<ExtractResult> {
-  const { sessionId, blobUrl, onProgress, abortSignal } = opts
+  const { sessionId, blobUrl, sha256, onProgress, abortSignal } = opts
 
   if (abortSignal?.aborted) {
     throw new RailwayExtractError('aborted before start', 'aborted')
@@ -95,11 +101,12 @@ export async function extractPoseViaRailway(
 
   onProgress?.(10)
 
-  // Kick off the job.
+  // Kick off the job. Forward the sha256 when we have it so the server
+  // can serve a cached extraction without bothering Railway.
   const queueRes = await fetch('/api/extract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId, blobUrl }),
+    body: JSON.stringify({ sessionId, blobUrl, sha256 }),
     signal: abortSignal,
   })
 
