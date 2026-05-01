@@ -385,13 +385,14 @@ function EmptyStateMessage({ text }: { text: string }) {
   )
 }
 
-/** Quick Read + Primary cue + Other observations + Recommended drills + collapsible
- *  Show-your-work. Sections render progressively as they stream in.
+/** Quick Read + In-depth analysis (Primary cue + Other observations) +
+ *  Recommended drills + collapsible Show-your-work. Sections render
+ *  progressively as they stream in.
  *  Visual hierarchy (per user direction):
  *   - Quick Read: skim-first card at top, clay accent.
- *   - Primary cue: scaled-down body paragraph, less shouty than before.
- *   - Other things I noticed: now the loud section — heavier heading,
- *     panel background, slightly larger bullets.
+ *   - In-depth analysis: single panel grouping the primary cue (quiet
+ *     italic lead-in) with the secondary observations (the readable
+ *     focus — strong contrast, generous line-height).
  *   - Recommended drills: clear pre-disclosure section, ink-soft tint.
  *   - Show your work: collapsed details element. */
 function CoachingSections({
@@ -439,26 +440,20 @@ function CoachingSections({
         </div>
       )}
 
-      {primary != null && (
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.18em] text-ink/50 mb-1.5">
-            Primary cue
-          </p>
-          <p className="text-base text-ink/85 leading-relaxed">
-            {primary.trim()}
-            {loading && primary.trim() && (
-              <span className="inline-block w-1.5 h-4 bg-clay animate-pulse ml-1 align-middle" />
-            )}
-          </p>
-        </div>
-      )}
-
-      {other != null && (
-        <div className="bg-green-wash/10 border border-ink/10 p-5">
+      {(primary != null || other != null) && (
+        <div className="bg-cream-soft border border-ink/15 p-5">
           <p className="text-xs uppercase tracking-[0.18em] text-ink font-bold mb-3">
-            Other Things I Noticed
+            In-depth analysis
           </p>
-          <BulletList markdown={other} prominent />
+          {primary != null && (
+            <p className="text-sm text-ink/60 italic leading-relaxed mb-4">
+              {primary.trim()}
+              {loading && primary.trim() && (
+                <span className="inline-block w-1.5 h-4 bg-clay animate-pulse ml-1 align-middle" />
+              )}
+            </p>
+          )}
+          {other != null && <BulletList markdown={other} prominent />}
         </div>
       )}
 
@@ -532,13 +527,13 @@ function BulletList({
   const paras = items.filter((i) => i.kind === 'para')
 
   const paraClass = prominent
-    ? 'text-base text-ink/85 leading-relaxed'
+    ? 'text-base text-ink/95 leading-7'
     : 'text-sm text-ink/75 leading-relaxed'
 
   const ulClass = dense
     ? 'list-disc pl-5 space-y-0.5 text-xs text-ink/75 leading-relaxed marker:text-ink/30'
     : prominent
-      ? 'list-disc pl-5 space-y-1.5 text-base text-ink/85 leading-relaxed marker:text-clay'
+      ? 'list-disc pl-5 space-y-2 text-base text-ink/95 leading-7 marker:text-clay'
       : 'list-disc pl-5 space-y-1 text-sm text-ink/75 leading-relaxed marker:text-ink/30'
 
   return (

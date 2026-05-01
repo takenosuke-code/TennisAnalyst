@@ -164,15 +164,12 @@ describe('LLMCoachingPanel', () => {
       screen.getByText(/Contact stays a touch low through the strike/)
     ).toBeInTheDocument()
 
-    // Primary cue
-    expect(screen.getByText('Primary cue')).toBeInTheDocument()
+    // In-depth analysis groups Primary cue (italic lead-in) + Other observations
+    // under one heading.
+    expect(screen.getByText(/In-depth analysis/i)).toBeInTheDocument()
     expect(
       screen.getByText(/Stay low through contact/)
     ).toBeInTheDocument()
-
-    // Other observations (header is rendered as title-case "Other Things I Noticed"
-    // for visual prominence per the new design).
-    expect(screen.getByText(/Other Things I Noticed/i)).toBeInTheDocument()
     expect(
       screen.getByText(/Your hip rotation kicked in slightly later/)
     ).toBeInTheDocument()
@@ -210,8 +207,7 @@ describe('LLMCoachingPanel', () => {
     render(<LLMCoachingPanel />)
 
     expect(screen.getByText('Quick Read')).toBeInTheDocument()
-    expect(screen.queryByText('Primary cue')).not.toBeInTheDocument()
-    expect(screen.queryByText(/Other Things I Noticed/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/In-depth analysis/i)).not.toBeInTheDocument()
     expect(screen.queryByText('Recommended drills')).not.toBeInTheDocument()
     expect(screen.queryByText('Show your work')).not.toBeInTheDocument()
   })
@@ -239,8 +235,8 @@ describe('LLMCoachingPanel', () => {
     expect(
       screen.getByText(/We couldn.t read your swing clearly enough/)
     ).toBeInTheDocument()
-    // No Primary-cue heading, no disclosure in empty state.
-    expect(screen.queryByText('Primary cue')).not.toBeInTheDocument()
+    // No In-depth analysis heading, no disclosure in empty state.
+    expect(screen.queryByText(/In-depth analysis/i)).not.toBeInTheDocument()
     expect(screen.queryByText('Show your work')).not.toBeInTheDocument()
   })
 
