@@ -97,7 +97,18 @@ export default function AnalyzePage() {
         .filter((s) => s.frames.length > 0)
       if (fromSegments.length > 0) return fromSegments
     }
-    return detectSwings(allFrames, { dropRejected: true, verifyShape: true })
+    // 2026-05 — temporarily reverted to no-options detectSwings.
+    // Both dropRejected: true (scoreStrokes filtering) and
+    // verifyShape: true (kinetic-chain verifier) were rejecting too
+    // many real swings on amateur-quality pose, leaving the swing
+    // grid empty. The flags remain plumbed through
+    // detectSwings/detectStrokes so they can be re-enabled (behind a
+    // feature flag or a profile setting) once we have user clips to
+    // calibrate thresholds against. The wrist-speed prominence +
+    // Voronoi-boundary core still runs by default, which already
+    // suppresses most over-detection noise without rejecting real
+    // swings.
+    return detectSwings(allFrames)
   }, [segments, allFrames])
   const hasMultipleSwings = swings.length > 1
 
