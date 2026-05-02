@@ -8,6 +8,20 @@ import { useUser } from '@/hooks/useUser'
 import type { Baseline } from '@/lib/supabase'
 import type { JointGroup } from '@/lib/jointAngles'
 
+// Probe the blob URL with a HEAD request before rendering the video.
+// Saves the user a confusing blank/black <video> state when the
+// underlying file has been deleted (e.g. by the bulk-cleanup script
+// or a Vercel Blob quota purge) — the row in user_baselines is still
+// there but its blob_url is dead.
+async function probeBlob(url: string, signal: AbortSignal): Promise<boolean> {
+  try {
+    const res = await fetch(url, { method: 'HEAD', signal })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 const ALL_VISIBLE: Record<JointGroup, boolean> = {
   shoulders: true,
   elbows: true,
@@ -34,6 +48,8 @@ export default function BaselineWatchPage({ params }: { params: Promise<{ id: st
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showOverlay, setShowOverlay] = useState(true)
+  const [videoMissing, setVideoMissing] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   useEffect(() => {
     if (authLoading) return
@@ -41,20 +57,30 @@ export default function BaselineWatchPage({ params }: { params: Promise<{ id: st
       router.replace(`/login?next=/baseline/${id}`)
       return
     }
+    const abort = new AbortController()
     let cancelled = false
     setLoading(true)
-    fetch(`/api/baselines/${encodeURIComponent(id)}`)
+    setVideoMissing(false)
+    fetch(`/api/baselines/${encodeURIComponent(id)}`, { signal: abort.signal })
       .then(async (r) => {
         if (!r.ok) throw new Error((await r.json()).error || `HTTP ${r.status}`)
         return r.json()
       })
-      .then((body: { baseline: Baseline }) => {
+      .then(async (body: { baseline: Baseline }) => {
         if (cancelled) return
         setBaseline(body.baseline)
         setError(null)
+        // HEAD-probe the blob URL. If the file is gone, render a
+        // "video unavailable" branch with a delete option instead of
+        // letting the <video> element fall into its silent error
+        // state. Skips the probe when we have no URL to check.
+        if (body.baseline?.blob_url) {
+          const alive = await probeBlob(body.baseline.blob_url, abort.signal)
+          if (!cancelled) setVideoMissing(!alive)
+        }
       })
       .catch((e: Error) => {
-        if (cancelled) return
+        if (cancelled || e.name === 'AbortError') return
         setError(e.message)
       })
       .finally(() => {
@@ -63,8 +89,29 @@ export default function BaselineWatchPage({ params }: { params: Promise<{ id: st
       })
     return () => {
       cancelled = true
+      abort.abort()
     }
   }, [authLoading, user, id, router])
+
+  const handleDelete = async () => {
+    if (!baseline || deleting) return
+    if (!confirm('Delete this baseline? The DB row is removed; the underlying video file is already gone.')) return
+    setDeleting(true)
+    try {
+      const res = await fetch(`/api/baselines/${encodeURIComponent(baseline.id)}`, {
+        method: 'DELETE',
+      })
+      if (!res.ok) {
+        setError((await res.json().catch(() => null))?.error ?? `HTTP ${res.status}`)
+        setDeleting(false)
+        return
+      }
+      router.push('/baseline')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Delete failed')
+      setDeleting(false)
+    }
+  }
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-8">
@@ -122,14 +169,44 @@ export default function BaselineWatchPage({ params }: { params: Promise<{ id: st
             </div>
           </div>
 
-          <VideoCanvas
-            src={baseline.blob_url}
-            framesData={baseline.keypoints_json?.frames ?? []}
-            visible={showOverlay ? ALL_VISIBLE : ALL_HIDDEN}
-            showSkeleton={showOverlay}
-            showAngles={showOverlay}
-            shotType={baseline.shot_type}
-          />
+          {videoMissing ? (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-6 space-y-3">
+              <p className="text-amber-200 font-semibold">
+                Video file no longer available
+              </p>
+              <p className="text-amber-100/80 text-sm leading-relaxed">
+                The underlying recording for this baseline has been deleted
+                from storage (probably by a quota cleanup or the bulk-delete
+                script). The pose data is still saved on this row, but the
+                video itself can&apos;t be played back. Save a fresh swing
+                as your baseline to replace it.
+              </p>
+              <div className="flex gap-2 pt-1">
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  className="px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-200 text-xs font-semibold transition-colors disabled:opacity-50"
+                >
+                  {deleting ? 'Deleting…' : 'Delete this baseline'}
+                </button>
+                <Link
+                  href="/analyze"
+                  className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 hover:text-white text-xs font-semibold transition-colors"
+                >
+                  Record a new one
+                </Link>
+              </div>
+            </div>
+          ) : (
+            <VideoCanvas
+              src={baseline.blob_url}
+              framesData={baseline.keypoints_json?.frames ?? []}
+              visible={showOverlay ? ALL_VISIBLE : ALL_HIDDEN}
+              showSkeleton={showOverlay}
+              showAngles={showOverlay}
+              shotType={baseline.shot_type}
+            />
+          )}
         </>
       )}
     </div>

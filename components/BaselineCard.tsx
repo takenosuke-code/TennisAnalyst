@@ -35,6 +35,7 @@ export default function BaselineCard({ baseline, onSetActive, onRename, onDelete
   const [editing, setEditing] = useState(false)
   const [labelDraft, setLabelDraft] = useState(baseline.label)
   const [busy, setBusy] = useState(false)
+  const [thumbBroken, setThumbBroken] = useState(false)
 
   const submitRename = async () => {
     const next = labelDraft.trim()
@@ -69,15 +70,29 @@ export default function BaselineCard({ baseline, onSetActive, onRename, onDelete
         <Link
           href={`/baseline/${baseline.id}`}
           className="shrink-0 group relative"
-          title="Watch with pose overlay"
+          title={thumbBroken ? 'Video file no longer available' : 'Watch with pose overlay'}
         >
-          <video
-            src={baseline.blob_url}
-            className="w-24 h-24 object-cover bg-ink"
-            muted
-            playsInline
-            preload="metadata"
-          />
+          {thumbBroken ? (
+            // Video missing fallback — clear visual signal that the
+            // file was deleted (quota cleanup / bulk-delete script)
+            // even though the row is still in the DB.
+            <div className="w-24 h-24 bg-ink/80 flex flex-col items-center justify-center gap-1 text-amber-300/90">
+              <svg viewBox="0 0 24 24" className="w-6 h-6" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v6M12 16v.5" strokeLinecap="round" />
+              </svg>
+              <span className="text-[10px] uppercase tracking-wider font-semibold">Missing</span>
+            </div>
+          ) : (
+            <video
+              src={baseline.blob_url}
+              className="w-24 h-24 object-cover bg-ink"
+              muted
+              playsInline
+              preload="metadata"
+              onError={() => setThumbBroken(true)}
+            />
+          )}
           <div className="absolute inset-0 bg-ink/0 group-hover:bg-ink/40 flex items-center justify-center transition-colors">
             <svg viewBox="0 0 24 24" className="w-6 h-6 fill-cream opacity-0 group-hover:opacity-100 transition-opacity">
               <polygon points="5,3 19,12 5,21" />
