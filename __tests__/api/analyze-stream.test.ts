@@ -429,9 +429,11 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
       },
       skipped: false,
     })
-    // All 3 attempts dirty.
+    // All 3 attempts dirty. "joint angle" stays banned in the loosened
+    // 2026-05 voice rules, so the fixture is still rejected by the
+    // post-filter on every attempt and the static fallback fires.
     for (let i = 0; i < 3; i++) {
-      responseQueue.push('Bad output with the kinetic chain explanation.')
+      responseQueue.push('Bad output that mentions a joint angle.')
     }
 
     const { POST } = await import('@/app/api/analyze/route')
@@ -452,7 +454,7 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
     expect(body).toContain('## Show your work')
     const showIdx = body.indexOf('## Show your work')
     const beforeShow = body.slice(0, showIdx)
-    expect(beforeShow).not.toMatch(/kinetic chain/i)
+    expect(beforeShow).not.toMatch(/joint angle/i)
     expect(beforeShow).not.toMatch(/\d/)
   })
 

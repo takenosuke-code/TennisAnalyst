@@ -8,16 +8,21 @@
  * register.
  *
  * Voice rules these exemplars all obey:
- *   - imperative, second person ("Sit deeper", "Reach out")
  *   - one issue per cue
- *   - no numbers, no em-dashes, no biomech jargon
- *   - external focus by default (attention on racket, ball, or court target)
+ *   - no numbers, no degrees, no em-dashes, no "joint angle"
+ *   - external focus where natural (attention on racket, ball, court target)
  *   - 2-3 outcome/holistic alternates included for variety
  *
- * Phrasings are split into `plain` (beginner-friendly: bodies and racket
- * landmarks the player already knows) and `technical` (skilled-player register:
- * stance/load, contact window, racket lag). The route picks one or the other
- * based on the player's skill_tier.
+ * Phrasings are split into two registers:
+ *   - `plain`: beginner-friendly imperative coach voice ("Sit deeper",
+ *     "Reach out"). Bodies and racket landmarks the player already knows.
+ *   - `technical`: ADVISOR voice for skilled players. Strength + gap
+ *     framing ("Your X is excellent, however Y shows room for
+ *     improvement, which limits Z"). Plain biomech terms like
+ *     "unit turn" and "kinetic chain" are welcome here. The LLM in
+ *     the analyze route imitates whichever register matches the
+ *     player's skill_tier; mixing the two confuses the model and
+ *     produces half-implemented voice.
  */
 
 import type { DeviationPattern, Observation, Phase } from './coachingObservations'
@@ -49,14 +54,14 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'cramped_elbow',
     phase: 'contact',
     plain: 'Reach out and meet the ball in front of your hip.',
-    technical: 'Catch the ball in the contact window forward of the trunk, racket arm long.',
+    technical: 'Your wrist position at contact is excellent, however your horizontal extension shows room for improvement, which jams the racket against the trunk and shortens your hitting window.',
     externalFocus: true,
   },
   {
     pattern: 'cramped_elbow',
     phase: 'contact',
     plain: 'Give yourself room to swing, step away from the ball just a little.',
-    technical: 'Take the ball earlier so the contact point clears the front hip.',
+    technical: 'Your timing on the take-back is solid, but your contact point is drifting behind the front hip, which crowds the elbow and steals the long arm you usually swing with.',
     externalFocus: true,
   },
 
@@ -65,14 +70,14 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'over_extended_elbow',
     phase: 'contact',
     plain: 'Keep the arm relaxed at contact, a soft bend through the ball.',
-    technical: 'Hold a soft elbow through the contact window, keep the arm forgiving.',
+    technical: 'Your reach into the ball is professional and the contact window is forward, however the arm is locking out at contact, which kills the racket-head whip and drops the swing into push territory.',
     externalFocus: true,
   },
   {
     pattern: 'over_extended_elbow',
     phase: 'contact',
     plain: 'Let the racket head do the work, your arm guides, it does not push.',
-    technical: 'Relax the racket arm at contact, the racket head whips through on its own.',
+    technical: 'Your spacing from the ball is good, but the racket arm is fully straightening at contact, which trades the relaxed lag of an expert swing for a stiff arm-driven push.',
     externalFocus: true,
   },
 
@@ -81,14 +86,14 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'shallow_knee_load',
     phase: 'loading',
     plain: 'Sit deeper into your back leg before the ball arrives.',
-    technical: 'Load the trail leg before contact, drive up through it.',
+    technical: 'Your stance width on the load is professional and gives a strong base, however the legs are staying tall through the backswing, which leaves real room for improvement in using the ground for power.',
     externalFocus: true,
   },
   {
     pattern: 'shallow_knee_load',
     phase: 'loading',
     plain: 'Bend the knees and feel the ground push you up into the ball.',
-    technical: 'Settle into a deeper stance load, then explode up through the shot.',
+    technical: 'Your trail leg is set early, but the load itself is shallow, which breaks the kinetic chain at the bottom and forces the arm to make up the missing power.',
     externalFocus: false,
   },
 
@@ -97,14 +102,14 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'locked_knees',
     phase: 'loading',
     plain: 'Bend your knees, get low and settle into the shot.',
-    technical: 'Unlock the knees on the load, drop your hips into a low stance.',
+    technical: 'Your stance is balanced and centered, however your legs are staying locked tall through the load, which removes the spring you would otherwise drive up off the ground.',
     externalFocus: true,
   },
   {
     pattern: 'locked_knees',
     phase: 'loading',
     plain: 'Soft knees, like you are about to jump.',
-    technical: 'Stay athletic in the legs, ready to drive up through contact.',
+    technical: 'Your foot positioning is on point, but the knees are reading rigid through the load, which limits the athletic drive that an expert-level forehand relies on.',
     externalFocus: false,
   },
 
@@ -113,14 +118,14 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'insufficient_hip_excursion',
     phase: 'preparation',
     plain: 'Turn your belt buckle toward the side fence, then drive it at the target.',
-    technical: 'Coil the hips early, lead the forward swing with the pelvis.',
+    technical: 'Your shoulder turn shows good intent, however the hips are barely rotating into the load, which shallows your unit turn and forces the upper body to start the swing without the pelvis leading.',
     externalFocus: true,
   },
   {
     pattern: 'insufficient_hip_excursion',
     phase: 'preparation',
     plain: 'Get your hips moving first, the arm comes along after.',
-    technical: 'Start the swing from the ground up, hips fire before the trunk.',
+    technical: 'Your preparation timing is solid, but the hips are not coiling deeply enough into the side fence, which breaks the kinetic chain that should fire from the ground up.',
     externalFocus: false,
   },
 
@@ -129,14 +134,14 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'insufficient_trunk_excursion',
     phase: 'preparation',
     plain: 'Show your back to the net during your turn.',
-    technical: 'Coil the upper body further than the hips, store the stretch.',
+    technical: 'Your hip coil is showing good depth, however the upper body is not rotating past the hips, which removes the stretch separation an expert-level uncoiling relies on.',
     externalFocus: true,
   },
   {
     pattern: 'insufficient_trunk_excursion',
     phase: 'preparation',
     plain: 'Turn the shoulders fully, point your chin at your front shoulder.',
-    technical: 'Complete the unit turn, chest pointing at the side fence before forward swing.',
+    technical: 'Your unit turn starts on time, but the shoulders are stalling short of the side fence, which leaves the chest pointing forward at a moment when it should still be facing the side.',
     externalFocus: true,
   },
 
@@ -145,7 +150,7 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'insufficient_unit_turn',
     phase: 'preparation',
     plain: 'Turn sideways early, racket and shoulders move together as one piece.',
-    technical: 'Make the unit turn the first move after the split step, racket stays linked.',
+    technical: 'Your reaction off the split step is clean, however the unit turn is shallow with the racket and shoulders moving separately, which places more stress on the arm rather than letting the kinetic chain do the work.',
     externalFocus: true,
   },
 
@@ -154,14 +159,14 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'truncated_followthrough',
     phase: 'follow-through',
     plain: 'Finish with the racket wrapped over your other shoulder.',
-    technical: 'Carry the swing into a full follow through, racket clears past the trunk.',
+    technical: 'Your balance through the follow-through is advanced, however the completion of the stroke is slightly abbreviated, which may be affecting your ability to pull the ball deep into the court.',
     externalFocus: true,
   },
   {
     pattern: 'truncated_followthrough',
     phase: 'follow-through',
     plain: 'Swing through the ball, do not stop at it.',
-    technical: 'Accelerate past contact, the deceleration happens after the racket clears.',
+    technical: 'Your contact is solid and forward, but the racket is decelerating into the ball rather than past it, which abbreviates the follow-through and bleeds depth off the shot.',
     externalFocus: false,
   },
 
@@ -170,14 +175,14 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'weak_leg_drive',
     phase: 'contact',
     plain: 'Push up through your legs into the ball, finish a little taller than you started.',
-    technical: 'Drive vertically off the back leg into contact, the legs power the swing.',
+    technical: 'Your stance width gives you a great foundation, however you are staying relatively tall through the backswing, which limits your ability to use the ground for power.',
     externalFocus: false,
   },
   {
     pattern: 'weak_leg_drive',
     phase: 'contact',
     plain: 'Sit deeper before you swing, then explode up through the shot.',
-    technical: 'Load the back leg, then extend it through contact and let the swing flow up the body.',
+    technical: 'Your unit turn loads the upper body well, but the legs are not extending vertically through contact, which removes the kinetic chain push and forces the arm to carry the shot.',
     externalFocus: false,
   },
 
@@ -186,14 +191,14 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'short_pushout',
     phase: 'follow-through',
     plain: 'Send the racket out toward where you want the ball to go before it wraps over your shoulder.',
-    technical: 'Extend through the line of the shot before the racket comes across the body.',
+    technical: 'Your follow-through path comes across the body cleanly, however the racket is wrapping early without extending toward the target, which is currently affecting your ability to pull the ball deep through the court.',
     externalFocus: true,
   },
   {
     pattern: 'short_pushout',
     phase: 'follow-through',
     plain: 'Reach forward through the contact, do not stop the racket at the ball.',
-    technical: 'Carry the racket head out toward the target on the follow-through path.',
+    technical: 'Your contact point sits forward of the body, but the racket head is not pushing out along the line of the shot before it wraps, which shortens the hitting zone and softens depth.',
     externalFocus: true,
   },
 
@@ -202,14 +207,14 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     pattern: 'unstable_base',
     phase: 'contact',
     plain: 'Keep your head still through contact, like balancing a glass of water on top.',
-    technical: 'Hold the head and the eyes quiet through contact, balance stays over the front foot.',
+    technical: 'Your stance load is set up well, however the head is drifting laterally through contact, which trades a stable platform for a moving one and makes the contact point inconsistent.',
     externalFocus: false,
   },
   {
     pattern: 'unstable_base',
     phase: 'contact',
     plain: 'Stay tall and centered, do not fall away as you hit.',
-    technical: 'Stack the head over the hips through contact, no lateral drift off the shot.',
+    technical: 'Your weight transfer through the shot reads on time, but the upper body is falling away as you hit, which destabilizes the base just at the moment it should be quiet over the front foot.',
     externalFocus: false,
   },
 
@@ -217,13 +222,13 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
   {
     pattern: 'drift_from_baseline',
     plain: 'Get back to the swing that felt easy on your best day.',
-    technical: 'Anchor on the baseline shape of this stroke, match its rhythm and load.',
+    technical: 'Most of the swing is matching your baseline shape, however the named area has drifted from the version that felt easy on your best day, which is currently the difference between today and your reference clip.',
     externalFocus: false,
   },
   {
     pattern: 'drift_from_baseline',
     plain: 'Trust the shape that worked before, do not invent a new one mid point.',
-    technical: 'Reset to the baseline timing, let the well grooved version come back.',
+    technical: 'Your overall rhythm is on-pattern with the baseline, but the named area has shifted off the well-grooved version, which suggests rebuilding from the baseline timing rather than chasing a new shape mid-rally.',
     externalFocus: false,
   },
 ]

@@ -62,24 +62,24 @@ const anthropic = new Anthropic({
 // then "Other things I noticed" listing secondary observations.
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `You are a veteran tennis coach. Talk like one.
+const SYSTEM_PROMPT = `You are a veteran tennis coach who talks like an analyst when explaining what you see and like a coach when telling the player what to do.
 Voice rules, no exceptions:
-1. Second person, imperative voice. Address the player directly.
-2. NEVER include numbers, digits, percentages, or counts.
-3. NEVER use em-dashes or en-dashes. Use full sentences or commas.
-4. NEVER use biomechanics jargon (no "kinetic chain", no "trunk_rotation", no "joint angle").
-5. External focus: attention on the racket, the ball, or a court target. Not on muscles.
-6. Plain coach language. Short sentences.
-7. Output exactly four markdown sections in this order: "## Quick Read", "## Primary cue", "## Other things I noticed", "## Recommended drills".
-8. "## Quick Read" is two or three short bullets summarizing the swing in plain words. The player reads this first and skims; keep each bullet under twelve words.
-9. "## Primary cue" is one short paragraph with the single most important fix.
-10. "## Other things I noticed" is a short bulleted list of secondary observations.
-11. "## Recommended drills" is two or three concrete on-court drills tied to the cues above. One drill per bullet, each one a single sentence the player can act on.
-12. Do not generate any other section. The server appends "## Show your work" after you.
-13. Do not narrate the observations. Coach them.`
+1. NEVER include numbers, digits, percentages, degrees, or counts. No "twelve", no "30%", no "twenty-three degrees" written out either. Describe magnitudes in plain words: "shallow", "deep", "professional-level", "significant room for improvement", "barely turning".
+2. NEVER use em-dashes or en-dashes. Use full sentences or commas. Hyphens inside compound words like "follow-through" are fine.
+3. Plain biomech terms are FINE: "unit turn", "kinetic chain", "follow-through", "load", "coil". Use them when they make the read tighter.
+4. NEVER use raw field names like "trunk_rotation" or "hip_rotation".
+5. NEVER use the phrase "joint angle" — no one knows what that means.
+6. External focus where natural: attention on the racket, the ball, or a court target. Internal cues are okay when the gap is about the body itself.
+7. STRENGTH + GAP framing applies in "## Primary cue" and "## Other things I noticed". Lead with what is working in the area you're about to critique, then name the gap and the consequence on the shot. Example shape: "Your wrist position at contact is excellent, however your horizontal extension shows room for improvement, which jams the racket against the body."
+8. Quick Read does NOT need strength + gap framing. Keep each bullet a snappy on-court read, under twelve words. Plain biomech terms like "unit turn shallow" are welcome — pair the term with a brief plain explanation in the same bullet when it helps ("Unit turn shallow, shoulders aren't turning enough").
+9. Output exactly four markdown sections in this order: "## Quick Read", "## Primary cue", "## Other things I noticed", "## Recommended drills".
+10. "## Primary cue" is one paragraph (three to five sentences) framed as strength + gap. Acknowledge what's working in the area you're naming, then describe the gap and its consequence.
+11. "## Other things I noticed" is a short bulleted list of secondary observations. Each bullet is one or two sentences in strength + gap form, leading with the strength.
+12. "## Recommended drills" is two or three concrete on-court drills tied to the cues above. One drill per bullet, each a single sentence the player can act on.
+13. Do not generate any other section. The server appends "## Show your work" after you.`
 
 // Stricter retry preamble — appended to the user prompt on a failed-output retry.
-const STRICT_RETRY_NOTE = `\n\nSTRICT RETRY: Your previous output included disallowed content (digits, em-dashes, or jargon). Rewrite from scratch with NO numbers, NO dashes other than hyphens inside compound words, and NO biomech terms. Use the exemplar voice exactly.`
+const STRICT_RETRY_NOTE = `\n\nSTRICT RETRY: Your previous output included disallowed content (digits, em-dashes, raw field names, or the phrase "joint angle"). Rewrite from scratch with NO numbers anywhere, NO dashes other than hyphens inside compound words, NO field names like trunk_rotation, and NO use of "joint angle". Plain biomech terms like "unit turn" and "kinetic chain" are still welcome. Use the exemplar voice exactly.`
 
 // Low-confidence path used to also prepend a markdown banner here, but
 // the UI now renders a styled banner above the sections from the
@@ -89,7 +89,12 @@ const STRICT_RETRY_NOTE = `\n\nSTRICT RETRY: Your previous output included disal
 // Patterns we reject in LLM output. Show your work is appended AFTER the
 // filter runs, so the digit pattern there does not trip it.
 const REJECT_DIGIT_RE = /\d/
-const REJECT_JARGON_RE = /(kinetic chain|trunk_rotation|hip_rotation|joint angle|—|–)/i
+// 2026-05 — voice loosened to advisor register. "kinetic chain" is now
+// allowed (the example output the user liked uses the term explicitly).
+// "joint angle" stays banned per user feedback ("no one understands it").
+// Underscored field names stay banned (they're SQL-shaped and never
+// user-facing). Em/en-dashes stay banned for typographic consistency.
+const REJECT_JARGON_RE = /(trunk_rotation|hip_rotation|joint angle|—|–)/i
 
 const MAX_LLM_RETRIES = 2 // primary + 2 retries = 3 total
 
@@ -221,16 +226,16 @@ ${secondaryLines}
 FORMAT — respond with EXACTLY four sections in this order, no other content:
 
 ## Quick Read
-Two or three short bullets summarizing the swing at a glance. Each bullet under twelve words. No numbers, no jargon, no em-dashes.
+Two or three snappy bullets summarizing the swing at a glance. Each bullet under twelve words. No numbers, no degrees, no em-dashes, no "joint angle". Plain biomech terms like "unit turn shallow" are welcome — pair the term with a brief plain explanation in the same bullet ("Unit turn shallow, shoulders aren't turning enough"). No strength + gap framing required here; this is the on-court glance read.
 
 ## Primary cue
-One short paragraph addressing the primary issue. Imperative, second person, no numbers, no jargon, no em-dashes.
+One paragraph (three to five sentences) framed as strength + gap. Acknowledge what's working in the named mechanical area first, then describe the gap and the consequence on the shot. No numbers, no degrees, no "joint angle". Plain biomech terms welcome ("unit turn", "kinetic chain", "follow-through").
 
 ## Other things I noticed
-One bullet for EVERY secondary observation listed above — do not drop any. Each bullet: imperative, single-issue, no numbers, no jargon, no em-dashes. The order can match severity. If there are no secondary observations, write a single bullet acknowledging the swing has otherwise hung together.
+One bullet for EVERY secondary observation listed above — do not drop any. Each bullet is one or two sentences in strength + gap form, leading with the strength. No numbers, no degrees, no "joint angle". If there are no secondary observations, write a single bullet acknowledging the rest of the swing is hanging together.
 
 ## Recommended drills
-Two or three concrete on-court drills tied to the cues above. One drill per bullet, each one a single sentence the player can act on. No numbers, no jargon, no em-dashes.`
+Two or three concrete on-court drills tied to the cues above. One drill per bullet, each a single sentence the player can act on. No numbers, no degrees, no em-dashes.`
 }
 
 /**
@@ -300,16 +305,16 @@ ${secondaryLines}
 FORMAT — respond with EXACTLY four sections in this order, no other content:
 
 ## Quick Read
-Two or three short bullets. Lead with how today compares to the baseline overall (close match, drifted in this one area, etc.). Each bullet under twelve words. No numbers, no jargon, no em-dashes.
+Two or three snappy bullets. Lead with how today compares to the baseline overall (close match, drifted in this one area, etc.). Each bullet under twelve words. No numbers, no degrees, no "joint angle". Plain biomech terms welcome.
 
 ## Primary cue
-One short paragraph addressing the PRIMARY DIFFERENCE above. Frame it as "today vs your baseline" — what changed, and how to bring it back. Imperative, second person, no numbers, no jargon, no em-dashes. If the difference is small or the player asked about something specific that the diff doesn't cover, acknowledge that the swing is largely on-pattern.
+One paragraph (three to five sentences) framed as strength + gap, applied to the diff. Acknowledge what's holding up vs the baseline first, then name the area that drifted and the consequence on the shot. No numbers, no degrees, no "joint angle". If the difference is small or the player asked about something specific that the diff doesn't cover, acknowledge that the swing is largely on-pattern.
 
 ## Other things I noticed
-One bullet for EVERY other difference listed above — do not drop any. Each bullet should describe a specific drift from baseline. If there are no other differences, write a single bullet acknowledging the rest of the swing is matching the baseline.
+One bullet for EVERY other difference listed above — do not drop any. Each bullet is one or two sentences in strength + gap form, leading with what's holding up vs the baseline before naming the drift. If there are no other differences, write a single bullet acknowledging the rest of the swing is matching the baseline.
 
 ## Recommended drills
-Two or three concrete on-court drills tied to the differences above. One drill per bullet, each a single sentence the player can act on. No numbers, no jargon, no em-dashes.`
+Two or three concrete on-court drills tied to the differences above. One drill per bullet, each a single sentence the player can act on. No numbers, no degrees, no em-dashes.`
 }
 
 /**
@@ -362,16 +367,16 @@ If you genuinely have to give one piece of feedback because the player asked, yo
 FORMAT — respond with EXACTLY four sections in this order, no other content:
 
 ## Quick Read
-Two or three short bullets. The first bullet says today matches the baseline. Other bullets can call out a specific area that held up well (hips, contact, finish). Each under twelve words. No numbers, no jargon, no em-dashes.
+Two or three snappy bullets. The first bullet says today matches the baseline. Other bullets can call out a specific area that held up well (unit turn, contact, finish). Each under twelve words. No numbers, no degrees, no "joint angle". Plain biomech terms welcome.
 
 ## Primary cue
-One short paragraph confirming today's swing is matching the baseline. Imperative, second person, no numbers, no jargon, no em-dashes. If the player asked a focus question, address it in plain language.
+One paragraph (three to five sentences) confirming today's swing is matching the baseline. Lead with the strongest area that held up. No numbers, no degrees, no "joint angle". Plain biomech terms welcome ("unit turn", "kinetic chain", "follow-through"). If the player asked a focus question, address it in plain language.
 
 ## Other things I noticed
-A short bulleted list (1-3 bullets) of areas that specifically held up. Frame as "your X is matching" or "the Y read the same as on your best day". No numbers, no jargon.
+A short bulleted list (one to three bullets) of areas that specifically held up. Each bullet one or two sentences. Frame as "your X is matching" or "the Y read the same as on your best day". No numbers, no degrees, no "joint angle".
 
 ## Recommended drills
-Two or three drills focused on REPEATING this swing — grooving rhythm and contact point — not on fixing a fault. One drill per bullet, each a single sentence. No numbers, no jargon, no em-dashes.`
+Two or three drills focused on REPEATING this swing — grooving rhythm and contact point — not on fixing a fault. One drill per bullet, each a single sentence. No numbers, no degrees, no em-dashes.`
 }
 
 /**
@@ -422,16 +427,16 @@ ${userSummary}
 FORMAT — respond with EXACTLY four sections in this order, no other content:
 
 ## Quick Read
-Two or three short bullets summarizing the swing at a glance. Each bullet under twelve words. No numbers, no jargon, no em-dashes.
+Two or three snappy bullets summarizing the swing at a glance. Each bullet under twelve words. No numbers, no degrees, no "joint angle". Plain biomech terms welcome.
 
 ## Primary cue
-One short paragraph. Imperative, second person, no numbers, no jargon, no em-dashes. If the swing reads clean, lead with that.
+One paragraph (three to five sentences). Lead with what's working in the swing before adding any fine-tuning thought. No numbers, no degrees, no "joint angle". Plain biomech terms welcome ("unit turn", "kinetic chain", "follow-through"). If the swing reads clean, lead with that.
 
 ## Other things I noticed
-A short bulleted list (1-3 bullets) of general feel observations. If you genuinely have nothing to add, write a single bullet acknowledging the swing has otherwise hung together.
+A short bulleted list (one to three bullets) of general feel observations. Each bullet one or two sentences in strength + gap form, leading with what's holding up. If you genuinely have nothing to add, write a single bullet acknowledging the swing has otherwise hung together.
 
 ## Recommended drills
-Two or three concrete on-court drills any player at this level benefits from. One drill per bullet, each a single sentence the player can act on. No numbers, no jargon, no em-dashes.`
+Two or three concrete on-court drills any player at this level benefits from. One drill per bullet, each a single sentence the player can act on. No numbers, no degrees, no em-dashes.`
 }
 
 /**
@@ -528,7 +533,9 @@ function buildStaticFallback(args: {
   }
   lines.push('')
   lines.push('## Recommended drills')
-  lines.push('- Shadow swing ten reps focusing on the primary cue before your next rally.')
+  // Spelled-out counts ("ten reps") were stripped — voice rule says no
+  // counts at all, even in word form.
+  lines.push('- Shadow swing a few reps focusing on the primary cue before your next rally.')
   lines.push('- Feed yourself slow drop-hits and groove the contact point.')
   lines.push('- Mini-tennis from the service line, prioritizing rhythm over power.')
   return lines.join('\n')

@@ -11,7 +11,9 @@ import type { DeviationPattern, Observation } from '@/lib/coachingObservations'
 
 const FORBIDDEN_SUBSTRINGS = [
   // Biomech jargon
-  'kinetic chain',
+  // "kinetic chain" was loosened in 2026-05 — the example coaching
+  // language the product owner liked uses it explicitly, and the
+  // route's REJECT_JARGON_RE was relaxed to match.
   'trunk_rotation',
   'hip_rotation',
   'joint angle',
