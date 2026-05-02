@@ -24,7 +24,7 @@
  */
 
 import type { JointAngles, PoseFrame } from './supabase'
-import { detectSwings } from './jointAngles'
+import { detectSwings, RTMPOSE_FILLED_LANDMARK_IDS } from './jointAngles'
 import type { ShotType } from './shotTypeConfig'
 
 // ---------------------------------------------------------------------------
@@ -128,15 +128,31 @@ function clamp01(x: number): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Mean visibility across the landmarks of a frame. When the frame has no
- * landmarks (e.g. test fixtures that only set joint_angles), default to 1.0
- * so the confidence floor isn't tripped by the absence of data we never had.
+ * Mean visibility across the landmarks RTMPose actually fills (see
+ * lib/jointAngles.ts:RTMPOSE_FILLED_LANDMARK_IDS). The other 16 of 33
+ * BlazePose-33 slots ride along at visibility=0 on every Railway clip;
+ * averaging across all 33 deflated a clean clip's mean to ~0.40, which
+ * tripped the meanVis<0.4 short-circuit AND collapsed the multiplicative
+ * confidence gate downstream so most legitimate observations were
+ * silently dropped. When the frame has no landmarks (e.g. test fixtures
+ * that only set joint_angles), default to 1.0.
  */
+const RTMPOSE_FILLED_SET = new Set<number>(RTMPOSE_FILLED_LANDMARK_IDS)
+
 function frameVisibility(frame: PoseFrame): number {
   if (!frame.landmarks || frame.landmarks.length === 0) return 1.0
   let sum = 0
   let n = 0
   for (const l of frame.landmarks) {
+    // Only count landmarks the extractor is supposed to fill. Accept
+    // landmarks whose id matches the whitelist; if a frame omits the
+    // id field (older fixtures), fall back to non-zero (x,y) as the
+    // proxy for "real landmark".
+    const idOk =
+      typeof l.id === 'number'
+        ? RTMPOSE_FILLED_SET.has(l.id)
+        : !(l.x === 0 && l.y === 0)
+    if (!idOk) continue
     if (typeof l.visibility === 'number' && Number.isFinite(l.visibility)) {
       sum += l.visibility
       n += 1
@@ -169,21 +185,40 @@ function pickPeakFrame(frames: PoseFrame[]): PoseFrame | null {
 }
 
 /**
- * Excursion = max - min of an angle key across all frames in the primary
- * swing. Used for hip_rotation / trunk_rotation where the absolute reading is
- * camera-noisy but the change through the swing is robust.
+ * Excursion of an angle channel: total arc length traveled across the
+ * primary swing window. Signed atan2 angles can wrap at ±180°, and a
+ * symmetric rotation that crosses square-to-camera (+10° → 0° → -10°)
+ * has true excursion 20° but a naive max-min reports 10° if the line
+ * doesn't actually cross the wrap (or 360° if it does). Summing
+ * |shortDelta| across consecutive frames is correct in both cases.
  */
+function shortAngleDelta(a: number, b: number): number {
+  let d = b - a
+  while (d > 180) d -= 360
+  while (d <= -180) d += 360
+  return d
+}
+
 function angleExcursion(frames: PoseFrame[], key: keyof JointAngles): number | null {
-  let lo = Infinity
-  let hi = -Infinity
+  // Build a continuous (unwrapped) series via shortDelta, then take
+  // max - min. Unwrapping handles the ±180° wrap; max-min on the
+  // unwrapped series stays robust to per-frame jitter.
+  const unwrapped: number[] = []
+  let prev: number | null = null
   for (const f of frames) {
     const v = f.joint_angles?.[key]
-    if (typeof v === 'number' && Number.isFinite(v)) {
-      if (v < lo) lo = v
-      if (v > hi) hi = v
-    }
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue
+    const u: number = prev === null ? v : prev + shortAngleDelta(prev, v)
+    unwrapped.push(u)
+    prev = u
   }
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null
+  if (unwrapped.length === 0) return null
+  let lo = Infinity
+  let hi = -Infinity
+  for (const v of unwrapped) {
+    if (v < lo) lo = v
+    if (v > hi) hi = v
+  }
   return hi - lo
 }
 
@@ -444,7 +479,10 @@ function checkRotationExcursion(ctx: RuleContext): Observation[] {
 
   const hipExcursion = angleExcursion(ctx.shotFrames, 'hip_rotation')
   if (hipExcursion !== null) {
-    const target = 40
+    // Target relaxed 40 -> 25 to align with biomech-reference.ts:
+    // "Insufficient hip rotation: hip_rot stays flat (<20° change)".
+    // Old 40° punished clean amateur swings that rotated 30-35°.
+    const target = 25
     if (hipExcursion < target) {
       const margin = shortfallMargin(hipExcursion, target)
       const confidence = computeConfidence({
@@ -467,7 +505,11 @@ function checkRotationExcursion(ctx: RuleContext): Observation[] {
 
   const trunkExcursion = angleExcursion(ctx.shotFrames, 'trunk_rotation')
   if (trunkExcursion !== null) {
-    const target = 60
+    // Target relaxed 60 -> 30 to align with biomech-reference.ts:
+    // "Insufficient trunk rotation: trunk_rot changes <15° between
+    // loading and contact". Old 60° punished any amateur whose
+    // shoulders rotated less than an elite-grade 90° turn.
+    const target = 30
     if (trunkExcursion < target) {
       const margin = shortfallMargin(trunkExcursion, target)
       const confidence = computeConfidence({
@@ -490,10 +532,13 @@ function checkRotationExcursion(ctx: RuleContext): Observation[] {
 
   // Insufficient unit turn: BOTH excursions are small AND close together
   // (no separation). Treated as a separate, more emphatic pattern.
+  // Tightened (25/35 -> 18/22) to stay below the relaxed individual
+  // thresholds — fires only when both rotations are at or below the
+  // bare biomech minima (hip <20°, trunk <15°).
   if (hipExcursion !== null && trunkExcursion !== null) {
-    if (hipExcursion < 25 && trunkExcursion < 35) {
+    if (hipExcursion < 18 && trunkExcursion < 22) {
       const margin = clamp01(
-        Math.max(shortfallMargin(hipExcursion, 25), shortfallMargin(trunkExcursion, 35)),
+        Math.max(shortfallMargin(hipExcursion, 18), shortfallMargin(trunkExcursion, 22)),
       )
       const confidence = computeConfidence({
         landmarkVisibility: ctx.meanVis,
@@ -539,7 +584,11 @@ function checkFollowThrough(ctx: RuleContext): Observation[] {
   const finalTrunk = tailFrames[tailFrames.length - 1].joint_angles?.trunk_rotation
   if (typeof peakTrunk !== 'number' || typeof finalTrunk !== 'number') return out
 
-  const followThroughDelta = Math.abs(finalTrunk - peakTrunk)
+  // Use shortAngleDelta on signed atan2 angles — the previous
+  // Math.abs(finalTrunk - peakTrunk) had the same wrap bug as the old
+  // Math.abs in jointAngles. A trunk that rotates +10° -> 0° -> -10°
+  // would report follow-through delta 0° and falsely flag truncated.
+  const followThroughDelta = Math.abs(shortAngleDelta(peakTrunk, finalTrunk))
   const target = 15
   if (followThroughDelta < target) {
     const margin = shortfallMargin(followThroughDelta, target)

@@ -125,7 +125,7 @@ describe('computeJointAngles', () => {
     }
   })
 
-  it('computes hip_rotation as the absolute atan2 angle of the hip line', () => {
+  it('computes hip_rotation as the SIGNED atan2 angle of the hip line', () => {
     // Hips perfectly horizontal: lHip left of rHip
     const landmarks = [
       makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.3, 0.5),
@@ -147,6 +147,47 @@ describe('computeJointAngles', () => {
 
     // vec from lHip to rHip = (0.2, 0.2) => atan2(0.2, 0.2) = 45 degrees
     expect(angles.hip_rotation).toBeCloseTo(45, 0)
+  })
+
+  it('returns SIGNED hip_rotation (negative when rHip is above lHip)', () => {
+    // rHip is ABOVE and to the right of lHip — opposite tilt direction.
+    // The previous Math.abs implementation returned +45° here (wrong);
+    // signed math returns -45° so excursion across square-to-camera is
+    // correct.
+    const landmarks = [
+      makeLandmark(LANDMARK_INDICES.LEFT_HIP, 0.4, 0.7),
+      makeLandmark(LANDMARK_INDICES.RIGHT_HIP, 0.6, 0.5),
+    ]
+    const angles = computeJointAngles(landmarks)
+    expect(angles.hip_rotation).toBeCloseTo(-45, 0)
+  })
+
+  it('skips wrist angle when index landmark visibility is below 0.5', () => {
+    // RTMPose-2D leaves the LEFT_INDEX/RIGHT_INDEX landmarks at
+    // {x:0,y:0,visibility:0}. The angle calc must NOT compute a
+    // phantom wrist angle from that — it should return undefined so
+    // downstream consumers treat it as missing.
+    const landmarks = [
+      makeLandmark(LANDMARK_INDICES.RIGHT_SHOULDER, 0.6, 0.3),
+      makeLandmark(LANDMARK_INDICES.RIGHT_ELBOW, 0.65, 0.45),
+      makeLandmark(LANDMARK_INDICES.RIGHT_WRIST, 0.7, 0.6),
+      // Phantom index — present in the array but visibility=0
+      makeLandmark(LANDMARK_INDICES.RIGHT_INDEX, 0, 0, 0),
+    ]
+    const angles = computeJointAngles(landmarks)
+    expect(angles.right_wrist).toBeUndefined()
+  })
+
+  it('computes wrist angle when index landmark has real visibility', () => {
+    const landmarks = [
+      makeLandmark(LANDMARK_INDICES.RIGHT_SHOULDER, 0.6, 0.3),
+      makeLandmark(LANDMARK_INDICES.RIGHT_ELBOW, 0.65, 0.45),
+      makeLandmark(LANDMARK_INDICES.RIGHT_WRIST, 0.7, 0.6),
+      makeLandmark(LANDMARK_INDICES.RIGHT_INDEX, 0.75, 0.65),
+    ]
+    const angles = computeJointAngles(landmarks)
+    expect(angles.right_wrist).toBeDefined()
+    expect(typeof angles.right_wrist).toBe('number')
   })
 
   it('computes trunk_rotation for horizontal shoulders', () => {

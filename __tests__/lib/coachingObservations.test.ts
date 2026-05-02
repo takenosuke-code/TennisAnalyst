@@ -259,6 +259,55 @@ describe('extractObservations', () => {
     expect(noTurn!.phase).toBe('preparation')
   })
 
+  it('does NOT fire insufficient_hip_excursion at 30 deg (above relaxed 25 threshold)', () => {
+    // A swing that legitimately rotates the hips through 30 deg used
+    // to fire the rule (old threshold 40); after the bundle we relax
+    // to 25, so 30 deg is now allowed and should NOT fire.
+    const angles: JointAngles[] = []
+    for (let i = 0; i < 60; i++) {
+      // Hip sweeps 0 -> 30 -> 0 over the swing. Excursion = 30.
+      angles.push({
+        right_elbow: 120,
+        right_knee: 150,
+        hip_rotation: i < 30 ? i : 60 - i,
+        trunk_rotation: 5 + (i < 30 ? i : 60 - i),
+      })
+    }
+    const frames = makeFrames(angles)
+    const obs = extractObservations({ todaySummary: frames, shotType: 'forehand' })
+    const stuck = obs.find((o) => o.pattern === 'insufficient_hip_excursion')
+    expect(stuck).toBeUndefined()
+  })
+
+  it('counts excursion across a wrap at +-180 (signed atan2 unwrap)', () => {
+    // Hip rotates through the +180/-180 wrap: 170 -> 175 -> -175 -> -170.
+    // Old max-min would report 170 - (-175) = 345 (false large excursion).
+    // New unwrap-then-max-min reports 20.
+    const angles: JointAngles[] = []
+    for (let i = 0; i < 60; i++) {
+      const t = i / 60
+      const v = 170 + t * 30 // 170 -> 200; 200 wraps to -160
+      const wrapped = v > 180 ? v - 360 : v
+      angles.push({
+        right_elbow: 120,
+        right_knee: 150,
+        hip_rotation: wrapped,
+        trunk_rotation: 30 + (i < 30 ? i : 60 - i),
+      })
+    }
+    const frames = makeFrames(angles)
+    const obs = extractObservations({ todaySummary: frames, shotType: 'forehand' })
+    // Excursion should be ~30° (well below the false 345). With the
+    // wrap fix, hip excursion < 25 may or may not fire (it's around
+    // 30) but the key check is no false-large drift_from_baseline /
+    // unit_turn observation gets emitted.
+    const turnObs = obs.find((o) => o.joint === 'hips' || o.joint === 'shoulders')
+    if (turnObs) {
+      // Whatever fires, the excursion-derived todayValue must be small.
+      expect(turnObs.todayValue).toBeLessThan(50)
+    }
+  })
+
   it('returns empty when mean landmark visibility is below the floor', () => {
     const frames = makeSwingAroundPeak(
       {

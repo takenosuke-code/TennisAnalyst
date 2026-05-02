@@ -20,6 +20,20 @@ export const LANDMARK_INDICES = {
   RIGHT_ANKLE: 28,
 }
 
+// IDs that are actually populated by the RTMPose -> BlazePose-33 mapping
+// (see lib/cocoToBlazepose.ts:COCO17_TO_BLAZEPOSE33). The other 16 of 33
+// BlazePose slots ride along at {x:0, y:0, visibility:0} on every Railway
+// extraction. Visibility-based gating MUST average over only these IDs;
+// folding the unfilled slots into the mean drops a clean clip to ~0.40
+// even when every real landmark is high-visibility, which then collapses
+// the multiplicative confidence gate downstream.
+export const RTMPOSE_FILLED_LANDMARK_IDS: readonly number[] = Object.freeze([
+  0,                                       // nose
+  2, 5, 7, 8,                              // eyes + ears
+  11, 12, 13, 14, 15, 16,                  // shoulders, elbows, wrists
+  23, 24, 25, 26, 27, 28,                  // hips, knees, ankles
+])
+
 // Joint groups for toggle visibility
 export const JOINT_GROUPS = {
   shoulders: [LANDMARK_INDICES.LEFT_SHOULDER, LANDMARK_INDICES.RIGHT_SHOULDER],
@@ -117,13 +131,21 @@ export function computeJointAngles(landmarks: Landmark[]): JointAngles {
     )
   }
   // Wrist flexion: elbow → wrist → index. 180° = straight, smaller = flexed.
-  if (rElbow && rWrist && rIndex) {
+  // RTMPose-2D doesn't predict the LEFT_INDEX / RIGHT_INDEX (ids 19/20)
+  // landmarks; cocoToBlazepose leaves them at {x:0, y:0, visibility:0}.
+  // Truthiness checks pass because getLandmark finds the slot, so we
+  // also gate on visibility ≥ 0.5 — without this the wrist angle is
+  // computed against a vector pointing at the image origin, which
+  // poisons every downstream consumer (kineticChain timing, cue rules,
+  // strokeQuality wrist-variance).
+  const INDEX_VIS_FLOOR = 0.5
+  if (rElbow && rWrist && rIndex && (rIndex.visibility ?? 1) >= INDEX_VIS_FLOOR) {
     angles.right_wrist = angleBetween(
       vec2(rWrist, rElbow),
       vec2(rWrist, rIndex)
     )
   }
-  if (lElbow && lWrist && lIndex) {
+  if (lElbow && lWrist && lIndex && (lIndex.visibility ?? 1) >= INDEX_VIS_FLOOR) {
     angles.left_wrist = angleBetween(
       vec2(lWrist, lElbow),
       vec2(lWrist, lIndex)
@@ -141,19 +163,21 @@ export function computeJointAngles(landmarks: Landmark[]): JointAngles {
       vec2(lKnee, lAnkle)
     )
   }
-  // Hip rotation approximated as angle of hip line relative to vertical
+  // Hip rotation: signed angle of the hip line in screen-space.
+  // Range (-180, 180]. Returning the SIGNED angle (was Math.abs(...))
+  // is required for excursion to be correct — a hip line that tilts
+  // +10° (loading) -> 0° (square) -> -10° (follow-through) has true
+  // arc 20°, but Math.abs collapses the negative side and reports
+  // max=10°, min=0°, excursion=10°. Downstream consumers (excursion,
+  // truncated_followthrough) now use signed math.
   if (lHip && rHip) {
     const hipVec = vec2(lHip, rHip)
-    angles.hip_rotation = Math.abs(
-      (Math.atan2(hipVec[1], hipVec[0]) * 180) / Math.PI
-    )
+    angles.hip_rotation = (Math.atan2(hipVec[1], hipVec[0]) * 180) / Math.PI
   }
-  // Trunk rotation: shoulder line angle
+  // Trunk rotation: signed shoulder-line angle. Same reasoning as hip.
   if (lShoulder && rShoulder) {
     const shoulderVec = vec2(lShoulder, rShoulder)
-    angles.trunk_rotation = Math.abs(
-      (Math.atan2(shoulderVec[1], shoulderVec[0]) * 180) / Math.PI
-    )
+    angles.trunk_rotation = (Math.atan2(shoulderVec[1], shoulderVec[0]) * 180) / Math.PI
   }
 
   return angles
