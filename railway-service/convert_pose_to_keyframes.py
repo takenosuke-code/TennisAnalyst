@@ -169,11 +169,14 @@ def main():
         pts = normalize_to_figure_space(raw, avg_hip, ref_scale)
         per_frame_pts.append(pts)
 
-    # 4. Smooth joint trajectories (5-frame centered moving average).
+    # 4. Smooth joint trajectories (7-frame centered moving average —
+    # bumped from 5 because user reported the racket arm reading as
+    # jittery; wider window kills more pose-extraction high-frequency
+    # noise at the cost of slightly attenuating peak velocities).
     smoothed = {}
     for name in JOINT_NAMES:
         series = [pts[name] for pts in per_frame_pts]
-        smoothed[name] = moving_average_2d(series, window=5)
+        smoothed[name] = moving_average_2d(series, window=7)
 
     # 5. Compute angles from smoothed positions.
     raw_angles = {key: [] for key in [
@@ -215,11 +218,13 @@ def main():
     FIXED_RACKET_LEN = 0.10
     racket_lens = [FIXED_RACKET_LEN] * n_window
 
-    # 6. Unwrap each angle channel + re-smooth.
+    # 6. Unwrap each angle channel + re-smooth (5-frame, bumped from
+    # 3 to give a noticeably smoother arc at the cost of slight peak
+    # attenuation).
     smoothed_angles = {}
     for key, series in raw_angles.items():
         unwrapped = unwrap_angle_series(series)
-        averaged = moving_average_1d(unwrapped, window=3)
+        averaged = moving_average_1d(unwrapped, window=5)
         rewrapped = []
         for a in averaged:
             while a > 180:
@@ -279,6 +284,35 @@ def main():
     # racket follows fArmR (we set racket = fArmR earlier) — re-sync
     # after the cap so they stay aligned.
     smoothed_angles["racket"] = list(smoothed_angles["fArmR"])
+
+    # 7.6. Off-arm gets a LIGHT dampening (25%) toward its circular
+    # mean: same motion shape, smaller amplitude. User wanted off-arm
+    # "less intense, same motion" — full dampen (50%) flattened it
+    # too much.
+    def circular_mean(angles):
+        sx = sum(math.cos(math.radians(a)) for a in angles) / len(angles)
+        sy = sum(math.sin(math.radians(a)) for a in angles) / len(angles)
+        return math.degrees(math.atan2(sy, sx))
+
+    def dampen_toward(angles, gain):
+        mean = circular_mean(angles)
+        out = []
+        for a in angles:
+            delta = mean - a
+            while delta > 180:
+                delta -= 360
+            while delta <= -180:
+                delta += 360
+            new_a = a + delta * gain
+            while new_a > 180:
+                new_a -= 360
+            while new_a <= -180:
+                new_a += 360
+            out.append(new_a)
+        return out
+
+    smoothed_angles["uArmL"] = dampen_toward(smoothed_angles["uArmL"], gain=0.25)
+    smoothed_angles["fArmL"] = dampen_toward(smoothed_angles["fArmL"], gain=0.25)
 
     # 8. hipCenter: dampen motion (so the figure doesn't walk across
     # the screen) + mirror around 0.5 to flip swing direction.
