@@ -241,8 +241,15 @@ export async function POST(request: NextRequest) {
     if (!trimResp.ok) {
       const text = await trimResp.text().catch(() => '')
       console.error('[baselines/from-segment] trim service failed:', trimResp.status, text)
+      // Bubble Railway's error text (capped) so the client can see
+      // why ffmpeg failed without checking Vercel function logs.
+      const detail = text ? text.slice(0, 500) : ''
       return NextResponse.json(
-        { error: `Trim service returned ${trimResp.status}` },
+        {
+          error: `Trim service returned ${trimResp.status}${detail ? `: ${detail}` : ''}`,
+          railwayStatus: trimResp.status,
+          railwayDetail: detail || null,
+        },
         { status: 502 },
       )
     }

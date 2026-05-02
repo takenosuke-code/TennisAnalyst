@@ -265,8 +265,17 @@ export async function POST(request: NextRequest) {
           { status: 404 },
         )
       }
+      // Bubble up the Railway error text (capped) so the client error
+      // message says WHY ffmpeg failed (codec missing, source URL
+      // unreachable, etc.) instead of an opaque "Trim service returned
+      // 500." Critical for diagnosis without Vercel function-log access.
+      const detail = text ? text.slice(0, 500) : ''
       return NextResponse.json(
-        { error: `Trim service returned ${trimResp.status}` },
+        {
+          error: `Trim service returned ${trimResp.status}${detail ? `: ${detail}` : ''}`,
+          railwayStatus: trimResp.status,
+          railwayDetail: detail || null,
+        },
         { status: 502 },
       )
     }
