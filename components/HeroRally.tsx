@@ -672,7 +672,9 @@ export default function HeroRally() {
     // Figure positions — pinned to the edges of the section.
     let rightBaseX = containerRect.width - FIGURE_PX_WIDTH / 2 - FIGURE_EDGE_PADDING
     let leftBaseX = FIGURE_PX_WIDTH / 2 + FIGURE_EDGE_PADDING
-    let figureRestY = containerRect.height / 2
+    // Figures sit slightly below container center so the swing arc's
+    // peak (racket up at follow-through) doesn't crowd the headline.
+    let figureRestY = containerRect.height / 2 + 40
     let rightBaseY = figureRestY
     let leftBaseY = figureRestY
 
@@ -1076,9 +1078,9 @@ export default function HeroRally() {
         ))}
         <line
           ref={(el) => { rightRefs.current.racketGrip = el }}
-          stroke="var(--cream)"
+          stroke="var(--clay)"
           strokeOpacity="0.95"
-          strokeWidth="2.25"
+          strokeWidth="2.5"
           strokeLinecap="round"
         />
         <circle
@@ -1112,9 +1114,9 @@ export default function HeroRally() {
         ))}
         <line
           ref={(el) => { leftRefs.current.racketGrip = el }}
-          stroke="var(--cream)"
+          stroke="var(--clay)"
           strokeOpacity="0.85"
-          strokeWidth="2.25"
+          strokeWidth="2.5"
           strokeLinecap="round"
         />
         <circle
