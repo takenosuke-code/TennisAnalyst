@@ -116,9 +116,14 @@ def main():
     print(f"# total frames: {len(frames)}, peak (contact): frame {peak_idx} "
           f"t={frames[peak_idx]['timestamp_ms']}ms")
 
-    # 2. Window: ~1.1s pre + 0.2s post.
-    pre_frames = int(1.1 * fps)
-    post_frames = int(0.2 * fps)
+    # 2. Window: ~1.0s pre-contact (full prep) + ~0.55s post (full
+    # follow-through THROUGH return to ready) so the figure's pose at
+    # the end of the cycle is close to its pose at the start, keeping
+    # the loop seam smooth. Earlier window cropped at 0.2s post and
+    # left the arm wrapped over the off-shoulder, forcing Hermite to
+    # whip 130° back to idle in the recovery phase.
+    pre_frames = int(1.0 * fps)
+    post_frames = int(0.55 * fps)
     start = max(0, peak_idx - pre_frames)
     end = min(len(frames), peak_idx + post_frames + 1)
     window = frames[start:end]
@@ -269,16 +274,44 @@ def main():
             post = n_window - 1 - contact_local_idx
             ts.append(round(t_contact + (local / post) * (t_final - t_contact), 4))
 
-    # 10. Compute the racket-head position at the contact frame
-    # (mirrored, figure-space) so we can update RACKET_CONTACT_NORM_X/Y.
-    rh_at_contact_raw = racket_smoothed[contact_local_idx]
-    rh_mirrored = (round(1.0 - rh_at_contact_raw[0], 4),
-                   round(rh_at_contact_raw[1], 4))
-    print(f"// CONTACT racket head (mirrored, figure-space):")
-    print(f"//   x={rh_mirrored[0]}, y={rh_mirrored[1]}")
+    # 10. Forward-evaluate the bone chain at the contact frame so the
+    # emitted RACKET_CONTACT_NORM_X/Y match what HeroRally actually
+    # renders. The raw RTMPose-normalized racket position would be
+    # wrong: HeroRally renders with a 0.4-dampened hipCenter and the
+    # figure's fixed BONE_LENGTHS, so the wrist (and racket extending
+    # from it) lands at a different point than the raw pose.
+    BONE_HIP_HALF = 0.04
+    BONE_SH_HALF = 0.05
+    BONE_TRUNK = 0.25
+    BONE_UPPER_ARM = 0.139
+    BONE_FOREARM = 0.133
+
+    def polar_pt(L, deg):
+        r = math.radians(deg)
+        return (L * math.cos(r), L * math.sin(r))
+
+    hcx, hcy = final_hips[contact_local_idx]
+    a_trunk = smoothed_angles["trunk"][contact_local_idx]
+    a_uArmR = smoothed_angles["uArmR"][contact_local_idx]
+    a_fArmR = smoothed_angles["fArmR"][contact_local_idx]
+    a_racket = smoothed_angles["racket"][contact_local_idx]
+    racketLen_at_contact = racket_lens[contact_local_idx]
+
+    tx, ty = polar_pt(BONE_TRUNK, a_trunk)
+    sh_mid_render = (hcx + tx, hcy + ty)
+    rs_render = (sh_mid_render[0] + BONE_SH_HALF, sh_mid_render[1])
+    ueRx, ueRy = polar_pt(BONE_UPPER_ARM, a_uArmR)
+    re_render = (rs_render[0] + ueRx, rs_render[1] + ueRy)
+    feRx, feRy = polar_pt(BONE_FOREARM, a_fArmR)
+    rw_render = (re_render[0] + feRx, re_render[1] + feRy)
+    rkx, rky = polar_pt(racketLen_at_contact, a_racket)
+    rh_render = (rw_render[0] + rkx, rw_render[1] + rky)
+
+    print(f"// CONTACT racket head (bone-chain rendered, figure-space):")
+    print(f"//   x={round(rh_render[0], 4)}, y={round(rh_render[1], 4)}")
     print(f"// Update HeroRally.tsx:")
-    print(f"//   const RACKET_CONTACT_NORM_X = {rh_mirrored[0]}")
-    print(f"//   const RACKET_CONTACT_NORM_Y = {rh_mirrored[1]}")
+    print(f"//   const RACKET_CONTACT_NORM_X = {round(rh_render[0], 4)}")
+    print(f"//   const RACKET_CONTACT_NORM_Y = {round(rh_render[1], 4)}")
 
     # 11. Emit keyframes.
     print(f"\n// === KEYFRAMES (Alcaraz, smoothed: 5-frame pos + 3-frame angle) ===")
