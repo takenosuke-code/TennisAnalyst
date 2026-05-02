@@ -218,13 +218,20 @@ def main():
     FIXED_RACKET_LEN = 0.10
     racket_lens = [FIXED_RACKET_LEN] * n_window
 
-    # 6. Unwrap each angle channel + re-smooth (5-frame, bumped from
-    # 3 to give a noticeably smoother arc at the cost of slight peak
-    # attenuation).
+    # 6. Unwrap each angle channel + re-smooth. Default 5 frames; the
+    # racket-arm channels (uArmR, fArmR, racket) get a wider 9-frame
+    # window because position-level racket-head smoothing tested poorly
+    # (at fast-rotation phases, the moving average folded racket-head
+    # positions toward the wrist and produced atan2 noise -> 100+
+    # degree angle jumps). Smoothing the forearm angle directly with a
+    # wider window is more robust.
+    ARM_SMOOTH_WINDOW = 9
+    DEFAULT_SMOOTH_WINDOW = 5
     smoothed_angles = {}
     for key, series in raw_angles.items():
         unwrapped = unwrap_angle_series(series)
-        averaged = moving_average_1d(unwrapped, window=5)
+        window = ARM_SMOOTH_WINDOW if key in ("uArmR", "fArmR", "racket") else DEFAULT_SMOOTH_WINDOW
+        averaged = moving_average_1d(unwrapped, window=window)
         rewrapped = []
         for a in averaged:
             while a > 180:
@@ -246,43 +253,23 @@ def main():
     for key in smoothed_angles:
         smoothed_angles[key] = [mirror(a) for a in smoothed_angles[key]]
 
-    # 7.5. Cap arm vertical reach so the racket tip during follow-
-    # through stays at shoulder height instead of sweeping above the
-    # head. Pulls each angle toward the nearest horizontal axis (0 or
-    # +/-180) by 50% when the angle has a strong vertical component.
-    # Preserves left/right sweep direction (key for the cross-body
-    # follow-through arc that gives the swing its real-tennis feel).
-    def cap_vertical(angle, gain=0.5):
-        # angle in (-180, 180]; positive = pointing down (positive y)
-        # Only cap negative angles (pointing up).
-        if angle >= 0:
-            return angle
-        # Negative => upper half. Pull toward nearest horizontal:
-        # cos<0 (angle in (-180, -90)): pull toward -180.
-        # cos>=0 (angle in (-90, 0)):    pull toward 0.
-        if angle < -90:
-            target = -180.0
-        else:
-            target = 0.0
-        return angle + (target - angle) * gain
-
-    # fArmR uses the up-axis cap above (forearm rotates through
-    # straight-up during follow-through).
-    smoothed_angles["fArmR"] = [cap_vertical(a, 0.5) for a in smoothed_angles["fArmR"]]
-
-    # uArmR is different — during post-contact the upper arm reaches
-    # past horizontal-LEFT (uArmR raw ~170, or ~-170 wrapping into
-    # ~190 unwrapped). The "up" angles for uArmR live in the
-    # unwrapped (140, 260) range. Cap excess above 145 by 70%.
+    # 7.5. Cap upper-arm horizontal-LEFT reach so the elbow stays
+    # below the shoulder during follow-through. Tighter cap (120
+    # ceiling) than before — prior 145 ceiling left the elbow at
+    # shoulder height, and any forearm pointing UP from there put
+    # the racket tip above the head. Tighter elbow cap means we don't
+    # need a fArmR cap (which had a discontinuity at the vertical
+    # axis where cos flipped sign, producing 100+ deg racket-angle
+    # jumps frame-to-frame).
     def cap_uArmR_horizontal(raw):
         unwrapped = raw if raw >= 0 else raw + 360
-        if unwrapped <= 145:
+        if unwrapped <= 120:
             return raw
-        capped = 145 + (unwrapped - 145) * 0.30
+        capped = 120 + (unwrapped - 120) * 0.25
         return capped if capped <= 180 else capped - 360
     smoothed_angles["uArmR"] = [cap_uArmR_horizontal(a) for a in smoothed_angles["uArmR"]]
-    # racket follows fArmR (we set racket = fArmR earlier) — re-sync
-    # after the cap so they stay aligned.
+    # racket follows fArmR (the smoothed forearm direction). Set this
+    # AFTER smoothing so racket inherits the wider 9-frame fArmR MA.
     smoothed_angles["racket"] = list(smoothed_angles["fArmR"])
 
     # 7.6. Off-arm dampened toward a LOW REST target (not circular
@@ -325,67 +312,14 @@ def main():
         sy_dampened = avg_hip_y + (c[1] - avg_hip_y) * HIP_SHIFT_GAIN
         final_hips.append((round(1.0 - sx_dampened, 4), round(sy_dampened, 4)))
 
-    # 8.5. Racket-tip trajectory smoothed at POSITION level. Forward-
-    # evaluate the bone chain per frame -> get wrist + forearm-direction
-    # racket-head. Smooth those positions with a 9-frame moving avg.
-    # Recompute racket angle/len from the smoothed head positions. This
-    # decouples racket smoothness from forearm-angle noise — the racket
-    # traces a clean curve in space rather than inheriting every wobble
-    # of fArmR.
-    BONE_HIP_HALF = 0.04
-    BONE_SH_HALF = 0.05
-    BONE_TRUNK = 0.25
-    BONE_UPPER_ARM = 0.139
-    BONE_FOREARM = 0.133
-    DESIRED_RACKET_LEN = 0.10
-
-    def polar_pt(L, deg):
-        r = math.radians(deg)
-        return (L * math.cos(r), L * math.sin(r))
-
-    wrists = []
-    racket_heads_raw = []
-    for i in range(n_window):
-        hcx, hcy = final_hips[i]
-        a_trunk = smoothed_angles["trunk"][i]
-        a_uArmR = smoothed_angles["uArmR"][i]
-        a_fArmR = smoothed_angles["fArmR"][i]
-        a_racket = smoothed_angles["racket"][i]
-
-        tx, ty = polar_pt(BONE_TRUNK, a_trunk)
-        sh_mid_render = (hcx + tx, hcy + ty)
-        rs = (sh_mid_render[0] + BONE_SH_HALF, sh_mid_render[1])
-        ueRx, ueRy = polar_pt(BONE_UPPER_ARM, a_uArmR)
-        re_render = (rs[0] + ueRx, rs[1] + ueRy)
-        feRx, feRy = polar_pt(BONE_FOREARM, a_fArmR)
-        rw_render = (re_render[0] + feRx, re_render[1] + feRy)
-        rkx, rky = polar_pt(DESIRED_RACKET_LEN, a_racket)
-        racket_head_render = (rw_render[0] + rkx, rw_render[1] + rky)
-        wrists.append(rw_render)
-        racket_heads_raw.append(racket_head_render)
-
-    # Smooth the racket-head trajectory in screen space. 5-frame
-    # window is the sweet spot — kills jitter without attenuating the
-    # contact-frame extension (a 9-frame window pulls the racket back
-    # toward body center at contact because the average folds in
-    # post-contact wrap-around frames).
-    smoothed_racket_heads = moving_average_2d(racket_heads_raw, window=5)
-
-    # Recompute racket angle + len per frame so the keyframes' racket
-    # field puts the head at the smoothed position relative to the
-    # (un-smoothed) wrist.
-    racket_lens = []
-    for i in range(n_window):
-        wx, wy = wrists[i]
-        rhx, rhy = smoothed_racket_heads[i]
-        dx = rhx - wx
-        dy = rhy - wy
-        smoothed_angles["racket"][i] = math.degrees(math.atan2(dy, dx))
-        racket_lens[i:i+1] = [max(0.08, min(0.16, math.hypot(dx, dy)))]
-
-    # Replace the static-len racket lengths with these per-frame ones.
-    # racket_lens is now the authoritative list for emit.
-    racket_lens_per_frame = racket_lens
+    # racket_lens already initialized to fixed 0.10 (FIXED_RACKET_LEN
+    # at step 5). Racket angle = smoothed forearm angle (set at the
+    # cap step). Position-level racket smoothing was tried but had a
+    # failure mode at fast-rotation phases where adjacent racket heads
+    # lay on opposite sides of the wrist and the moving average pulled
+    # the head near the wrist, producing atan2 noise. The wider
+    # angle-level smoothing (9-frame on uArmR/fArmR/racket) is more
+    # robust.
 
     # 9. t values: contact at 0.65, final at 0.92. The post-contact
     # span (0.27 of cycle) is wider than the pre-contact span per
