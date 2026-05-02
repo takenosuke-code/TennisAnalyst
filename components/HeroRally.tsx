@@ -58,81 +58,187 @@ type KeyframeAngles = {
   racket: number; racketLen: number
 }
 
-// Right-arm follow-through stays below "over-the-shoulder" while the
-// racket completes its circular sweep: uArmR / fArmR cap below
-// horizontal-left during follow-through, but the racket angle keeps
-// rotating in the same direction (no bounce-back). The racket-head
-// arc peaks around chest height because the wrist sits at hip level
-// at the racket's "up" phase. Off-arm (uArmL / fArmL) stays in
-// (85°, 120°) — elbow always below or outside the left shoulder, so
-// the non-racket hand never crosses inward across the body.
+// Keyframes are RTMPose-extracted from a Carlos Alcaraz forehand
+// (railway-service/extract_clip_keypoints.py). 40 frames at 30fps
+// span prep through mid follow-through, mirrored around the y-axis
+// so the right rally figure swings toward its opponent on the left.
+// See the leading comment inside KEYFRAME_ANGLES for full pipeline.
 const KEYFRAME_ANGLES: KeyframeAngles[] = [
-  // Forehand modeled on the kinetic-chain phases in
-  // lib/biomechanics-reference.ts:
-  //  - t=0.4  Loading peak: full coil, racket cocked behind shoulder,
-  //           knees flexed (back-leg knee ~140°, biomech ideal range
-  //           130-150°), off-arm extended toward the ball.
-  //  - t=0.55 Hips fire (kinetic chain begins — hip peak ~75ms before
-  //           contact in elite players, ~t=0.55 in this 1.6s cycle).
-  //  - t=0.6  Trunk catches up (peak forward lean), arm extending.
-  //  - t=0.65 CONTACT: dominant elbow ~120° (within 100-140° biomech
-  //           range), arm out front, racket extending toward target.
-  //  - t=0.725 Follow-through: arm continues across the body, racket
-  //           sweeps out toward the net (no bounce-back).
-  //  - t=0.8  Finish: arm relaxes back toward ready, racket curls up
-  //           through chest level (capped — never over the shoulder).
-  // Off-arm uArmL/fArmL stay ≥ 110/125° throughout so the off-hand
-  // never crosses inward across the body.
-  { t: 0.0, hipCenter: [0.5, 0.55], trunk: -90.0, neck: -90.0,
-    uArmL: 110.0, fArmL: 125.0, uArmR: 70.0, fArmR: 70.0,
-    thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
-    racket: -90.0, racketLen: 0.13 },
-  // Unit turn — shoulders begin coiling, racket pulls back to right
-  { t: 0.15, hipCenter: [0.51, 0.555], trunk: -90.0, neck: -94.0,
-    uArmL: 120.0, fArmL: 145.0, uArmR: 70.0, fArmR: 20.0,
-    thighL: 92.0, shinL: 90.0, thighR: 88.0, shinR: 90.0,
-    racket: -65.0, racketLen: 0.13 },
-  // Loading peak — full coil, racket cocked, back-leg loaded ~140°
-  { t: 0.4, hipCenter: [0.53, 0.56], trunk: -85.0, neck: -100.0,
-    uArmL: 140.0, fArmL: 170.0, uArmR: 20.0, fArmR: -30.0,
-    thighL: 105.0, shinL: 80.0, thighR: 72.0, shinR: 105.0,
-    racket: -100.0, racketLen: 0.13 },
-  // Drop — racket loops below contact zone, weight on back foot
-  { t: 0.475, hipCenter: [0.525, 0.56], trunk: -85.0, neck: -98.0,
-    uArmL: 125.0, fArmL: 145.0, uArmR: 50.0, fArmR: 70.0,
-    thighL: 103.0, shinL: 82.0, thighR: 75.0, shinR: 100.0,
-    racket: 40.0, racketLen: 0.13 },
-  // Hip rotation peak — kinetic chain firing, forward swing begins
-  { t: 0.55, hipCenter: [0.51, 0.555], trunk: -83.0, neck: -96.0,
-    uArmL: 115.0, fArmL: 135.0, uArmR: 80.0, fArmR: 110.0,
-    thighL: 100.0, shinL: 86.0, thighR: 80.0, shinR: 95.0,
-    racket: 110.0, racketLen: 0.13 },
-  // Trunk peak — peak forward lean, arm extending toward contact
-  { t: 0.6, hipCenter: [0.50, 0.555], trunk: -82.0, neck: -94.0,
-    uArmL: 110.0, fArmL: 130.0, uArmR: 105.0, fArmR: 145.0,
-    thighL: 98.0, shinL: 88.0, thighR: 82.0, shinR: 93.0,
-    racket: 155.0, racketLen: 0.13 },
-  // CONTACT — arm extended (elbow ~120°), front knee driving up,
-  // off-arm tucks slightly, racket toward target
-  { t: 0.65, hipCenter: [0.49, 0.55], trunk: -85.0, neck: -92.0,
-    uArmL: 110.0, fArmL: 130.0, uArmR: 120.0, fArmR: 170.0,
-    thighL: 96.0, shinL: 90.0, thighR: 85.0, shinR: 92.0,
-    racket: -160.0, racketLen: 0.13 },
-  // Follow-through — racket continues out toward the net, arm sweeps
-  // across the body. uArmR caps at 135° (well below "behind the head"
-  // 180°+) so the racket-head arc peaks around chest, not over the
-  // off-shoulder.
-  { t: 0.725, hipCenter: [0.48, 0.55], trunk: -88.0, neck: -90.0,
-    uArmL: 110.0, fArmL: 125.0, uArmR: 135.0, fArmR: 170.0,
-    thighL: 94.0, shinL: 90.0, thighR: 87.0, shinR: 91.0,
-    racket: -130.0, racketLen: 0.13 },
-  // Finish — kinetic chain decelerating, arm relaxes back toward
-  // ready. Racket continues circular sweep through "up" (-90 raw =
-  // 270° unwrapped), wrist now near hip height so racket stays low.
-  { t: 0.8, hipCenter: [0.47, 0.55], trunk: -90.0, neck: -88.0,
-    uArmL: 110.0, fArmL: 125.0, uArmR: 110.0, fArmR: 125.0,
-    thighL: 92.0, shinL: 90.0, thighR: 89.0, shinR: 90.0,
-    racket: -90.0, racketLen: 0.12 },
+  // 40 keyframes derived from RTMPose extraction of a Carlos Alcaraz
+  // forehand (side-on broadcast clip). Pipeline:
+  //   1. railway-service/extract_clip_keypoints.py → 82-frame pose JSON
+  //   2. Per-frame polar angles computed in HeroRally's convention
+  //      (0°=+x, 90°=+y/down, -90°=-y/up).
+  //   3. Window: 1.1s pre-contact (full prep) + 0.2s post (mid
+  //      follow-through; cropped before high-wrap to keep the loop seam
+  //      sane). Contact aligned to t=0.65 (matches SWING_CONTACT_PHASE).
+  //   4. Mirrored θ → 180°-θ around the y-axis: Alcaraz's swing in the
+  //      clip goes left→right; the right rally figure hits toward its
+  //      opponent on the left, so the swing direction needs flipping.
+  //   5. hipCenter scaled by 0.4 of the player's actual hip motion so
+  //      the figure doesn't walk across the screen.
+  //   6. Racket angle = forearm extension (RTMPose doesn't track racket;
+  //      racketLen from the wrist→racket-head distance, clamped 0.08-0.16).
+  { t: 0.0, hipCenter: [0.5332, 0.5613], trunk: -93.5, neck: -110.2,
+    uArmL: 90.0, fArmL: 121.0, uArmR: 81.6, fArmR: 116.7,
+    thighL: 101.0, shinL: 76.5, thighR: 95.0, shinR: 79.6,
+    racket: -156.0, racketLen: 0.086 },
+  { t: 0.0197, hipCenter: [0.5327, 0.5638], trunk: -93.8, neck: -109.1,
+    uArmL: 89.4, fArmL: 120.1, uArmR: 82.0, fArmR: 116.0,
+    thighL: 100.1, shinL: 78.5, thighR: 95.8, shinR: 78.2,
+    racket: -156.9, racketLen: 0.089 },
+  { t: 0.0394, hipCenter: [0.5325, 0.5659], trunk: -94.8, neck: -107.1,
+    uArmL: 89.4, fArmL: 120.2, uArmR: 81.4, fArmR: 112.5,
+    thighL: 100.9, shinL: 78.5, thighR: 97.1, shinR: 77.2,
+    racket: -154.0, racketLen: 0.099 },
+  { t: 0.0591, hipCenter: [0.5317, 0.5691], trunk: -94.9, neck: -107.0,
+    uArmL: 89.4, fArmL: 117.7, uArmR: 80.6, fArmR: 112.5,
+    thighL: 102.0, shinL: 75.7, thighR: 97.5, shinR: 75.9,
+    racket: -150.9, racketLen: 0.104 },
+  { t: 0.0788, hipCenter: [0.531, 0.5705], trunk: -95.7, neck: -104.4,
+    uArmL: 89.4, fArmL: 111.3, uArmR: 79.5, fArmR: 113.7,
+    thighL: 103.2, shinL: 72.9, thighR: 97.8, shinR: 75.2,
+    racket: -146.8, racketLen: 0.101 },
+  { t: 0.0985, hipCenter: [0.5298, 0.5699], trunk: -95.9, neck: -108.5,
+    uArmL: 90.7, fArmL: 105.7, uArmR: 78.3, fArmR: 115.6,
+    thighL: 102.5, shinL: 71.6, thighR: 96.8, shinR: 75.9,
+    racket: -143.8, racketLen: 0.107 },
+  { t: 0.1182, hipCenter: [0.5277, 0.5687], trunk: -96.1, neck: -108.7,
+    uArmL: 91.3, fArmL: 104.3, uArmR: 76.2, fArmR: 115.4,
+    thighL: 102.2, shinL: 69.0, thighR: 94.0, shinR: 77.5,
+    racket: -146.3, racketLen: 0.102 },
+  { t: 0.1379, hipCenter: [0.5261, 0.5653], trunk: -95.4, neck: -110.1,
+    uArmL: 92.0, fArmL: 103.8, uArmR: 76.7, fArmR: 119.4,
+    thighL: 99.8, shinL: 69.1, thighR: 92.4, shinR: 78.6,
+    racket: -142.9, racketLen: 0.101 },
+  { t: 0.1576, hipCenter: [0.523, 0.5623], trunk: -93.8, neck: -107.4,
+    uArmL: 92.6, fArmL: 104.6, uArmR: 75.9, fArmR: 123.0,
+    thighL: 97.6, shinL: 68.1, thighR: 89.6, shinR: 79.9,
+    racket: -137.2, racketLen: 0.118 },
+  { t: 0.1773, hipCenter: [0.5207, 0.5582], trunk: -93.1, neck: -108.1,
+    uArmL: 94.7, fArmL: 110.4, uArmR: 75.2, fArmR: 118.6,
+    thighL: 93.9, shinL: 70.2, thighR: 87.5, shinR: 83.3,
+    racket: -134.7, racketLen: 0.113 },
+  { t: 0.197, hipCenter: [0.5189, 0.555], trunk: -92.5, neck: -108.4,
+    uArmL: 94.3, fArmL: 83.1, uArmR: 73.7, fArmR: 120.3,
+    thighL: 91.3, shinL: 70.9, thighR: 87.6, shinR: 85.4,
+    racket: -128.7, racketLen: 0.11 },
+  { t: 0.2167, hipCenter: [0.5167, 0.5546], trunk: -91.8, neck: -107.4,
+    uArmL: 94.7, fArmL: -6.5, uArmR: 71.8, fArmR: 119.4,
+    thighL: 89.6, shinL: 70.9, thighR: 87.9, shinR: 86.6,
+    racket: -124.3, racketLen: 0.136 },
+  { t: 0.2364, hipCenter: [0.5149, 0.5507], trunk: -92.2, neck: -107.7,
+    uArmL: 90.0, fArmL: -23.3, uArmR: 66.1, fArmR: 112.8,
+    thighL: 88.8, shinL: 66.7, thighR: 89.6, shinR: 88.5,
+    racket: 112.8, racketLen: 0.1 },
+  { t: 0.2561, hipCenter: [0.5123, 0.5479], trunk: -91.7, neck: -106.5,
+    uArmL: 82.0, fArmL: -35.0, uArmR: 65.9, fArmR: 119.2,
+    thighL: 88.3, shinL: 70.1, thighR: 89.2, shinR: 90.0,
+    racket: 119.2, racketLen: 0.1 },
+  { t: 0.2758, hipCenter: [0.5101, 0.5466], trunk: -90.5, neck: -108.3,
+    uArmL: 77.8, fArmL: -41.6, uArmR: 62.8, fArmR: 119.4,
+    thighL: 88.8, shinL: 72.0, thighR: 90.8, shinR: 87.4,
+    racket: 119.4, racketLen: 0.1 },
+  { t: 0.2955, hipCenter: [0.5085, 0.5461], trunk: -90.6, neck: -109.3,
+    uArmL: 76.0, fArmL: -39.8, uArmR: 55.7, fArmR: 60.5,
+    thighL: 91.2, shinL: 68.0, thighR: 92.0, shinR: 86.9,
+    racket: -115.0, racketLen: 0.088 },
+  { t: 0.3152, hipCenter: [0.5065, 0.5485], trunk: -89.5, neck: -86.1,
+    uArmL: 71.7, fArmL: -44.8, uArmR: 52.4, fArmR: -117.0,
+    thighL: 90.4, shinL: 70.2, thighR: 92.4, shinR: 90.4,
+    racket: -105.5, racketLen: 0.081 },
+  { t: 0.3348, hipCenter: [0.5045, 0.5551], trunk: -88.7, neck: -81.0,
+    uArmL: 70.1, fArmL: -50.5, uArmR: 47.9, fArmR: -109.7,
+    thighL: 92.9, shinL: 69.7, thighR: 92.5, shinR: 89.6,
+    racket: -99.4, racketLen: 0.093 },
+  { t: 0.3545, hipCenter: [0.5021, 0.5596], trunk: -89.1, neck: -103.4,
+    uArmL: 56.1, fArmL: -42.3, uArmR: 28.4, fArmR: -105.9,
+    thighL: 94.0, shinL: 69.4, thighR: 92.9, shinR: 86.6,
+    racket: -115.0, racketLen: 0.099 },
+  { t: 0.3742, hipCenter: [0.5, 0.5606], trunk: -89.9, neck: -114.0,
+    uArmL: 41.6, fArmL: -35.4, uArmR: 32.7, fArmR: -51.3,
+    thighL: 96.5, shinL: 79.8, thighR: 93.0, shinR: 84.3,
+    racket: -119.6, racketLen: 0.1 },
+  { t: 0.3939, hipCenter: [0.498, 0.5593], trunk: -90.1, neck: -107.7,
+    uArmL: 35.1, fArmL: -29.1, uArmR: 35.5, fArmR: -34.9,
+    thighL: 98.7, shinL: 86.5, thighR: 92.6, shinR: 82.9,
+    racket: -118.0, racketLen: 0.104 },
+  { t: 0.4136, hipCenter: [0.4956, 0.558], trunk: -90.1, neck: -100.3,
+    uArmL: 40.2, fArmL: -12.6, uArmR: 26.2, fArmR: 2.9,
+    thighL: 99.6, shinL: 89.3, thighR: 91.8, shinR: 82.4,
+    racket: 2.9, racketLen: 0.1 },
+  { t: 0.4333, hipCenter: [0.493, 0.5535], trunk: -89.2, neck: -110.9,
+    uArmL: 48.5, fArmL: 0.0, uArmR: 35.8, fArmR: 12.5,
+    thighL: 101.3, shinL: 89.0, thighR: 90.5, shinR: 81.2,
+    racket: 12.5, racketLen: 0.1 },
+  { t: 0.453, hipCenter: [0.4895, 0.5529], trunk: -88.6, neck: -101.0,
+    uArmL: 58.9, fArmL: -2.1, uArmR: 40.1, fArmR: 20.0,
+    thighL: 101.0, shinL: 86.4, thighR: 88.7, shinR: 80.1,
+    racket: 20.0, racketLen: 0.1 },
+  { t: 0.4727, hipCenter: [0.4863, 0.551], trunk: -87.7, neck: -99.2,
+    uArmL: 63.2, fArmL: -2.7, uArmR: 49.5, fArmR: 26.4,
+    thighL: 100.9, shinL: 84.0, thighR: 87.3, shinR: 79.8,
+    racket: 26.4, racketLen: 0.1 },
+  { t: 0.4924, hipCenter: [0.4837, 0.5501], trunk: -87.9, neck: -104.3,
+    uArmL: 85.1, fArmL: 4.5, uArmR: 47.9, fArmR: 35.1,
+    thighL: 100.6, shinL: 82.8, thighR: 87.3, shinR: 78.3,
+    racket: 35.1, racketLen: 0.1 },
+  { t: 0.5121, hipCenter: [0.4809, 0.5517], trunk: -87.2, neck: -106.0,
+    uArmL: 96.2, fArmL: -6.5, uArmR: 48.7, fArmR: 45.2,
+    thighL: 99.5, shinL: 82.6, thighR: 86.4, shinR: 77.2,
+    racket: -43.6, racketLen: 0.08 },
+  { t: 0.5318, hipCenter: [0.4786, 0.5514], trunk: -86.4, neck: -101.5,
+    uArmL: 111.8, fArmL: -48.9, uArmR: 53.7, fArmR: 46.2,
+    thighL: 98.1, shinL: 81.3, thighR: 86.9, shinR: 75.0,
+    racket: -7.7, racketLen: 0.08 },
+  { t: 0.5515, hipCenter: [0.477, 0.5501], trunk: -86.9, neck: -92.0,
+    uArmL: 125.5, fArmL: -19.4, uArmR: 58.0, fArmR: 50.2,
+    thighL: 96.3, shinL: 82.2, thighR: 87.7, shinR: 74.7,
+    racket: 21.6, racketLen: 0.082 },
+  { t: 0.5712, hipCenter: [0.4758, 0.5446], trunk: -87.3, neck: -82.8,
+    uArmL: 128.1, fArmL: -106.0, uArmR: 61.9, fArmR: 55.1,
+    thighL: 93.6, shinL: 84.4, thighR: 87.4, shinR: 72.9,
+    racket: 35.9, racketLen: 0.1 },
+  { t: 0.5909, hipCenter: [0.476, 0.5365], trunk: -88.7, neck: -82.9,
+    uArmL: 120.9, fArmL: -136.6, uArmR: 69.9, fArmR: 61.4,
+    thighL: 93.0, shinL: 85.1, thighR: 87.9, shinR: 72.2,
+    racket: 41.9, racketLen: 0.108 },
+  { t: 0.6106, hipCenter: [0.476, 0.5302], trunk: -89.8, neck: -81.2,
+    uArmL: 124.0, fArmL: -133.1, uArmR: 80.8, fArmR: 73.5,
+    thighL: 93.8, shinL: 87.8, thighR: 86.8, shinR: 71.3,
+    racket: 27.5, racketLen: 0.08 },
+  { t: 0.6303, hipCenter: [0.4758, 0.5253], trunk: -90.3, neck: -89.0,
+    uArmL: 135.2, fArmL: -131.4, uArmR: 101.8, fArmR: 94.3,
+    thighL: 95.2, shinL: 89.5, thighR: 85.0, shinR: 112.3,
+    racket: 94.3, racketLen: 0.1 },
+  { t: 0.65, hipCenter: [0.4782, 0.5245], trunk: -89.7, neck: -93.7,
+    uArmL: 143.5, fArmL: -112.1, uArmR: 130.2, fArmR: -101.1,
+    thighL: 97.4, shinL: 89.6, thighR: 87.1, shinR: 67.6,
+    racket: -101.1, racketLen: 0.1 },
+  { t: 0.6833, hipCenter: [0.4777, 0.525], trunk: -91.2, neck: -94.5,
+    uArmL: 150.0, fArmL: -155.2, uArmR: 158.6, fArmR: -122.3,
+    thighL: 98.8, shinL: 88.7, thighR: 86.6, shinR: 65.3,
+    racket: 125.6, racketLen: 0.08 },
+  { t: 0.7167, hipCenter: [0.4775, 0.5241], trunk: -90.3, neck: -100.9,
+    uArmL: 168.6, fArmL: -151.2, uArmR: 174.5, fArmR: -143.8,
+    thighL: 98.9, shinL: 88.7, thighR: 86.4, shinR: 61.1,
+    racket: -147.6, racketLen: 0.113 },
+  { t: 0.75, hipCenter: [0.4766, 0.5257], trunk: -90.3, neck: -102.6,
+    uArmL: 177.8, fArmL: -134.9, uArmR: -164.3, fArmR: -135.4,
+    thighL: 97.8, shinL: 88.4, thighR: 85.7, shinR: 59.0,
+    racket: -136.5, racketLen: 0.141 },
+  { t: 0.7833, hipCenter: [0.4752, 0.5301], trunk: -91.6, neck: -99.8,
+    uArmL: 148.7, fArmL: -121.2, uArmR: -149.9, fArmR: -122.0,
+    thighL: 96.1, shinL: 86.4, thighR: 84.6, shinR: 53.5,
+    racket: -133.3, racketLen: 0.16 },
+  { t: 0.8167, hipCenter: [0.4735, 0.5333], trunk: -89.7, neck: -101.4,
+    uArmL: 159.5, fArmL: -117.7, uArmR: -143.4, fArmR: -113.1,
+    thighL: 94.5, shinL: 84.4, thighR: 84.6, shinR: 47.9,
+    racket: -131.1, racketLen: 0.16 },
+  { t: 0.85, hipCenter: [0.4726, 0.5429], trunk: -87.9, neck: -119.8,
+    uArmL: 178.1, fArmL: -116.5, uArmR: -140.4, fArmR: -113.2,
+    thighL: 97.9, shinL: 82.6, thighR: 83.7, shinR: 44.2,
+    racket: -133.7, racketLen: 0.16 },
 ]
 const N = KEYFRAME_ANGLES.length
 
