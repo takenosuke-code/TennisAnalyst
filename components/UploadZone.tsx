@@ -74,6 +74,7 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
     setShotType: persistShotType,
     setExtractorBackend,
     setFallbackReason,
+    setSessionId,
   } = usePoseStore()
 
   const { extract, progress: extractProgress, error: extractError, isProcessing: extracting, abort } = usePoseExtractor()
@@ -282,6 +283,13 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         }
         const pendingBody = await pendingRes.json()
         pendingSessionId = pendingBody.sessionId
+        // Mirror the new session id into usePoseStore so downstream
+        // surfaces that need it (e.g. /api/baselines/from-swing's
+        // server-side trim lookup) can read it from the store. Without
+        // this, "Save as baseline" surfaced "Save unavailable: missing
+        // session id" because nothing else in the upload pipeline
+        // wrote sessionId back into the store.
+        if (pendingSessionId) setSessionId(pendingSessionId)
 
         setStatusMsg('Analyzing pose on the server...')
         // Hand the sha256 (or null) to the Railway extractor so the
@@ -393,6 +401,21 @@ export default function UploadZone({ onComplete }: UploadZoneProps) {
         if (!sessRes.ok) {
           console.error('Failed to save session:', sessRes.status, await sessRes.text())
           setStatusMsg('Warning: analysis complete but failed to save session.')
+        } else {
+          // Browser-path session id has to be captured from the
+          // response — pure-browser flow has no pendingSessionId
+          // because it skipped the Railway pending-row create. Without
+          // this write, usePoseStore.sessionId stays null and the
+          // "Save as baseline" CTA reports a missing-session error.
+          try {
+            const sessBody = await sessRes.json()
+            const newSessionId =
+              typeof sessBody?.sessionId === 'string' ? sessBody.sessionId : null
+            if (newSessionId) setSessionId(newSessionId)
+          } catch {
+            // Non-JSON response is unexpected here but recoverable —
+            // the warning surface above covered the failure case.
+          }
         }
       } catch (err) {
         console.error('Failed to save session:', err)
