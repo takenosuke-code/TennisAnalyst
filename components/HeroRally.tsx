@@ -384,8 +384,16 @@ const JOINT_KEYS: (keyof Joints)[] = [
 const FIGURE_PX_HEIGHT = 380
 const FIGURE_PX_WIDTH = FIGURE_PX_HEIGHT * (9 / 16)
 const FIGURE_EDGE_PADDING = 28
-const FIGURE_Y_TRACK_LERP = 0.07
+const FIGURE_Y_TRACK_LERP = 0.04
 const FIGURE_Y_TRACK_AMPLITUDE_PX = 70
+// Step-bob: when the figure has y-velocity (it's "walking" toward the
+// ball's predicted contact point), modulate baseY by a small sine so
+// the translation reads as steps rather than a glide. Tuned by feel —
+// 4px peak-to-peak at ~3 steps/sec is barely perceptible but kills
+// the "instant teleport" feel even at low velocities.
+const STEP_BOB_AMP_PX = 2
+const STEP_BOB_HZ = 3
+const STEP_BOB_TRIGGER_VELOCITY = 30 // px/sec — below this, no bob
 
 const BALL_RADIUS = 7
 const BALL_SPEED = 540
@@ -702,6 +710,10 @@ export default function HeroRally() {
     let figureRestY = containerRect.height / 2
     let rightBaseY = figureRestY
     let leftBaseY = figureRestY
+    // Per-frame deltas drive the step-bob modulation; track previous
+    // baseY so we can compute Y velocity inside step().
+    let rightPrevBaseY = figureRestY
+    let leftPrevBaseY = figureRestY
 
     // toPx converts normalized keyframe coords to pixel coords. The
     // `mirrored` flag flips the X axis so the left figure renders as
@@ -868,9 +880,14 @@ export default function HeroRally() {
         }
       }
 
-      // ─── Per-figure preswing: track Y, fire when ball is close ───────
+      // ─── Per-figure Y tracking + swing-fire ──────────────────────────
+      // Both figures lerp baseY toward the predicted contact-Y for as
+      // long as the ball is incoming, regardless of whether the swing
+      // has already fired. This kills the old "instant snap" at the
+      // swing-fire moment — the figure walks to position smoothly
+      // through the swing's prep phase.
       // Right figure: ball is incoming when vx > 0 (moving rightward).
-      if (right.mode === 'preswing' && ball.vx > 0) {
+      if (ball.vx > 0) {
         const racketContactX = rightBaseX + (RACKET_CONTACT_NORM_X - 0.5) * FIGURE_PX_WIDTH
         const tToContact = (racketContactX - ball.x) / ball.vx
         if (tToContact > 0) {
@@ -879,20 +896,18 @@ export default function HeroRally() {
             figureRestY - FIGURE_Y_TRACK_AMPLITUDE_PX,
             Math.min(figureRestY + FIGURE_Y_TRACK_AMPLITUDE_PX, predBallY - racketYOffsetFromHip),
           )
-          if (tToContact * 1000 <= SWING_TO_CONTACT_MS) {
-            rightBaseY = targetY
+          // Continuous lerp — covers both preswing and pre-contact swing.
+          rightBaseY += (targetY - rightBaseY) * FIGURE_Y_TRACK_LERP
+          // Fire the swing once the prep window opens.
+          if (right.mode === 'preswing' && tToContact * 1000 <= SWING_TO_CONTACT_MS) {
             right.mode = 'swinging'
             right.swingStart = now
             right.hitRegistered = false
-          } else {
-            rightBaseY += (targetY - rightBaseY) * FIGURE_Y_TRACK_LERP
           }
         }
       }
       // Left figure: ball is incoming when vx < 0 (moving leftward).
-      // The mirrored figure's racket-contact-X is to the RIGHT of its
-      // base (toward the net), so we add instead of subtract the offset.
-      if (left.mode === 'preswing' && ball.vx < 0) {
+      if (ball.vx < 0) {
         const racketContactX = leftBaseX - (RACKET_CONTACT_NORM_X - 0.5) * FIGURE_PX_WIDTH
         const tToContact = (racketContactX - ball.x) / ball.vx
         if (tToContact > 0) {
@@ -901,16 +916,30 @@ export default function HeroRally() {
             figureRestY - FIGURE_Y_TRACK_AMPLITUDE_PX,
             Math.min(figureRestY + FIGURE_Y_TRACK_AMPLITUDE_PX, predBallY - racketYOffsetFromHip),
           )
-          if (tToContact * 1000 <= SWING_TO_CONTACT_MS) {
-            leftBaseY = targetY
+          leftBaseY += (targetY - leftBaseY) * FIGURE_Y_TRACK_LERP
+          if (left.mode === 'preswing' && tToContact * 1000 <= SWING_TO_CONTACT_MS) {
             left.mode = 'swinging'
             left.swingStart = now
             left.hitRegistered = false
-          } else {
-            leftBaseY += (targetY - leftBaseY) * FIGURE_Y_TRACK_LERP
           }
         }
       }
+
+      // Step-bob: when the figure has y-velocity (walking toward the
+      // ball), add a tiny sinusoidal modulation to baseY at render
+      // time so the translation reads as steps. Compute velocity from
+      // last-frame baseY (per-figure).
+      const rightDy = (rightBaseY - rightPrevBaseY) / Math.max(0.001, dt)
+      const leftDy = (leftBaseY - leftPrevBaseY) / Math.max(0.001, dt)
+      rightPrevBaseY = rightBaseY
+      leftPrevBaseY = leftBaseY
+      const rightBobAmp =
+        Math.abs(rightDy) > STEP_BOB_TRIGGER_VELOCITY ? STEP_BOB_AMP_PX : 0
+      const leftBobAmp =
+        Math.abs(leftDy) > STEP_BOB_TRIGGER_VELOCITY ? STEP_BOB_AMP_PX : 0
+      const bobPhase = (now / 1000) * STEP_BOB_HZ * 2 * Math.PI
+      const rightBobOffset = Math.sin(bobPhase) * rightBobAmp
+      const leftBobOffset = Math.sin(bobPhase + Math.PI) * leftBobAmp // antiphase
 
       // Ball physics.
       ball.x += ball.vx * dt
@@ -944,8 +973,8 @@ export default function HeroRally() {
       }
 
       // Paint everything.
-      paintFigure(rightPhase, rightRefs.current, rightBaseX, rightBaseY, false, rightLabelRefs.current)
-      paintFigure(leftPhase, leftRefs.current, leftBaseX, leftBaseY, true, leftLabelRefs.current)
+      paintFigure(rightPhase, rightRefs.current, rightBaseX, rightBaseY + rightBobOffset, false, rightLabelRefs.current)
+      paintFigure(leftPhase, leftRefs.current, leftBaseX, leftBaseY + leftBobOffset, true, leftLabelRefs.current)
       if (ballRef.current) {
         ballRef.current.setAttribute('cx', String(ball.x))
         ballRef.current.setAttribute('cy', String(ball.y))
@@ -1007,6 +1036,10 @@ export default function HeroRally() {
       rightBaseX = containerRect.width - FIGURE_PX_WIDTH / 2 - FIGURE_EDGE_PADDING
       leftBaseX = FIGURE_PX_WIDTH / 2 + FIGURE_EDGE_PADDING
       figureRestY = containerRect.height / 2
+      // Reset prev-baseY trackers so the bob doesn't trigger a phantom
+      // step-bob from the layout shift.
+      rightPrevBaseY = rightBaseY
+      leftPrevBaseY = leftBaseY
       setSvgSize()
     })
     ro.observe(container)
