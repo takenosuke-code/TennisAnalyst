@@ -367,11 +367,11 @@ const BALL_SPEED = 540
 // is ~0.6x speed, so the swing reads as a deliberate replica of the
 // real motion rather than a slow-mo demo or a twitchy hero loop.
 // User feedback iteration: 700 -> 1100 -> 1600.
-const SWING_MS = 1600
+const SWING_MS = 2400
 const RACKET_HIT_RADIUS = 50
 // At smootherstep5, solving `6u⁵ - 15u⁴ + 10u³ = 0.65` gives u ≈ 0.582,
-// so contact lands 0.582 * 1600 ≈ 931 ms after the swing fires.
-const SWING_TO_CONTACT_MS = 931
+// so contact lands 0.582 * 2400 ≈ 1397 ms after the swing fires.
+const SWING_TO_CONTACT_MS = 1397
 const SWING_CONTACT_PHASE = 0.65
 // Racket-head position (figure-space) at SWING_CONTACT_PHASE. These
 // must match the actual racket-head position the keyframes produce
