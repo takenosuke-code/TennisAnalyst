@@ -234,6 +234,147 @@ Two or three concrete on-court drills tied to the cues above. One drill per bull
 }
 
 /**
+ * Baseline-compare prompt. Used when compareMode === 'baseline' AND the
+ * pipeline produced at least one observation (typically a
+ * `drift_from_baseline` row, but could also be a today-only absolute
+ * fault that the baseline does NOT exhibit).
+ *
+ * Voice: consistency-focused. The player picked a "best-day" baseline
+ * and wants to know how today differs. We frame the coaching around
+ * the diff, not absolute coaching. If the only signal is that the swing
+ * changed in a specific dimension (e.g. drift in elbow angle at
+ * contact), say so plainly. We do NOT invent generic faults.
+ */
+function buildBaselineUserPrompt(args: {
+  primary: Observation
+  secondary: Observation[]
+  exemplars: CueExemplar[]
+  register: Register
+  shotType: ShotType | null
+  tier: SkillTier | null
+  focus: string | null
+  handedness: 'right' | 'left' | null
+  baselineLabel: string | null
+}): string {
+  const { primary, secondary, exemplars, register, shotType, tier, focus, handedness, baselineLabel } = args
+
+  const exemplarLines = exemplars
+    .map((ex) => `- ${register === 'technical' ? ex.technical : ex.plain}`)
+    .join('\n')
+
+  const secondaryLines = secondary.length
+    ? secondary.map((o) => `- ${renderObservationLine(o)}`).join('\n')
+    : '- (none)'
+
+  const tierHint = tier
+    ? `Player skill: ${tier}. Calibrate vocabulary to that level.`
+    : `Player skill: unknown. Use plain coaching language.`
+  const shotHint = shotType ? `Shot: ${shotType}.` : `Shot: not specified.`
+  const handednessHint = handedness
+    ? `Player handedness: ${handedness}-handed.`
+    : `Player handedness: not specified.`
+  const focusHint = focus
+    ? `Player asked: "${focus}". Address it in your primary cue when relevant.`
+    : ''
+  const baselineHint = baselineLabel
+    ? `The player picked their baseline labelled "${baselineLabel}" as the reference for "their best day."`
+    : `The player picked a saved baseline as their reference for "their best day."`
+
+  return `${tierHint}
+${shotHint}
+${handednessHint}
+${focusHint}
+
+${baselineHint}
+
+CONTEXT — this is a CONSISTENCY check, not coaching. The player wants to know how today's swing differs from their saved baseline. The list below contains ONLY differences between today and baseline (or new faults today that the baseline did not show). Do NOT invent additional generic coaching cues. Do NOT critique anything that wasn't flagged. If the list is light (one mild drift), the swing is mostly matching the baseline — say so.
+
+EXEMPLARS (imitate this voice register, do not copy verbatim):
+${exemplarLines}
+
+PRIMARY DIFFERENCE: ${renderObservationLine(primary)}
+
+OTHER DIFFERENCES:
+${secondaryLines}
+
+FORMAT — respond with EXACTLY four sections in this order, no other content:
+
+## Quick Read
+Two or three short bullets. Lead with how today compares to the baseline overall (close match, drifted in this one area, etc.). Each bullet under twelve words. No numbers, no jargon, no em-dashes.
+
+## Primary cue
+One short paragraph addressing the PRIMARY DIFFERENCE above. Frame it as "today vs your baseline" — what changed, and how to bring it back. Imperative, second person, no numbers, no jargon, no em-dashes. If the difference is small or the player asked about something specific that the diff doesn't cover, acknowledge that the swing is largely on-pattern.
+
+## Other things I noticed
+One bullet for EVERY other difference listed above — do not drop any. Each bullet should describe a specific drift from baseline. If there are no other differences, write a single bullet acknowledging the rest of the swing is matching the baseline.
+
+## Recommended drills
+Two or three concrete on-court drills tied to the differences above. One drill per bullet, each a single sentence the player can act on. No numbers, no jargon, no em-dashes.`
+}
+
+/**
+ * Baseline-compare fallback prompt. Used when compareMode === 'baseline'
+ * AND the pipeline produced ZERO observations — meaning today and
+ * baseline match across every rule. The user explicitly asked for this
+ * case to acknowledge similarity instead of inventing coaching: "the
+ * coach should know when to acknowledge that theyre very similar". We
+ * tell the LLM exactly that.
+ */
+function buildBaselineMatchPrompt(args: {
+  register: Register
+  shotType: ShotType | null
+  tier: SkillTier | null
+  focus: string | null
+  handedness: 'right' | 'left' | null
+  baselineLabel: string | null
+}): string {
+  const { register, shotType, tier, focus, handedness, baselineLabel } = args
+  const tierHint = tier
+    ? `Player skill: ${tier}. Calibrate vocabulary to that level.`
+    : `Player skill: unknown. Use plain coaching language.`
+  const shotHint = shotType ? `Shot: ${shotType}.` : `Shot: not specified.`
+  const handednessHint = handedness
+    ? `Player handedness: ${handedness}-handed.`
+    : `Player handedness: not specified.`
+  const registerHint =
+    register === 'technical'
+      ? 'Use the technical register (skilled-player vocabulary).'
+      : 'Use the plain register (beginner-friendly vocabulary).'
+  const focusHint = focus
+    ? `Player asked: "${focus}". Address it in your primary cue when relevant.`
+    : ''
+  const baselineHint = baselineLabel
+    ? `The player is comparing to their baseline labelled "${baselineLabel}".`
+    : `The player is comparing to their saved baseline.`
+
+  return `${tierHint}
+${shotHint}
+${handednessHint}
+${registerHint}
+${focusHint}
+
+${baselineHint}
+
+CONTEXT — today's swing matches the baseline across every check the system runs. The hips, trunk, elbow at contact, knee load, follow-through, and stability all came in within tolerance of the baseline. This is a CONSISTENCY check, not coaching. Tell the player that today's swing is on-pattern. Do NOT invent specific faults. Do NOT pivot into generic coaching tips. If the player asked a focus question and that area also matched, say it matched.
+
+If you genuinely have to give one piece of feedback because the player asked, you may add a single light fine-tuning thought, but lead with "matches your baseline."
+
+FORMAT — respond with EXACTLY four sections in this order, no other content:
+
+## Quick Read
+Two or three short bullets. The first bullet says today matches the baseline. Other bullets can call out a specific area that held up well (hips, contact, finish). Each under twelve words. No numbers, no jargon, no em-dashes.
+
+## Primary cue
+One short paragraph confirming today's swing is matching the baseline. Imperative, second person, no numbers, no jargon, no em-dashes. If the player asked a focus question, address it in plain language.
+
+## Other things I noticed
+A short bulleted list (1-3 bullets) of areas that specifically held up. Frame as "your X is matching" or "the Y read the same as on your best day". No numbers, no jargon.
+
+## Recommended drills
+Two or three drills focused on REPEATING this swing — grooving rhythm and contact point — not on fixing a fault. One drill per bullet, each a single sentence. No numbers, no jargon, no em-dashes.`
+}
+
+/**
  * Generic-coaching prompt used when no observation cleared the confidence
  * floor. The LLM gets the textual angle summary instead of structured
  * observations, plus a directive to coach generally without inventing
@@ -419,15 +560,25 @@ export async function POST(request: NextRequest) {
     keypointsJson: inlineKeypoints,
     compareKeypointsJson,
     userFocus,
-    // compareMode + baselineLabel are still accepted on the wire so the
-    // existing UI doesn't have to change, but the new pipeline routes both
-    // legacy and baseline compares through extractObservations(), so the
-    // labels themselves are no longer interpolated into the prompt.
+    compareMode,
+    baselineLabel,
     shotType: bodyShotType,
     blobUrl: bodyBlobUrl,
     mode: bodyMode,
   } = body
   const isShotMode = bodyMode === 'shot'
+  // Baseline-compare path: the player saved a "best day" baseline and is
+  // comparing today's swing against it. The point isn't generic coaching —
+  // it's consistency. Two changes ride on this flag:
+  //   1. extractObservations() suppresses today-side absolute observations
+  //      that ALSO fire on the baseline (they're not differences, they're
+  //      how the player swings every day).
+  //   2. We swap the prompt so the coach focuses on what changed between
+  //      baseline and today, and acknowledges similarity when nothing did.
+  const isBaselineCompare =
+    compareMode === 'baseline' &&
+    compareKeypointsJson &&
+    typeof compareKeypointsJson === 'object'
 
   const focus = sanitizePromptInput(userFocus, 240)
 
@@ -595,7 +746,12 @@ export async function POST(request: NextRequest) {
   // shots were getting blocked because borderline-but-real observations
   // didn't clear the strict 0.6 floor; the floor is now 0.2 and this
   // fallback handles the residual "still no observations" case gracefully.
-  const isLowConfidence = !primary
+  //
+  // Baseline-compare with zero diffs is NOT low confidence — it's
+  // "today matches your baseline," which is a positive signal. The
+  // banner copy ("pose tracking was uneven") would be wrong, so the
+  // header stays off in that branch.
+  const isLowConfidence = !primary && !isBaselineCompare
 
   // -----------------------------------------------------------------------
   // Coaching branch: build prompt, call LLM, post-filter, fall back to static.
@@ -605,11 +761,66 @@ export async function POST(request: NextRequest) {
   const tierTokens = tier ? TIER_MAX_TOKENS[tier] : DEFAULT_MAX_TOKENS
   const maxTokens = isShotMode ? Math.min(tierTokens, 600) : tierTokens
 
-  // Build the user prompt. Two paths:
-  //   - Normal: structured observations + 3-5 exemplars.
-  //   - Fallback (isLowConfidence): generic coaching from the angle summary.
+  // Build the user prompt. Four paths:
+  //   - baseline-compare with at least one diff: consistency-framed prompt.
+  //   - baseline-compare with zero diffs: "matches your baseline" prompt.
+  //   - Normal solo: structured observations + 3-5 exemplars.
+  //   - Solo fallback (isLowConfidence): generic coaching from the angle summary.
   let userPrompt: string
-  if (primary) {
+  const cleanBaselineLabel: string | null =
+    typeof baselineLabel === 'string' && baselineLabel.trim().length > 0
+      ? sanitizePromptInput(baselineLabel, 60)
+      : null
+
+  if (isBaselineCompare && primary) {
+    const exemplarSet: CueExemplar[] = []
+    const seen = new Set<CueExemplar>()
+    for (const ex of findExemplars(primary, 3)) {
+      if (!seen.has(ex)) {
+        seen.add(ex)
+        exemplarSet.push(ex)
+      }
+    }
+    for (const o of secondary) {
+      for (const ex of findExemplars(o, 1)) {
+        if (exemplarSet.length >= 5) break
+        if (!seen.has(ex)) {
+          seen.add(ex)
+          exemplarSet.push(ex)
+        }
+      }
+      if (exemplarSet.length >= 5) break
+    }
+    if (exemplarSet.length < 3) {
+      for (const ex of CUE_EXEMPLARS) {
+        if (exemplarSet.length >= 3) break
+        if (!seen.has(ex)) {
+          seen.add(ex)
+          exemplarSet.push(ex)
+        }
+      }
+    }
+    userPrompt = buildBaselineUserPrompt({
+      primary,
+      secondary,
+      exemplars: exemplarSet,
+      register,
+      shotType: resolvedShotType,
+      tier,
+      focus,
+      handedness: profile?.dominant_hand ?? null,
+      baselineLabel: cleanBaselineLabel,
+    })
+  } else if (isBaselineCompare && !primary) {
+    userPrompt = buildBaselineMatchPrompt({
+      register,
+      shotType: resolvedShotType,
+      tier,
+      focus,
+      handedness: profile?.dominant_hand ?? null,
+      baselineLabel: cleanBaselineLabel,
+    })
+  } else if (primary) {
     const exemplarSet: CueExemplar[] = []
     const seen = new Set<CueExemplar>()
     for (const ex of findExemplars(primary, 3)) {

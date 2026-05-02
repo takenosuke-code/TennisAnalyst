@@ -37,7 +37,6 @@ function safeBlobFilename(name: string): string {
 
 const ComparisonLayout = dynamic(() => import('@/components/ComparisonLayout'), { ssr: false })
 const LLMCoachingPanel = dynamic(() => import('@/components/LLMCoachingPanel'), { ssr: false })
-const SwingChainOverlay = dynamic(() => import('@/components/SwingChainOverlay'), { ssr: false })
 
 /**
  * Stub for camera-similarity detection. Agent B owns
@@ -498,17 +497,16 @@ export default function BaselineComparePage() {
           )}
 
           {canCompare && selectedBaseline && (
+            // The panel's `frames` prop is the swing we want coached — today
+            // — and `compareFrames` is the reference (baseline). Wiring them
+            // the other way around silently swapped today/baseline values
+            // through extractObservations, so the LLM saw flipped drift rows
+            // ("today's hip rotation is X°" was actually the baseline number).
             <LLMCoachingPanel
               compareMode="baseline"
-              frames={baselineFrames}
-              compareFrames={todayFramesForCompare}
+              frames={todayFramesForCompare}
+              compareFrames={baselineFrames}
               baselineLabel={selectedBaseline.label}
-            />
-          )}
-
-          {canCompare && (
-            <SwingChainOverlay
-              caption="Power flows up the chain — hips first, wrist last. The cleaner the wave, the more effortless the shot."
             />
           )}
         </div>

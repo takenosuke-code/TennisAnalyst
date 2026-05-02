@@ -489,6 +489,66 @@ describe('extractObservations', () => {
     })
     expect(obs.filter((o) => o.pattern === 'drift_from_baseline')).toHaveLength(0)
   })
+
+  // The point of baseline-compare mode is to surface DIFFERENCES from the
+  // saved baseline, not generic coaching. If a fault fires on both clips
+  // (e.g. the player swings with cramped elbows every day), it isn't a
+  // change today — suppress it. Drift rows (already only emitted on
+  // differences) stay.
+  it('suppresses today-side absolute observations that ALSO fire on baseline', () => {
+    const cramped = {
+      right_elbow: 70,
+      right_knee: 150,
+      hip_rotation: 50,
+      trunk_rotation: 60,
+    }
+    const rest = {
+      right_elbow: 130,
+      right_knee: 165,
+      hip_rotation: 10,
+      trunk_rotation: 10,
+    }
+    const today = makeSwingAroundPeak(cramped, rest)
+    const baseline = makeSwingAroundPeak(cramped, rest)
+    const obs = extractObservations({
+      todaySummary: today,
+      baselineSummary: baseline,
+      shotType: 'forehand',
+    })
+    expect(obs.find((o) => o.pattern === 'cramped_elbow')).toBeUndefined()
+  })
+
+  it('keeps today-side absolute observations that do NOT fire on baseline', () => {
+    // Today is cramped at contact, baseline isn't.
+    const todayPeak = {
+      right_elbow: 70,
+      right_knee: 150,
+      hip_rotation: 50,
+      trunk_rotation: 60,
+    }
+    const baselinePeak = {
+      right_elbow: 130,
+      right_knee: 150,
+      hip_rotation: 50,
+      trunk_rotation: 60,
+    }
+    const rest = {
+      right_elbow: 130,
+      right_knee: 165,
+      hip_rotation: 10,
+      trunk_rotation: 10,
+    }
+    const today = makeSwingAroundPeak(todayPeak, rest)
+    const baseline = makeSwingAroundPeak(baselinePeak, rest)
+    const obs = extractObservations({
+      todaySummary: today,
+      baselineSummary: baseline,
+      shotType: 'forehand',
+    })
+    const cramped = obs.find((o) => o.pattern === 'cramped_elbow')
+    expect(cramped).toBeDefined()
+    expect(cramped!.joint).toBe('right_elbow')
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -1162,34 +1162,59 @@ export function extractObservations(input: ExtractionInput): Observation[] {
   // bite only on truly garbage frames, not a single occluded landmark.
   if (todayCtx.meanVis < 0.4) return []
 
-  const observations: Observation[] = []
-  observations.push(...checkElbowAtContact(todayCtx, input.shotType))
-  observations.push(...checkKneeLoad(todayCtx, input.shotType))
-  observations.push(...checkRotationExcursion(todayCtx))
-  observations.push(...checkFollowThrough(todayCtx))
   // Spatial-trajectory rules need fps to time the loading frame
   // (contact - 150ms) and post-contact frame (contact + 150ms). Derive
   // from the median frame timestamp delta; default to 30 if timestamps
   // are unusable.
   const fps = inferFps(input.todaySummary)
-  observations.push(...checkLegDrive(todayCtx, fps))
-  observations.push(...checkPushout(todayCtx, fps))
-  observations.push(...checkStability(todayCtx))
 
-  // Baseline-compare layer adds drift_from_baseline rows on top of the
-  // standard rules. The standard rules still run on `todaySummary` so we can
-  // still surface absolute issues even when baseline matches today's clip.
+  const todayAbsolute: Observation[] = []
+  todayAbsolute.push(...checkElbowAtContact(todayCtx, input.shotType))
+  todayAbsolute.push(...checkKneeLoad(todayCtx, input.shotType))
+  todayAbsolute.push(...checkRotationExcursion(todayCtx))
+  todayAbsolute.push(...checkFollowThrough(todayCtx))
+  todayAbsolute.push(...checkLegDrive(todayCtx, fps))
+  todayAbsolute.push(...checkPushout(todayCtx, fps))
+  todayAbsolute.push(...checkStability(todayCtx))
+
+  // Baseline-compare mode is for CONSISTENCY, not coaching. If a fault
+  // shows up in today's clip AND in the baseline (e.g. neither shot
+  // bends the knees deeply), the player isn't doing anything different
+  // today — they swing this way every day. Calling it out reads as
+  // generic coaching, which the user explicitly rejected ("the coach
+  // shouldnt say youre not bending your knees in todays shot if youre
+  // not doing it the baseline shot either"). So we run the same rules
+  // on the baseline and SUPPRESS today-side absolute observations whose
+  // (joint, phase, pattern) also fires on the baseline. Drift rows
+  // stay — those ARE the differences.
   if (input.baselineSummary && input.baselineSummary.length > 0) {
     const baselineCtx = buildRuleContext({
       todaySummary: input.baselineSummary,
       shotType: input.shotType,
     })
     if (baselineCtx) {
-      observations.push(...compareDrift(todayCtx, baselineCtx, input.shotType))
+      const baselineAbsolute: Observation[] = []
+      baselineAbsolute.push(...checkElbowAtContact(baselineCtx, input.shotType))
+      baselineAbsolute.push(...checkKneeLoad(baselineCtx, input.shotType))
+      baselineAbsolute.push(...checkRotationExcursion(baselineCtx))
+      baselineAbsolute.push(...checkFollowThrough(baselineCtx))
+      const baselineFps = inferFps(input.baselineSummary)
+      baselineAbsolute.push(...checkLegDrive(baselineCtx, baselineFps))
+      baselineAbsolute.push(...checkPushout(baselineCtx, baselineFps))
+      baselineAbsolute.push(...checkStability(baselineCtx))
+
+      const baselineFingerprints = new Set(
+        baselineAbsolute.map((o) => `${o.joint}|${o.phase}|${o.pattern}`),
+      )
+      const filteredToday = todayAbsolute.filter(
+        (o) => !baselineFingerprints.has(`${o.joint}|${o.phase}|${o.pattern}`),
+      )
+      const drift = compareDrift(todayCtx, baselineCtx, input.shotType)
+      return [...filteredToday, ...drift]
     }
   }
 
-  return observations
+  return todayAbsolute
 }
 
 /**

@@ -69,8 +69,10 @@ export interface DetectStrokesOptions {
    */
   prePadMs?: number
   /**
-   * Post-pad window in milliseconds. Default 500ms (typical
-   * follow-through / deceleration phase).
+   * Post-pad window in milliseconds. Default 900ms — amateur
+   * follow-through often runs 600–800ms past wrist-speed peak. Voronoi
+   * caps the pad to the midpoint of the next peak, so this only
+   * stretches isolated swings where there's room.
    */
   postPadMs?: number
   /**
@@ -104,16 +106,17 @@ export interface DetectStrokesOptions {
   wlenMs?: number
   /**
    * Absolute prominence floor in normalized-coords-per-second units.
-   * Anything below is rejected outright regardless of MAD. Default 0.3
-   * — comfortably below typical real-swing prominence (1.0–3.5) and
-   * above typical walking / fidget prominence (0.05–0.3).
+   * Anything below is rejected outright regardless of MAD. Default 0.2
+   * — sits above typical walking / fidget prominence (0.05–0.15) and
+   * below soft amateur swings that were previously being dropped at
+   * 0.3.
    */
   prominenceFloorAbs?: number
   /**
    * Multiplier on `1.4826 · MAD(speeds)` for the data-driven prominence
    * floor. Effective floor = max(prominenceFloorAbs, k · 1.4826 · MAD).
-   * Default 4. Higher values reject more candidates; 3 is permissive,
-   * 5 is strict.
+   * Default 3. Higher values reject more candidates; 5 is strict,
+   * 3 is permissive enough to keep softer amateur swings.
    */
   prominenceFloorMadK?: number
   /**
@@ -150,16 +153,29 @@ const VISIBILITY_FLOOR = 0.5
 // inter-stroke window-overlap independently. 350ms still kills tap-back
 // double-peaks (~300ms apart) but lets through fast volleys >350ms
 // apart that the old 500ms refractory was over-suppressing.
+//
+// 2026-05 (round 2) — three leniency tweaks driven by amateur-clip
+// feedback:
+//   - postPadMs 500 → 900: amateur follow-through often runs ~700ms
+//     past wrist-speed peak (decel + recovery to neutral). Voronoi
+//     still caps the pad when a neighbor is close, so dense rallies
+//     don't get over-padded clips.
+//   - prominenceFloorAbs 0.3 → 0.2 and prominenceFloorMadK 4 → 3:
+//     real swings on sub-tier amateurs (slower wrist speeds) were
+//     dipping under the prior absolute floor, so the user reported
+//     "still missing some shots." The pair stays comfortably above
+//     walking / fidget prominence (0.05–0.15) while accepting softer
+//     swings that we were previously dropping.
 export const STROKE_DEFAULTS = {
   prePadMs: 1000,
-  postPadMs: 500,
+  postPadMs: 900,
   refractoryMs: 350,
   thresholdK: 1.0,
   smoothingFrames: 5,
   minPeakDistanceFrames: 3,
   wlenMs: 2000,
-  prominenceFloorAbs: 0.3,
-  prominenceFloorMadK: 4,
+  prominenceFloorAbs: 0.2,
+  prominenceFloorMadK: 3,
   widthMinMs: 60,
   widthMaxMs: 1000,
 } as const

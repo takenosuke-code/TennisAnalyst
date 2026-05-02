@@ -267,7 +267,7 @@ describe('detectStrokes — hysteresis-bug regression', () => {
 // ---------------------------------------------------------------------------
 
 describe('detectStrokes — biomechanical padding', () => {
-  it('produces ~1s pre-pad / ~0.5s post-pad at 30 fps', () => {
+  it('produces ~1s pre-pad / ~0.9s post-pad at 30 fps', () => {
     const FPS = 30
     const frames = singlePeakSwing(120, FPS, 60)
     const strokes = detectStrokes(frames)
@@ -275,12 +275,12 @@ describe('detectStrokes — biomechanical padding', () => {
     const s = strokes[0]
     // 1s @ 30fps = 30 frames
     expect(s.peakFrame - s.startFrame).toBeCloseTo(30, 0)
-    // 0.5s @ 30fps = 15 frames
-    expect(s.endFrame - s.peakFrame).toBeCloseTo(15, 0)
+    // 0.9s @ 30fps = 27 frames
+    expect(s.endFrame - s.peakFrame).toBeCloseTo(27, 0)
     expect(s.fps).toBe(30)
   })
 
-  it('produces ~1s pre-pad / ~0.5s post-pad at 60 fps', () => {
+  it('produces ~1s pre-pad / ~0.9s post-pad at 60 fps', () => {
     const FPS = 60
     const frames = singlePeakSwing(240, FPS, 120)
     const strokes = detectStrokes(frames)
@@ -288,8 +288,8 @@ describe('detectStrokes — biomechanical padding', () => {
     const s = strokes[0]
     // 1s @ 60fps = 60 frames
     expect(s.peakFrame - s.startFrame).toBeCloseTo(60, 0)
-    // 0.5s @ 60fps = 30 frames
-    expect(s.endFrame - s.peakFrame).toBeCloseTo(30, 0)
+    // 0.9s @ 60fps = 54 frames
+    expect(s.endFrame - s.peakFrame).toBeCloseTo(54, 0)
     expect(s.fps).toBe(60)
   })
 
@@ -301,7 +301,8 @@ describe('detectStrokes — biomechanical padding', () => {
     expect(strokes.length).toBe(1)
     const s = strokes[0]
     expect(s.peakFrame - s.startFrame).toBeCloseTo(60, 0)
-    expect(s.endFrame - s.peakFrame).toBeCloseTo(30, 0)
+    // 0.9s @ 60fps = 54 frames
+    expect(s.endFrame - s.peakFrame).toBeCloseTo(54, 0)
     expect(s.fps).toBe(60)
   })
 })
@@ -471,9 +472,9 @@ describe('detectStrokes — dominant-hand selection', () => {
 // ---------------------------------------------------------------------------
 
 describe('detectStrokes — defaults', () => {
-  it('uses 1000ms / 500ms / 350ms as documented defaults', () => {
+  it('uses 1000ms / 900ms / 350ms as documented defaults', () => {
     expect(STROKE_DEFAULTS.prePadMs).toBe(1000)
-    expect(STROKE_DEFAULTS.postPadMs).toBe(500)
+    expect(STROKE_DEFAULTS.postPadMs).toBe(900)
     expect(STROKE_DEFAULTS.refractoryMs).toBe(350)
   })
 
@@ -556,9 +557,9 @@ describe('detectStrokes — Voronoi boundaries on close-spaced strokes', () => {
     const strokes = detectStrokes(frames)
     expect(strokes.length).toBe(1)
     const s = strokes[0]
-    // Default 1000ms pre-pad / 500ms post-pad at 30fps.
+    // Default 1000ms pre-pad / 900ms post-pad at 30fps.
     expect(s.peakFrame - s.startFrame).toBeCloseTo(30, 0)
-    expect(s.endFrame - s.peakFrame).toBeCloseTo(15, 0)
+    expect(s.endFrame - s.peakFrame).toBeCloseTo(27, 0)
   })
 })
 
