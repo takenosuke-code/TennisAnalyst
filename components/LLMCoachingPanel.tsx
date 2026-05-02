@@ -540,37 +540,46 @@ function CoachingSections({
         </p>
       )}
 
+      {/* Headline card: the digestible takeaways. Visually dominant —
+          bigger text, clay accent, sits at the top. The user's eye
+          lands on this first, gets the actionable read, and only
+          descends into reasoning if they want it. Section heading
+          copy stays "Quick Read" to match the LLM markdown contract
+          and the existing render-tests. */}
       {quickRead != null && (
-        <div className="bg-cream-soft border-l-4 border-clay p-5">
-          <p className="text-[11px] uppercase tracking-[0.18em] text-clay mb-3 font-semibold">
+        <div className="bg-cream-soft border-l-4 border-clay p-6">
+          <p className="text-xs uppercase tracking-[0.22em] text-clay mb-4 font-bold">
             Quick Read
           </p>
-          <BulletList markdown={quickRead} />
+          <BulletList markdown={quickRead} prominent />
           {loading && quickRead.trim() && (
-            <span className="inline-block w-1.5 h-4 bg-clay animate-pulse mt-1" />
+            <span className="inline-block w-1.5 h-4 bg-clay animate-pulse mt-2" />
           )}
         </div>
       )}
 
+      {/* Reasoning panel: smaller, secondary. The "why" behind the
+          headline above — paragraph cue + secondary bullets. The
+          player reads this if they want the analysis. */}
       {(primary != null || other != null) && (
-        <div className="bg-cream-soft border border-ink/15 p-5">
-          <p className="text-xs uppercase tracking-[0.18em] text-ink font-bold mb-3">
+        <div className="px-1">
+          <p className="text-[11px] uppercase tracking-[0.18em] text-ink/50 mb-3 font-semibold">
             In-depth analysis
           </p>
           {primary != null && (
-            <p className="text-sm text-ink/80 italic leading-relaxed mb-4">
+            <p className="text-sm text-ink/75 leading-relaxed mb-3">
               {primary.trim()}
               {loading && primary.trim() && (
                 <span className="inline-block w-1.5 h-4 bg-clay animate-pulse ml-1 align-middle" />
               )}
             </p>
           )}
-          {other != null && <BulletList markdown={other} prominent />}
+          {other != null && <BulletList markdown={other} />}
         </div>
       )}
 
       {drills != null && (
-        <div>
+        <div className="border-t border-ink/10 pt-4">
           <p className="text-[11px] uppercase tracking-[0.18em] text-ink/50 mb-2 font-semibold">
             Recommended drills
           </p>
