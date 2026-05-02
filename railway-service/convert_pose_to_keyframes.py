@@ -116,14 +116,14 @@ def main():
     print(f"# total frames: {len(frames)}, peak (contact): frame {peak_idx} "
           f"t={frames[peak_idx]['timestamp_ms']}ms")
 
-    # 2. Window: ~1.0s pre-contact (full prep) + ~0.55s post (full
-    # follow-through THROUGH return to ready) so the figure's pose at
-    # the end of the cycle is close to its pose at the start, keeping
-    # the loop seam smooth. Earlier window cropped at 0.2s post and
-    # left the arm wrapped over the off-shoulder, forcing Hermite to
-    # whip 130° back to idle in the recovery phase.
+    # 2. Window: ~1.0s pre-contact + ~0.85s post (follow-through
+    # THROUGH the recovery toward ready). Wider post window than
+    # before (0.55 -> 0.85s) so the racket-arm angles near the end
+    # of the cycle are naturally close to the idle pose, eliminating
+    # the 170+ deg loop-seam whip that was reading as "jitter at the
+    # end" of the swing.
     pre_frames = int(1.0 * fps)
-    post_frames = int(0.55 * fps)
+    post_frames = int(0.85 * fps)
     start = max(0, peak_idx - pre_frames)
     end = min(len(frames), peak_idx + post_frames + 1)
     window = frames[start:end]
@@ -272,34 +272,34 @@ def main():
     # AFTER smoothing so racket inherits the wider 9-frame fArmR MA.
     smoothed_angles["racket"] = list(smoothed_angles["fArmR"])
 
-    # 7.6. Off-arm dampened toward a LOW REST target (not circular
-    # mean). User feedback: off-arm was reading "high" at rest. The
-    # natural mean for Alcaraz's off-arm is mid-air because his off-
-    # arm is active across the swing; pulling toward a fixed
-    # arm-hanging-at-side pose keeps the resting / non-active phases
-    # low.
-    def dampen_toward_target(angles, target, gain):
+    # 7.6. Off-arm dampened toward a LOW REST target IN UNWRAPPED
+    # SPACE. Per-frame shortDelta dampening had a failure mode at
+    # full-rotation arms: Alcaraz's off-arm sweeps ~340 deg
+    # unwrapped during the swing, and per-frame dampening with
+    # shortDelta to a fixed target=100 still left the unwrapped
+    # span >180, so the rendered trajectory wrapped through ±180
+    # and read as "the off-arm doing a full circle". Operating on
+    # unwrapped values + stronger gain (0.65) compresses the span
+    # to <180, so the off-arm raises and returns without a wrap.
+    def dampen_toward_target_unwrapped(angles, target, gain):
+        unwrapped = unwrap_angle_series(angles)
+        new_unwrapped = [u + (target - u) * gain for u in unwrapped]
+        # Re-wrap to (-180, 180]
         out = []
-        for a in angles:
-            delta = target - a
-            while delta > 180:
-                delta -= 360
-            while delta <= -180:
-                delta += 360
-            new_a = a + delta * gain
-            while new_a > 180:
-                new_a -= 360
-            while new_a <= -180:
-                new_a += 360
-            out.append(new_a)
+        for a in new_unwrapped:
+            while a > 180:
+                a -= 360
+            while a <= -180:
+                a += 360
+            out.append(a)
         return out
 
     UARML_REST = 95.0   # straight-down with slight outward bias
     FARML_REST = 100.0  # forearm hanging slightly forward of straight down
-    smoothed_angles["uArmL"] = dampen_toward_target(
-        smoothed_angles["uArmL"], UARML_REST, gain=0.4)
-    smoothed_angles["fArmL"] = dampen_toward_target(
-        smoothed_angles["fArmL"], FARML_REST, gain=0.4)
+    smoothed_angles["uArmL"] = dampen_toward_target_unwrapped(
+        smoothed_angles["uArmL"], UARML_REST, gain=0.65)
+    smoothed_angles["fArmL"] = dampen_toward_target_unwrapped(
+        smoothed_angles["fArmL"], FARML_REST, gain=0.65)
 
     # 8. hipCenter: dampen motion (so the figure doesn't walk across
     # the screen) + mirror around 0.5 to flip swing direction.
