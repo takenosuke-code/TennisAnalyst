@@ -12,7 +12,7 @@ import SwingBaselineGrid, { type SwingBaselineSaveOverride } from '@/components/
 import BackendChip from '@/components/BackendChip'
 import type { SegmentCardSaveOverride } from '@/components/SegmentCard'
 import { usePoseStore, useJointStore, useCompareHandoff } from '@/store'
-import { detectSwings } from '@/lib/jointAngles'
+import { detectSwings, deriveFps } from '@/lib/jointAngles'
 import { scoreStrokes } from '@/lib/strokeQuality'
 import type { DetectedStroke } from '@/lib/strokeAnalysis'
 import { useUser } from '@/hooks/useUser'
@@ -274,25 +274,51 @@ export default function AnalyzePage() {
   ) => {
     const swing = swings[swingIndex - 1]
     if (!swing || !blobUrl) return
+    if (!sessionId) {
+      // sessionId is required for /from-swing because the route looks
+      // up the source video by user_sessions.id. Without it we'd have
+      // to fall back to the old (broken) untrimmed POST /api/baselines
+      // path. Surface clearly so the user knows to wait for upload to
+      // finish or re-upload.
+      setErrorBySwingIndex((prev) => ({
+        ...prev,
+        [swingIndex]: 'Save unavailable: missing session id. Re-upload and try again.',
+      }))
+      return
+    }
 
     setSavingSwingIndex(swingIndex)
     setErrorBySwingIndex((prev) => ({ ...prev, [swingIndex]: null }))
     try {
+      // The new /from-swing endpoint trims the source video to the
+      // swing window via Railway and re-zeroes pose timestamps so the
+      // saved baseline plays as just the swing clip (not the whole
+      // 17-second rally video). The route derives start_ms/end_ms
+      // server-side from startFrame/endFrame/fps — we send the frame
+      // bounds, not the millisecond bounds, so a malicious client can't
+      // crop outside the swing window.
+      // SwingSegment doesn't carry fps explicitly — derive it from the
+      // parent allFrames timestamps (same fps for the whole capture).
+      // Falls back to 30 inside deriveFps when timestamps are missing.
+      const sessionFps = deriveFps(allFrames)
       const keypointsJson = {
-        fps_sampled: 30,
+        fps_sampled: sessionFps,
         frame_count: swing.frames.length,
         frames: swing.frames,
       }
-      const res = await fetch('/api/baselines', {
+      const res = await fetch('/api/baselines/from-swing', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
         body: JSON.stringify({
-          blobUrl,
+          sessionId,
+          startFrame: swing.startFrame,
+          endFrame: swing.endFrame,
+          peakFrame: swing.peakFrame,
+          fps: sessionFps,
           shotType: override.shotType,
-          keypointsJson,
           label: override.label,
-          sourceSessionId: sessionId ?? undefined,
+          keypointsJson,
         }),
       })
       if (!res.ok) {
