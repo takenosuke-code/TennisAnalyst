@@ -471,10 +471,10 @@ describe('detectStrokes — dominant-hand selection', () => {
 // ---------------------------------------------------------------------------
 
 describe('detectStrokes — defaults', () => {
-  it('uses 1000ms / 500ms / 500ms as documented defaults', () => {
+  it('uses 1000ms / 500ms / 350ms as documented defaults', () => {
     expect(STROKE_DEFAULTS.prePadMs).toBe(1000)
     expect(STROKE_DEFAULTS.postPadMs).toBe(500)
-    expect(STROKE_DEFAULTS.refractoryMs).toBe(500)
+    expect(STROKE_DEFAULTS.refractoryMs).toBe(350)
   })
 
   it('respects custom prePadMs / postPadMs', () => {
@@ -485,6 +485,160 @@ describe('detectStrokes — defaults', () => {
     // 500ms @ 30fps = 15 frames pre, 200ms = 6 frames post
     expect(s.peakFrame - s.startFrame).toBeCloseTo(15, 0)
     expect(s.endFrame - s.peakFrame).toBeCloseTo(6, 0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 2026-05 rewrite — over-detection + overlap regressions on long video
+// ---------------------------------------------------------------------------
+
+describe('detectStrokes — prominence collapses jittery shoulders on a real swing', () => {
+  it('returns ONE peak when a real swing carries 3 jittery local maxima around its true peak', () => {
+    // Build a clip where the wrist trajectory has a clear sigmoid swing
+    // centered at frame 60, but with sub-frame-amplitude jitter that
+    // creates 2-3 local maxima in the velocity signal around the peak.
+    // Old detector: each local max above threshold = a separate stroke.
+    // New detector: prominence walks find the trough between candidate
+    // peaks; only the true peak survives.
+    const FPS = 30
+    const frames = buildWristClip(120, FPS, (i) => {
+      const u = (i - 60) * 0.5
+      const sigmoid = 1 / (1 + Math.exp(-u))
+      // Add tiny jitter that perturbs position in a way that creates
+      // multiple local maxima in the SPEED signal around the peak.
+      const jitter =
+        Math.abs(i - 60) < 8 ? 0.003 * Math.sin((i - 60) * 1.7) : 0
+      return { x: 0.4 + 0.45 * sigmoid + jitter, y: 0.55 }
+    })
+    const strokes = detectStrokes(frames)
+    expect(strokes.length).toBe(1)
+    expect(strokes[0].peakFrame).toBeGreaterThanOrEqual(58)
+    expect(strokes[0].peakFrame).toBeLessThanOrEqual(62)
+  })
+})
+
+describe('detectStrokes — Voronoi boundaries on close-spaced strokes', () => {
+  it('two strokes ~800ms apart produce non-overlapping clips (midpoint boundary)', () => {
+    // 800ms at 30fps = 24 frames. Pre-pad of 30 frames + post-pad of 15
+    // would have overlapped these clips by ~21 frames each. Voronoi
+    // splits at the midpoint between peaks so neither clip overlaps.
+    const FPS = 30
+    const frames = sigmoidChain(150, FPS, [40, 64], 0.4, 0.6)
+    const strokes = detectStrokes(frames)
+    expect(strokes.length).toBe(2)
+    const [a, b] = strokes
+    // Clips must not overlap (a.endFrame < b.startFrame).
+    expect(a.endFrame).toBeLessThan(b.startFrame)
+    // Midpoint between peaks ~52: a.endFrame should be at 52 (or 51,52)
+    // and b.startFrame should be at 53.
+    const midpoint = Math.floor((a.peakFrame + b.peakFrame) / 2)
+    expect(a.endFrame).toBeLessThanOrEqual(midpoint)
+    expect(b.startFrame).toBeGreaterThanOrEqual(midpoint)
+  })
+
+  it('three back-to-back strokes spaced ~1s apart all isolate cleanly', () => {
+    // Three sigmoid bursts 30 frames apart. Default pre-pad is 30
+    // frames — without Voronoi, each clip would extend back to the
+    // previous stroke's peak. With Voronoi, every frame belongs to
+    // exactly one stroke.
+    const FPS = 30
+    const frames = sigmoidChain(180, FPS, [40, 70, 100], 0.4, 0.6)
+    const strokes = detectStrokes(frames)
+    expect(strokes.length).toBe(3)
+    // Adjacent clips must not overlap.
+    expect(strokes[0].endFrame).toBeLessThan(strokes[1].startFrame)
+    expect(strokes[1].endFrame).toBeLessThan(strokes[2].startFrame)
+  })
+
+  it('isolated stroke uses full pre/post pad (no neighbor → no Voronoi shrink)', () => {
+    const FPS = 30
+    const frames = singlePeakSwing(120, FPS, 60)
+    const strokes = detectStrokes(frames)
+    expect(strokes.length).toBe(1)
+    const s = strokes[0]
+    // Default 1000ms pre-pad / 500ms post-pad at 30fps.
+    expect(s.peakFrame - s.startFrame).toBeCloseTo(30, 0)
+    expect(s.endFrame - s.peakFrame).toBeCloseTo(15, 0)
+  })
+})
+
+describe('detectStrokes — long-video over-detection regression', () => {
+  it('30-second clip with 4 real swings + walking-arm sway returns exactly 4 strokes', () => {
+    // Realistic long-video failure mode: between strokes the user is
+    // adjusting grip / walking back to position. The wrist still moves
+    // (low-amplitude, low-frequency), but it shouldn't fire as a stroke.
+    // Old detector: P90 threshold → walking sway clears it → many
+    // false positives. New detector: prominence floor 0.3 + width
+    // filter → only the real swings survive.
+    //
+    // Use a monotonic sigmoid-chain trajectory so each planted swing
+    // produces exactly one speed peak (no symmetric deceleration tail
+    // creating a phantom second peak).
+    const FPS = 30
+    const TOTAL = 900 // 30 seconds
+    const swingCenters = [120, 320, 540, 760]
+
+    const frames = buildWristClip(TOTAL, FPS, (i) => {
+      // Slow walking sway: low-amplitude sin that should never clear
+      // the prominence floor.
+      const sway = 0.02 * Math.sin(i * 0.05)
+      // Each planted swing shifts the wrist's resting position
+      // forward by a fixed amount via a steep sigmoid. Cumulative
+      // drift across 4 swings is 0.4 (well under 1.0 normalized).
+      let pos = 0.45
+      for (const center of swingCenters) {
+        pos += 0.1 / (1 + Math.exp(-(i - center) * 0.6))
+      }
+      return { x: pos + sway, y: 0.55 }
+    })
+
+    const strokes = detectStrokes(frames)
+    expect(strokes.length).toBe(4)
+    for (let i = 0; i < 4; i++) {
+      expect(strokes[i].peakFrame).toBeGreaterThanOrEqual(swingCenters[i] - 5)
+      expect(strokes[i].peakFrame).toBeLessThanOrEqual(swingCenters[i] + 5)
+    }
+    for (let i = 1; i < strokes.length; i++) {
+      expect(strokes[i - 1].endFrame).toBeLessThan(strokes[i].startFrame)
+    }
+  })
+
+  it('ignores low-amplitude grip-adjustment fidget between two real swings', () => {
+    // Two real swings + a narrow but tiny "fidget" between them. The
+    // fidget IS a local maximum but its prominence is far below the
+    // 0.3 floor.
+    const FPS = 30
+    const frames = buildWristClip(180, FPS, (i) => {
+      const swing1 = 0.4 / (1 + Math.exp(-(i - 40) * 0.6))
+      const swing2 = 0.4 / (1 + Math.exp(-(i - 130) * 0.6))
+      // Tiny fidget bump at frame 85 (between swings).
+      const fidget =
+        Math.abs(i - 85) < 4
+          ? 0.015 * Math.exp(-((i - 85) ** 2) / 4)
+          : 0
+      return { x: 0.4 + swing1 + swing2 + fidget, y: 0.55 }
+    })
+    const strokes = detectStrokes(frames)
+    expect(strokes.length).toBe(2)
+  })
+})
+
+describe('detectStrokes — width filter rejects long slow drifts', () => {
+  it('drops a wide low-prominence drift (player walking with arm sway)', () => {
+    // Wide, gentle wrist drift — a slow ramp over 50 frames (~1.7s).
+    // Position changes monotonically; speed signal has a low, broad
+    // bump that exceeds the absolute prominence floor only briefly
+    // and has width > widthMaxMs.
+    const FPS = 30
+    const frames = buildWristClip(120, FPS, (i) => {
+      // Slow drift from x=0.4 to x=0.6 over 50 frames, then hold.
+      if (i < 50) return { x: 0.4 + 0.004 * i, y: 0.55 }
+      return { x: 0.6, y: 0.55 }
+    })
+    const strokes = detectStrokes(frames)
+    // Either dropped by prominence floor or by width filter — both
+    // are valid outcomes; either kills the false positive.
+    expect(strokes.length).toBe(0)
   })
 })
 

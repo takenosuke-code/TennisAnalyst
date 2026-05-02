@@ -411,11 +411,11 @@ describe('detectSwings', () => {
     sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * 33
     sections.push(buildSwing(SWING, cursorMs, 60));  cursorMs += SWING * 33
     sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * 33
-    sections.push(buildSwing(SWING, cursorMs, 12));  cursorMs += SWING * 33
+    sections.push(buildSwing(SWING, cursorMs, 30));  cursorMs += SWING * 33
     sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * 33
-    sections.push(buildSwing(SWING, cursorMs, 12));  cursorMs += SWING * 33
+    sections.push(buildSwing(SWING, cursorMs, 30));  cursorMs += SWING * 33
     sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * 33
-    sections.push(buildSwing(SWING, cursorMs, 12));  cursorMs += SWING * 33
+    sections.push(buildSwing(SWING, cursorMs, 30));  cursorMs += SWING * 33
     sections.push(makeRestFrames(REST, cursorMs)); cursorMs += REST * 33
 
     const allFrames: PoseFrame[] = []
@@ -520,6 +520,80 @@ describe('detectSwings', () => {
     // peakFrame should be near the spike
     expect(result[0].peakFrame).toBeGreaterThanOrEqual(10)
     expect(result[0].peakFrame).toBeLessThanOrEqual(20)
+  })
+
+  // -------------------------------------------------------------------------
+  // dropRejected option
+  // -------------------------------------------------------------------------
+
+  it('dropRejected: false (default) keeps all detected strokes regardless of quality', () => {
+    // Build a clip where the detector finds a swing but scoreStrokes
+    // would reject it (low landmark visibility — lands below the
+    // 0.6 median floor in evaluateRejection).
+    const frames: PoseFrame[] = []
+    for (let i = 0; i < 80; i++) {
+      const u = (i - 40) * 0.4
+      const sigmoid = 1 / (1 + Math.exp(-u))
+      const wristX = 0.4 + 0.45 * sigmoid
+      const landmarks = makeStandingPose().map((lm) =>
+        lm.id === LANDMARK_INDICES.RIGHT_WRIST
+          ? { ...lm, x: wristX, y: 0.55, visibility: 0.9 }
+          : { ...lm, visibility: 0.2 } // upper body invisible
+      )
+      frames.push(makeFrame(i, Math.round((i * 1000) / 30), landmarks))
+    }
+    const result = detectSwings(frames)
+    expect(result.length).toBe(1)
+  })
+
+  it('dropRejected: true filters out strokes flagged by scoreStrokes', () => {
+    // Same low-visibility setup as above. With dropRejected=true the
+    // scoreStrokes pass should reject the stroke for low_visibility,
+    // and the wrapper should return an empty list (NOT the legacy
+    // whole-clip fallback — that would just produce a phantom card).
+    const frames: PoseFrame[] = []
+    for (let i = 0; i < 80; i++) {
+      const u = (i - 40) * 0.4
+      const sigmoid = 1 / (1 + Math.exp(-u))
+      const wristX = 0.4 + 0.45 * sigmoid
+      const landmarks = makeStandingPose().map((lm) =>
+        lm.id === LANDMARK_INDICES.RIGHT_WRIST
+          ? { ...lm, x: wristX, y: 0.55, visibility: 0.9 }
+          : { ...lm, visibility: 0.2 }
+      )
+      frames.push(makeFrame(i, Math.round((i * 1000) / 30), landmarks))
+    }
+    const result = detectSwings(frames, { dropRejected: true })
+    expect(result.length).toBe(0)
+  })
+
+  it('dropRejected: true keeps strokes that pass quality and drops the bad ones', () => {
+    // Two swings; both have high upper-body visibility, modest wrist
+    // amplitude (so bbox cx drift stays under the 0.15 camera-pan
+    // floor), and provide hip/trunk angles so scoreStrokes' kinetic-
+    // chain timing peaks resolve. The option must be non-destructive
+    // on this clean input.
+    const frames: PoseFrame[] = []
+    for (let i = 0; i < 180; i++) {
+      const swing1 = 1 / (1 + Math.exp(-(i - 60) * 0.6))
+      const swing2 = 1 / (1 + Math.exp(-(i - 120) * 0.6))
+      const wristX = 0.4 + 0.10 * swing1 + 0.10 * swing2
+      const landmarks = makeStandingPose().map((lm) =>
+        lm.id === LANDMARK_INDICES.RIGHT_WRIST
+          ? { ...lm, x: wristX, y: 0.55, visibility: 0.9 }
+          : { ...lm, visibility: 0.9 }
+      )
+      frames.push(
+        makeFrame(i, Math.round((i * 1000) / 30), landmarks, {
+          right_elbow: 130,
+          left_elbow: 130,
+          hip_rotation: 30 + 30 * (swing1 + swing2),
+          trunk_rotation: 50 + 30 * (swing1 + swing2),
+        }),
+      )
+    }
+    const result = detectSwings(frames, { dropRejected: true })
+    expect(result.length).toBe(2)
   })
 })
 

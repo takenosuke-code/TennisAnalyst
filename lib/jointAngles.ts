@@ -1,5 +1,6 @@
 import type { Landmark, JointAngles, PoseFrame } from './supabase'
 import { detectStrokes } from './swingDetect'
+import { scoreStrokes } from './strokeQuality'
 
 // MediaPipe Pose landmark indices
 export const LANDMARK_INDICES = {
@@ -230,9 +231,19 @@ export function detectSwings(
     fps?: number
     /** Profile dominant-hand override forwarded to detectStrokes. */
     dominantHand?: 'left' | 'right' | null
+    /**
+     * When true, runs `scoreStrokes` and filters out strokes flagged
+     * `rejected: true` (low visibility, camera pan/zoom, missing
+     * kinematic chain data). Default false — preserves the legacy
+     * "always return everything detectStrokes saw" contract that
+     * synthetic test fixtures rely on. Set true at the analyze /
+     * baseline UI surface so phantom video cards from too-noisy
+     * strokes don't reach users.
+     */
+    dropRejected?: boolean
   } = {}
 ): SwingSegment[] {
-  const { minSwingFrames = 12 } = opts
+  const { minSwingFrames = 12, dropRejected = false } = opts
 
   // Whole-clip fallback for very short inputs — preserves the legacy
   // "always return something" behavior callers rely on.
@@ -248,12 +259,35 @@ export function detectSwings(
     }]
   }
 
-  const strokes = detectStrokes(allFrames, {
+  let strokes = detectStrokes(allFrames, {
     fps: opts.fps,
     dominantHand: opts.dominantHand,
   })
 
+  if (dropRejected && strokes.length > 0) {
+    const scores = scoreStrokes(strokes, allFrames)
+    if (scores.length === 0) {
+      // scoreStrokes returns [] when EVERY stroke was rejected. The
+      // earlier `scores.length > 0` guard silently let those phantom
+      // strokes through — exactly the bug this option was added to
+      // prevent. Treat empty as "all rejected" and clear the list.
+      strokes = []
+    } else {
+      const surviving = new Set<string>()
+      for (const s of scores) {
+        if (!s.rejected) surviving.add(s.strokeId)
+      }
+      strokes = strokes.filter((s) => surviving.has(s.strokeId))
+    }
+  }
+
   if (strokes.length === 0) {
+    // When the caller asked us to drop rejected strokes, return an
+    // empty list rather than the whole-clip fallback — the fallback
+    // exists for synthetic-fixture compatibility, not for clips where
+    // every detected stroke failed quality. Returning the whole clip
+    // would produce a single phantom card spanning the full video.
+    if (dropRejected) return []
     // No peaks survived — fall through to the whole-clip segment so the
     // analyze / baseline UIs don't render an empty state for clips
     // where the fixture is genuinely flat (synthetic tests, very still

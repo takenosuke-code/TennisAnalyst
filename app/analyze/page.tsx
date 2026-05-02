@@ -97,7 +97,7 @@ export default function AnalyzePage() {
         .filter((s) => s.frames.length > 0)
       if (fromSegments.length > 0) return fromSegments
     }
-    return detectSwings(allFrames)
+    return detectSwings(allFrames, { dropRejected: true })
   }, [segments, allFrames])
   const hasMultipleSwings = swings.length > 1
 

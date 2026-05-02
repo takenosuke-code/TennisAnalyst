@@ -16,30 +16,36 @@ const LM_RIGHT_WRIST = 16
 // ---------------------------------------------------------------------------
 // Wrist-velocity peak-pick stroke detector.
 //
-// Replaces the older energy-hysteresis + 20pre/15post-frame padding scheme
-// (still living next door in detectSwings()). The hysteresis approach
-// fragmented strokes whose backswing was much quieter than the
-// acceleration phase — the loading window from ~800–1200ms before contact
-// (Reid/Elliott) was below threshold and got clipped, so coaching
-// observations and baselines saw only the contact-onward slice.
+// 2026-05 rewrite — addresses the "too many overlapping clips on long
+// videos" failure mode of the prior height-threshold + refractory-only
+// pipeline. Three layered changes:
 //
-// New approach:
-//   1. Per-frame dominant-wrist linear speed in normalized frame coords
-//      (Δposition / Δt). The wrist landmark is whichever side has the
-//      higher mean visibility, with the user's `dominant_hand` as an
-//      explicit override (default: right wrist when nothing else gives a
-//      hint). MediaPipe's normalized coords are [0,1] so a speed of 0.5
-//      ≈ "half the frame per second".
-//   2. Smooth with a 5-frame centered moving average.
-//   3. Find local maxima above an adaptive threshold of `mean + 1.0·std`.
-//      Enforce a small min-distance (3 frames) at the peak-finding stage
-//      so two genuine peaks 300ms apart can both surface.
-//   4. Refractory: greedy-pick by speed; whenever two accepted peaks fall
-//      within 500ms of each other, the lower is dropped.
-//   5. Pad each peak biomechanically — 1000ms pre (backswing window per
-//      tennis-stroke literature) and 500ms post (follow-through tail).
-//      Convert ms → frames using the actual fps derived from timestamps,
-//      not a hardcoded 30. Clamp to [0, totalFrames-1].
+//   1. Topographic PROMINENCE replaces the height threshold. For each
+//      candidate peak, prominence is its height above the lowest point
+//      reachable on either side within `wlen` frames before hitting a
+//      taller peak. A jittery shoulder on a real swing reaches the
+//      taller true peak immediately, so its prominence is tiny — the
+//      scipy `find_peaks(prominence=…, wlen=…)` standard.
+//   2. MAD-based prominence floor + an absolute floor. MAD (median
+//      absolute deviation) is non-parametric and uncontaminated by the
+//      events being thresholded; the absolute floor stops the floor
+//      from collapsing on a quiet clip with no real swings.
+//   3. Width filter at half-prominence. Real swings are 150–700ms wide;
+//      sub-100ms hand-twitches and >800ms slow drifts can't masquerade.
+//   4. VORONOI boundaries replace fixed pre/post pad when neighbors are
+//      close. Two real strokes 800ms apart used to produce 60% overlap
+//      between their padded clips — Voronoi splits at the midpoint, so
+//      every frame belongs to exactly one stroke. Outside neighbors,
+//      the default 1000ms / 500ms pad still applies.
+//
+// Order of operations:
+//   a. Per-frame dominant-wrist linear speed (normalized [0,1] / sec).
+//   b. 5-frame centered moving-average smoother.
+//   c. Find ALL local maxima (no threshold).
+//   d. Filter by prominence ≥ floor AND width ∈ [widthMinMs, widthMaxMs].
+//   e. Refractory dedup as a guardrail (highest-prominence wins).
+//   f. Voronoi-bounded windows with the original pre/post pad as an
+//      outer cap. Clamp to [0, totalFrames-1].
 // ---------------------------------------------------------------------------
 
 export interface DetectStrokesOptions {
@@ -71,10 +77,9 @@ export interface DetectStrokesOptions {
    */
   refractoryMs?: number
   /**
-   * Adaptive threshold = median + thresholdK · (P90 − median) over the
-   * smoothed wrist-speed signal. Default 1.0 (i.e. P90 itself). Lower
-   * values surface gentler swings (slices, blocks) at the cost of more
-   * false positives during fidgeting.
+   * @deprecated 2026-05 — height-threshold logic was replaced by
+   * topographic prominence. Accepted for backwards compatibility, has
+   * no effect.
    */
   thresholdK?: number
   /**
@@ -89,20 +94,62 @@ export interface DetectStrokesOptions {
    * make it past peak-finding before refractory chooses one.
    */
   minPeakDistanceFrames?: number
+  /**
+   * scipy-style `wlen` — bound on how far the prominence walk extends
+   * before cutting off. Default 2000ms (2·fps frames). Larger values
+   * make prominence more global (good when peaks are far apart);
+   * smaller values keep it local (good for fast rallies).
+   */
+  wlenMs?: number
+  /**
+   * Absolute prominence floor in normalized-coords-per-second units.
+   * Anything below is rejected outright regardless of MAD. Default 0.3
+   * — comfortably below typical real-swing prominence (1.0–3.5) and
+   * above typical walking / fidget prominence (0.05–0.3).
+   */
+  prominenceFloorAbs?: number
+  /**
+   * Multiplier on `1.4826 · MAD(speeds)` for the data-driven prominence
+   * floor. Effective floor = max(prominenceFloorAbs, k · 1.4826 · MAD).
+   * Default 4. Higher values reject more candidates; 3 is permissive,
+   * 5 is strict.
+   */
+  prominenceFloorMadK?: number
+  /**
+   * Lower bound on peak width (at half-prominence) in milliseconds.
+   * Default 80ms — covers fast amateur swings (sharp acceleration
+   * burst) while rejecting sub-50ms jitter. Real swings typically
+   * carry 100–300ms half-prominence width.
+   */
+  widthMinMs?: number
+  /**
+   * Upper bound on peak width (at half-prominence) in milliseconds.
+   * Default 1000ms. Above this the burst is so slow it's almost
+   * certainly walking / prep positioning, not a stroke.
+   */
+  widthMaxMs?: number
 }
 
 const VISIBILITY_FLOOR = 0.5
 
-// Default Stroke-options resolved with applyDefaults below. Exporting
-// these keeps the magic numbers documented and lets tests exercise them
-// without re-typing.
+// Default Stroke-options resolved with applyDefaults below.
+//
+// 2026-05 — refractory dropped 500 → 350ms now that Voronoi handles
+// inter-stroke window-overlap independently. 350ms still kills tap-back
+// double-peaks (~300ms apart) but lets through fast volleys >350ms
+// apart that the old 500ms refractory was over-suppressing.
 export const STROKE_DEFAULTS = {
   prePadMs: 1000,
   postPadMs: 500,
-  refractoryMs: 500,
+  refractoryMs: 350,
   thresholdK: 1.0,
   smoothingFrames: 5,
   minPeakDistanceFrames: 3,
+  wlenMs: 2000,
+  prominenceFloorAbs: 0.3,
+  prominenceFloorMadK: 4,
+  widthMinMs: 60,
+  widthMaxMs: 1000,
 } as const
 
 interface ResolvedOptions {
@@ -111,9 +158,13 @@ interface ResolvedOptions {
   prePadMs: number
   postPadMs: number
   refractoryMs: number
-  thresholdK: number
   smoothingFrames: number
   minPeakDistanceFrames: number
+  wlenMs: number
+  prominenceFloorAbs: number
+  prominenceFloorMadK: number
+  widthMinMs: number
+  widthMaxMs: number
 }
 
 function applyDefaults(
@@ -127,10 +178,16 @@ function applyDefaults(
     prePadMs: opts.prePadMs ?? STROKE_DEFAULTS.prePadMs,
     postPadMs: opts.postPadMs ?? STROKE_DEFAULTS.postPadMs,
     refractoryMs: opts.refractoryMs ?? STROKE_DEFAULTS.refractoryMs,
-    thresholdK: opts.thresholdK ?? STROKE_DEFAULTS.thresholdK,
     smoothingFrames: opts.smoothingFrames ?? STROKE_DEFAULTS.smoothingFrames,
     minPeakDistanceFrames:
       opts.minPeakDistanceFrames ?? STROKE_DEFAULTS.minPeakDistanceFrames,
+    wlenMs: opts.wlenMs ?? STROKE_DEFAULTS.wlenMs,
+    prominenceFloorAbs:
+      opts.prominenceFloorAbs ?? STROKE_DEFAULTS.prominenceFloorAbs,
+    prominenceFloorMadK:
+      opts.prominenceFloorMadK ?? STROKE_DEFAULTS.prominenceFloorMadK,
+    widthMinMs: opts.widthMinMs ?? STROKE_DEFAULTS.widthMinMs,
+    widthMaxMs: opts.widthMaxMs ?? STROKE_DEFAULTS.widthMaxMs,
   }
 }
 
@@ -255,75 +312,212 @@ function smooth(values: number[], windowFrames: number): number[] {
 }
 
 /**
- * Find local maxima ≥ threshold respecting a minimum distance between
- * peaks. Returns frame indices in the order they were found (sorted by
- * frame index). When multiple equal-valued peaks sit within the
- * min-distance window, the earliest survives — refractory cleans up
- * later anyway.
+ * Find ALL local maxima in `values`. A local max is `v[i] > v[i-1] &&
+ * v[i] >= v[i+1]` — strict on the left, allow plateau on the right so
+ * a flat-top peak picks its leftmost index exactly once. Out-of-bounds
+ * neighbors treated as -Infinity so edge frames can still be peaks.
+ *
+ * No threshold and no min-distance dedup at this stage — that's the
+ * job of the prominence filter and refractory layers downstream.
  */
-function findLocalMaxima(
-  values: number[],
-  threshold: number,
-  minDistanceFrames: number,
-): number[] {
+function findAllLocalMaxima(values: number[]): number[] {
   const peaks: number[] = []
   for (let i = 0; i < values.length; i++) {
-    const v = values[i]
-    if (v < threshold) continue
-    // Local max: strictly greater than at least one neighbour and not
-    // less than either neighbour. Handles plateaus by picking the first
-    // index of the plateau.
     const left = i > 0 ? values[i - 1] : -Infinity
     const right = i < values.length - 1 ? values[i + 1] : -Infinity
-    const isLocalMax =
-      v >= left && v >= right && (v > left || v > right || values.length === 1)
-    if (!isLocalMax) continue
-
-    // Min-distance dedup: if the previous accepted peak is within
-    // minDistanceFrames, keep whichever is taller. Done greedy
-    // forward-pass style.
-    if (peaks.length > 0) {
-      const last = peaks[peaks.length - 1]
-      if (i - last < minDistanceFrames) {
-        if (values[i] > values[last]) peaks[peaks.length - 1] = i
-        continue
-      }
+    if (values[i] > left && values[i] >= right) {
+      peaks.push(i)
     }
-    peaks.push(i)
   }
   return peaks
 }
 
 /**
- * Drop any peak that has a stronger peak within `refractoryFrames` of
- * it. Peaks whose strict neighbours (within window) are all ≤ them
- * survive. Ordered by frame index ascending in output.
+ * Topographic prominence (scipy.signal.peak_prominences-equivalent).
+ *
+ * For peak at index `peakIdx` in `values`, walk left within `wlen/2`
+ * frames, stopping at either the array edge or the first index whose
+ * value strictly exceeds the peak. The lowest value encountered along
+ * that walk is the left base. Same on the right. Prominence =
+ * peak_height − max(leftBase, rightBase).
+ *
+ * Bounded by `wlen` so prominence stays local to the peak's
+ * neighborhood — without this, a single huge peak in the clip would
+ * make every other peak's prominence look small relative to the
+ * dominant one.
  */
-function applyRefractory(
-  peaks: number[],
+function computeProminence(
   values: number[],
-  refractoryFrames: number,
-): number[] {
-  if (peaks.length === 0) return peaks
-  const survivors: number[] = []
-  // Sort peaks by speed descending; greedily accept the highest, then
-  // exclude any other peak within ±refractory of an accepted one.
-  const byStrength = [...peaks].sort((a, b) => values[b] - values[a])
-  const accepted: number[] = []
-  for (const p of byStrength) {
-    let blocked = false
-    for (const a of accepted) {
-      if (Math.abs(p - a) < refractoryFrames) {
-        blocked = true
-        break
-      }
+  peakIdx: number,
+  wlen: number,
+): number {
+  const peakValue = values[peakIdx]
+  const halfWlen = Math.max(1, Math.floor(wlen / 2))
+
+  // Left walk. Track whether the walk hit a strictly higher peak
+  // (proper terminator) vs just the array/wlen edge — the latter
+  // means the peak is cut off by the clip boundary and the base on
+  // that side is unreliable.
+  let leftBase = peakValue
+  let leftHitHigher = false
+  const leftBound = Math.max(0, peakIdx - halfWlen)
+  for (let i = peakIdx - 1; i >= leftBound; i--) {
+    if (values[i] > peakValue) {
+      leftHitHigher = true
+      break
     }
-    if (!blocked) accepted.push(p)
+    if (values[i] < leftBase) leftBase = values[i]
   }
-  // Re-sort survivors by frame index for the caller.
-  accepted.sort((a, b) => a - b)
-  for (const p of accepted) survivors.push(p)
-  return survivors
+
+  // Right walk
+  let rightBase = peakValue
+  let rightHitHigher = false
+  const rightBound = Math.min(values.length - 1, peakIdx + halfWlen)
+  for (let i = peakIdx + 1; i <= rightBound; i++) {
+    if (values[i] > peakValue) {
+      rightHitHigher = true
+      break
+    }
+    if (values[i] < rightBase) rightBase = values[i]
+  }
+
+  // Boundary handling: if a walk terminated against the array edge
+  // (not a higher peak) AND its base equals the peak value (meaning
+  // the signal never descended on that side, just got cut off), trust
+  // only the other side. A truly truncated swing peak still has a
+  // clean descent on its non-cut side; using max(leftBase, rightBase)
+  // would compute a near-zero prominence and reject a real swing.
+  const leftIsBoundary = !leftHitHigher && leftBound === 0
+  const rightIsBoundary = !rightHitHigher && rightBound === values.length - 1
+  const leftDescended = leftBase < peakValue
+  const rightDescended = rightBase < peakValue
+
+  if (leftIsBoundary && !leftDescended && rightDescended) {
+    return peakValue - rightBase
+  }
+  if (rightIsBoundary && !rightDescended && leftDescended) {
+    return peakValue - leftBase
+  }
+  // Same logic when one side ALSO descended cleanly but the other is
+  // truncated by the array edge — take the cleaner-descent side. This
+  // handles peaks near the boundary whose other side got a partial
+  // descent before being cut off.
+  if (rightIsBoundary && leftDescended && rightDescended && rightBase > leftBase) {
+    return peakValue - leftBase
+  }
+  if (leftIsBoundary && leftDescended && rightDescended && leftBase > rightBase) {
+    return peakValue - rightBase
+  }
+  return peakValue - Math.max(leftBase, rightBase)
+}
+
+/**
+ * Width at half-prominence (scipy.signal.peak_widths with
+ * `rel_height=0.5`). Walks outward from `peakIdx` to find where
+ * `values` first dips below `peakValue − prominence/2`. Returns the
+ * width in frames; 0 when the peak is degenerate (zero prominence).
+ */
+function computePeakWidth(
+  values: number[],
+  peakIdx: number,
+  prominence: number,
+): number {
+  if (prominence <= 0) return 0
+  const peakValue = values[peakIdx]
+  const halfHeight = peakValue - prominence / 2
+
+  let leftEdge = peakIdx
+  for (let i = peakIdx - 1; i >= 0; i--) {
+    if (values[i] < halfHeight) {
+      // Linear interpolation between i and i+1 to refine the edge.
+      const lo = values[i]
+      const hi = values[i + 1]
+      const frac = hi !== lo ? (halfHeight - lo) / (hi - lo) : 0
+      leftEdge = i + frac
+      break
+    }
+    leftEdge = i
+  }
+  let rightEdge = peakIdx
+  for (let i = peakIdx + 1; i < values.length; i++) {
+    if (values[i] < halfHeight) {
+      const lo = values[i]
+      const hi = values[i - 1]
+      const frac = hi !== lo ? (halfHeight - lo) / (hi - lo) : 0
+      rightEdge = i - frac
+      break
+    }
+    rightEdge = i
+  }
+  return Math.max(0, rightEdge - leftEdge)
+}
+
+/**
+ * Median absolute deviation (MAD). Robust spread estimator: median of
+ * |x − median(x)|. The 1.4826 multiplier converts MAD to a normal-
+ * distribution-equivalent standard deviation.
+ */
+function median(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid]
+}
+
+function mad(values: number[]): number {
+  if (values.length === 0) return 0
+  const m = median(values)
+  const dev: number[] = new Array(values.length)
+  for (let i = 0; i < values.length; i++) dev[i] = Math.abs(values[i] - m)
+  return median(dev)
+}
+
+/**
+ * Voronoi-style stroke boundaries. For each peak (sorted ascending by
+ * frame index), the start frame extends backward from the peak by at
+ * most `prePadFrames`; the end frame extends forward by at most
+ * `postPadFrames`. When the next peak is closer than that pad, the
+ * boundary between the two strokes sits at the midpoint between their
+ * peaks — every frame belongs to exactly one stroke, no overlap.
+ *
+ * Boundaries are clamped to [0, totalFrames-1]. Output preserves input
+ * peak order.
+ */
+function voronoiBoundaries(
+  peakFrames: number[],
+  prePadFrames: number,
+  postPadFrames: number,
+  totalFrames: number,
+): Array<{ start: number; end: number }> {
+  const lastIdx = totalFrames - 1
+  return peakFrames.map((peak, i) => {
+    const prevPeak = i > 0 ? peakFrames[i - 1] : null
+    const nextPeak = i < peakFrames.length - 1 ? peakFrames[i + 1] : null
+
+    // Left bound: default = peak − prePad. If a previous peak exists
+    // and the midpoint is closer, use the midpoint + 1 (so adjacent
+    // strokes don't share a boundary frame).
+    let start = Math.max(0, peak - prePadFrames)
+    if (prevPeak !== null) {
+      const midpoint = Math.floor((prevPeak + peak) / 2)
+      if (midpoint + 1 > start) start = midpoint + 1
+    }
+
+    // Right bound: default = peak + postPad. If a next peak exists and
+    // its midpoint is closer, use the midpoint.
+    let end = Math.min(lastIdx, peak + postPadFrames)
+    if (nextPeak !== null) {
+      const midpoint = Math.floor((peak + nextPeak) / 2)
+      if (midpoint < end) end = midpoint
+    }
+
+    // Pathological case where boundaries collapse — keep the peak
+    // frame at minimum.
+    if (end < start) end = start
+    return { start, end }
+  })
 }
 
 /**
@@ -344,48 +538,102 @@ export function detectStrokes(
   const rawSpeeds = computeWristSpeeds(frames, side)
   const smoothed = smooth(rawSpeeds, resolved.smoothingFrames)
 
-  // Adaptive threshold over smoothed speed. Mean+k·std is the textbook
-  // formulation but a single explosive swing in a long rally can
-  // inflate the std past the soft swings — the same threshold-
-  // inflation failure mode the old hysteresis detector hit with
-  // global max. We use a robust percentile-based version: median +
-  // thresholdK · (P90 − median). The (P90 − median) "spread" is
-  // resistant to outliers because it ignores the top 10% of samples.
-  // Anything ≤ 0 spread (perfectly flat clip) bumps the threshold to
-  // Infinity so the no-peak path is taken.
-  const { median, p90 } = percentileStats(smoothed)
-  const spread = Math.max(0, p90 - median)
-  const threshold = spread > 0 ? median + resolved.thresholdK * spread : Infinity
-
+  // Convert ms knobs to frame counts using the actual fps.
+  const wlenFrames = Math.max(
+    2,
+    Math.round((resolved.wlenMs / 1000) * resolved.fps),
+  )
+  const widthMinFrames = (resolved.widthMinMs / 1000) * resolved.fps
+  const widthMaxFrames = (resolved.widthMaxMs / 1000) * resolved.fps
   const refractoryFrames = Math.max(
     1,
     Math.round((resolved.refractoryMs / 1000) * resolved.fps),
   )
-  const minPeakDistance = Math.min(
-    resolved.minPeakDistanceFrames,
-    refractoryFrames,
-  )
 
-  const rawPeaks = findLocalMaxima(smoothed, threshold, minPeakDistance)
-  const survivors = applyRefractory(rawPeaks, smoothed, refractoryFrames)
+  // Find ALL local maxima — no threshold; prominence + width below
+  // are the real gates.
+  const allMaxima = findAllLocalMaxima(smoothed)
+  if (allMaxima.length === 0) return []
+
+  // Data-driven prominence floor. MAD-based scale + an absolute floor
+  // so a quiet clip with no real swings can't have its floor collapse
+  // toward zero and leak walking/fidget peaks.
+  const madVal = mad(smoothed)
+  const madFloor = resolved.prominenceFloorMadK * 1.4826 * madVal
+  const promFloor = Math.max(resolved.prominenceFloorAbs, madFloor)
+
+  // Per-candidate prominence + width. Keep peaks that clear both
+  // gates simultaneously.
+  interface Candidate {
+    idx: number
+    prominence: number
+    width: number
+  }
+  const candidates: Candidate[] = []
+  for (const idx of allMaxima) {
+    const prom = computeProminence(smoothed, idx, wlenFrames)
+    if (prom < promFloor) continue
+    const width = computePeakWidth(smoothed, idx, prom)
+    if (width < widthMinFrames || width > widthMaxFrames) continue
+    candidates.push({ idx, prominence: prom, width })
+  }
+  if (candidates.length === 0) return []
+
+  // Refractory dedup as a guardrail: if two surviving candidates sit
+  // closer than the refractory window, keep the more prominent one.
+  // Most of the work has already been done by prominence — this kills
+  // the rare same-real-swing-double-peak that survived width checks.
+  const survivors = applyRefractoryByProminence(candidates, refractoryFrames)
+  survivors.sort((a, b) => a.idx - b.idx)
 
   const prePadFrames = Math.ceil((resolved.prePadMs / 1000) * resolved.fps)
   const postPadFrames = Math.ceil((resolved.postPadMs / 1000) * resolved.fps)
 
-  const lastIdx = frames.length - 1
-  return survivors.map((peakFrame, i) => ({
+  // Voronoi-bounded windows: adjacent strokes split the gap at the
+  // midpoint, isolated strokes get the full pre/post pad.
+  const peakFrames = survivors.map((s) => s.idx)
+  const bounds = voronoiBoundaries(
+    peakFrames,
+    prePadFrames,
+    postPadFrames,
+    frames.length,
+  )
+
+  return survivors.map((s, i) => ({
     strokeId: `stroke_${i}`,
-    startFrame: Math.max(0, peakFrame - prePadFrames),
-    endFrame: Math.min(lastIdx, peakFrame + postPadFrames),
-    peakFrame,
+    startFrame: bounds[i].start,
+    endFrame: bounds[i].end,
+    peakFrame: s.idx,
     fps: resolved.fps,
   }))
 }
 
-function percentileStats(values: number[]): { median: number; p90: number } {
-  if (values.length === 0) return { median: 0, p90: 0 }
-  const sorted = [...values].sort((a, b) => a - b)
-  const median = sorted[Math.floor(sorted.length / 2)]
-  const p90 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))]
-  return { median, p90 }
+interface RefractoryCandidate {
+  idx: number
+  prominence: number
+  width: number
+}
+
+function applyRefractoryByProminence(
+  candidates: RefractoryCandidate[],
+  refractoryFrames: number,
+): RefractoryCandidate[] {
+  if (candidates.length <= 1) return candidates
+  // Score-descending greedy keep: highest-prominence wins when two
+  // candidates fall within the refractory window of each other.
+  const byProminence = [...candidates].sort(
+    (a, b) => b.prominence - a.prominence,
+  )
+  const accepted: RefractoryCandidate[] = []
+  for (const c of byProminence) {
+    let blocked = false
+    for (const a of accepted) {
+      if (Math.abs(c.idx - a.idx) < refractoryFrames) {
+        blocked = true
+        break
+      }
+    }
+    if (!blocked) accepted.push(c)
+  }
+  return accepted
 }

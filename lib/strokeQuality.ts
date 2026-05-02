@@ -1,10 +1,26 @@
 import type { PoseFrame, Landmark } from './supabase'
-import { LANDMARK_INDICES } from './jointAngles'
 import type {
   DetectedStroke,
   StrokeRejectReason,
   StrokeQualityResult,
 } from './strokeAnalysis'
+
+// Inline BlazePose-33 indices rather than importing LANDMARK_INDICES
+// from `./jointAngles`. jointAngles now depends on this module
+// (detectSwings runs scoreStrokes when dropRejected is true), and
+// reading a constant from a parent module at top-level evaluation
+// triggers a circular-init failure: LANDMARK_INDICES is undefined
+// when this file is loaded as part of the cycle. Hardcoding the
+// MediaPipe-stable IDs side-steps the cycle without the runtime risk
+// of a lazy `require()`.
+const LM_LEFT_SHOULDER = 11
+const LM_RIGHT_SHOULDER = 12
+const LM_LEFT_ELBOW = 13
+const LM_RIGHT_ELBOW = 14
+const LM_LEFT_WRIST = 15
+const LM_RIGHT_WRIST = 16
+const LM_LEFT_HIP = 23
+const LM_RIGHT_HIP = 24
 
 // Re-export so existing callers (and the strokeQuality.test.ts suite that
 // imports `type { DetectedStroke, StrokeQualityResult } from
@@ -60,14 +76,14 @@ export interface StrokeQualityComponents {
 // ---------------------------------------------------------------------------
 
 const UPPER_BODY_LANDMARK_IDS = [
-  LANDMARK_INDICES.LEFT_SHOULDER,
-  LANDMARK_INDICES.RIGHT_SHOULDER,
-  LANDMARK_INDICES.LEFT_ELBOW,
-  LANDMARK_INDICES.RIGHT_ELBOW,
-  LANDMARK_INDICES.LEFT_WRIST,
-  LANDMARK_INDICES.RIGHT_WRIST,
-  LANDMARK_INDICES.LEFT_HIP,
-  LANDMARK_INDICES.RIGHT_HIP,
+  LM_LEFT_SHOULDER,
+  LM_RIGHT_SHOULDER,
+  LM_LEFT_ELBOW,
+  LM_RIGHT_ELBOW,
+  LM_LEFT_WRIST,
+  LM_RIGHT_WRIST,
+  LM_LEFT_HIP,
+  LM_RIGHT_HIP,
 ] as const
 
 const MIN_STROKE_FRAMES = 10
@@ -389,7 +405,7 @@ export function scoreStrokes(
 
   // Default dominant-hand convention: right. The function signature does
   // not carry a profile, so we cannot consult `dominant_hand` here.
-  const wristLandmarkId = LANDMARK_INDICES.RIGHT_WRIST
+  const wristLandmarkId = LM_RIGHT_WRIST
   const elbowKey: 'right_elbow' | 'left_elbow' = 'right_elbow'
 
   const frameWidth = detectFrameWidth(frames)
