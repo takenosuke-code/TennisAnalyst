@@ -283,7 +283,10 @@ def main():
     FARML_IDLE = 100.0  # forearm hanging slightly down-LEFT
     UARML_PEAK = 125.0  # upper arm angled forward-down
     FARML_PEAK = 165.0  # forearm pointing nearly horizontal-LEFT (at ball)
-    PEAK_FRAC = 0.40    # peak of off-arm raise lands ~40% through cycle
+    # Peak shifted from 0.40 to 0.54 of cycle (~333ms later at
+    # SWING_MS=2400) per user feedback that the off-arm raise was
+    # peaking too early.
+    PEAK_FRAC = 0.54
     END_FRAC = 0.92     # off-arm returned to idle by end of post window
     for ch_name, idle, peak in (
         ("uArmL", UARML_IDLE, UARML_PEAK),
