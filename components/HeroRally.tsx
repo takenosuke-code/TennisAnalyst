@@ -386,14 +386,7 @@ const FIGURE_PX_WIDTH = FIGURE_PX_HEIGHT * (9 / 16)
 const FIGURE_EDGE_PADDING = 28
 const FIGURE_Y_TRACK_LERP = 0.04
 const FIGURE_Y_TRACK_AMPLITUDE_PX = 70
-// Step-bob: when the figure has y-velocity (it's "walking" toward the
-// ball's predicted contact point), modulate baseY by a small sine so
-// the translation reads as steps rather than a glide. Tuned by feel —
-// 4px peak-to-peak at ~3 steps/sec is barely perceptible but kills
-// the "instant teleport" feel even at low velocities.
-const STEP_BOB_AMP_PX = 2
-const STEP_BOB_HZ = 3
-const STEP_BOB_TRIGGER_VELOCITY = 30 // px/sec — below this, no bob
+// (Walk-cycle constants live in step() — they reference dt locally.)
 
 const BALL_RADIUS = 7
 const BALL_SPEED = 540
@@ -540,7 +533,17 @@ function lerpAngleHermite(
   return h00 * a1 + h10 * dt1 * m1 + h01 * a2 + h11 * dt1 * m2
 }
 
-function buildSkeleton(phase: number): { joints: Joints; racketHead: Pt } {
+function buildSkeleton(
+  phase: number,
+  // Walk-cycle modulation: when the figure has y-velocity (walking
+  // toward the ball's predicted contact-Y), alternate the thighs to
+  // make the translation read as steps. walkPhase is in radians;
+  // walkAmp is the per-leg thigh-angle modulation in degrees. Both
+  // default to 0 so non-rally callers (racketHeadAtPhase, initial
+  // paint) get the same skeleton they did before.
+  walkPhase = 0,
+  walkAmp = 0,
+): { joints: Joints; racketHead: Pt } {
   const { i, u } = findSegment(phase)
   // 4 control keyframes around the active segment. Cyclic indexing
   // for the wrap segment (i = N-1).
@@ -571,10 +574,22 @@ function buildSkeleton(phase: number): { joints: Joints; racketHead: Pt } {
   const fArmL  = H(Aprev.fArmL,  A.fArmL,  B.fArmL,  Bnext.fArmL)
   const uArmR  = H(Aprev.uArmR,  A.uArmR,  B.uArmR,  Bnext.uArmR)
   const fArmR  = H(Aprev.fArmR,  A.fArmR,  B.fArmR,  Bnext.fArmR)
-  const thighL = H(Aprev.thighL, A.thighL, B.thighL, Bnext.thighL)
-  const shinL  = H(Aprev.shinL,  A.shinL,  B.shinL,  Bnext.shinL)
-  const thighR = H(Aprev.thighR, A.thighR, B.thighR, Bnext.thighR)
-  const shinR  = H(Aprev.shinR,  A.shinR,  B.shinR,  Bnext.shinR)
+  let thighL = H(Aprev.thighL, A.thighL, B.thighL, Bnext.thighL)
+  let shinL  = H(Aprev.shinL,  A.shinL,  B.shinL,  Bnext.shinL)
+  let thighR = H(Aprev.thighR, A.thighR, B.thighR, Bnext.thighR)
+  let shinR  = H(Aprev.shinR,  A.shinR,  B.shinR,  Bnext.shinR)
+  if (walkAmp > 0) {
+    // Alternate the thighs by sin(walkPhase). Lifting leg also gets a
+    // small shin retraction so the foot reads as picked up off the
+    // ground rather than swinging stiff-legged.
+    const lift = Math.sin(walkPhase) * walkAmp
+    thighL += lift
+    thighR -= lift
+    const lShinLift = Math.max(0, lift) * 0.5
+    const rShinLift = Math.max(0, -lift) * 0.5
+    shinL -= lShinLift
+    shinR -= rShinLift
+  }
   const racket = H(Aprev.racket, A.racket, B.racket, Bnext.racket)
 
   const polar = (L: number, deg: number): Pt => {
@@ -710,10 +725,14 @@ export default function HeroRally() {
     let figureRestY = containerRect.height / 2
     let rightBaseY = figureRestY
     let leftBaseY = figureRestY
-    // Per-frame deltas drive the step-bob modulation; track previous
-    // baseY so we can compute Y velocity inside step().
+    // Per-frame deltas drive the walk-cycle modulation; track previous
+    // baseY so we can compute Y velocity inside step(). walkPhase is
+    // an integrated radian counter advanced by |dy| each frame so the
+    // step rate scales with how fast the figure is walking.
     let rightPrevBaseY = figureRestY
     let leftPrevBaseY = figureRestY
+    let rightWalkPhase = 0
+    let leftWalkPhase = 0
 
     // toPx converts normalized keyframe coords to pixel coords. The
     // `mirrored` flag flips the X axis so the left figure renders as
@@ -731,8 +750,10 @@ export default function HeroRally() {
       baseY: number,
       mirrored: boolean,
       labelSlots: LabelRef[] | null,
+      walkPhase = 0,
+      walkAmp = 0,
     ): Pt {
-      const { joints, racketHead } = buildSkeleton(phase)
+      const { joints, racketHead } = buildSkeleton(phase, walkPhase, walkAmp)
       const px: Record<keyof Joints, Pt> = {} as Record<keyof Joints, Pt>
       for (const key of JOINT_KEYS) {
         px[key] = toPx(joints[key], baseX, baseY, mirrored)
@@ -925,21 +946,29 @@ export default function HeroRally() {
         }
       }
 
-      // Step-bob: when the figure has y-velocity (walking toward the
-      // ball), add a tiny sinusoidal modulation to baseY at render
-      // time so the translation reads as steps. Compute velocity from
-      // last-frame baseY (per-figure).
+      // Walk-cycle: when the figure has y-velocity, advance a per-
+      // figure walkPhase (proportional to |dy|) and compute walkAmp
+      // (proportional to |dy| up to a cap). buildSkeleton uses these
+      // to alternate the thighs + lift the shins so the translation
+      // reads as actual walking steps rather than a glide.
       const rightDy = (rightBaseY - rightPrevBaseY) / Math.max(0.001, dt)
       const leftDy = (leftBaseY - leftPrevBaseY) / Math.max(0.001, dt)
       rightPrevBaseY = rightBaseY
       leftPrevBaseY = leftBaseY
-      const rightBobAmp =
-        Math.abs(rightDy) > STEP_BOB_TRIGGER_VELOCITY ? STEP_BOB_AMP_PX : 0
-      const leftBobAmp =
-        Math.abs(leftDy) > STEP_BOB_TRIGGER_VELOCITY ? STEP_BOB_AMP_PX : 0
-      const bobPhase = (now / 1000) * STEP_BOB_HZ * 2 * Math.PI
-      const rightBobOffset = Math.sin(bobPhase) * rightBobAmp
-      const leftBobOffset = Math.sin(bobPhase + Math.PI) * leftBobAmp // antiphase
+      const WALK_TRIGGER_VEL = 20 // px/sec; below this the figure is "still"
+      const WALK_AMP_GAIN = 0.18 // deg of thigh modulation per px/sec
+      const WALK_AMP_CAP = 22    // deg max per leg
+      const WALK_PHASE_GAIN = 0.04 // rad/(px/sec)/sec of advance — tunes step rate
+      const rightWalkAmp =
+        Math.abs(rightDy) < WALK_TRIGGER_VEL
+          ? 0
+          : Math.min(WALK_AMP_CAP, Math.abs(rightDy) * WALK_AMP_GAIN)
+      const leftWalkAmp =
+        Math.abs(leftDy) < WALK_TRIGGER_VEL
+          ? 0
+          : Math.min(WALK_AMP_CAP, Math.abs(leftDy) * WALK_AMP_GAIN)
+      rightWalkPhase += Math.abs(rightDy) * WALK_PHASE_GAIN * dt
+      leftWalkPhase += Math.abs(leftDy) * WALK_PHASE_GAIN * dt
 
       // Ball physics.
       ball.x += ball.vx * dt
@@ -973,8 +1002,8 @@ export default function HeroRally() {
       }
 
       // Paint everything.
-      paintFigure(rightPhase, rightRefs.current, rightBaseX, rightBaseY + rightBobOffset, false, rightLabelRefs.current)
-      paintFigure(leftPhase, leftRefs.current, leftBaseX, leftBaseY + leftBobOffset, true, leftLabelRefs.current)
+      paintFigure(rightPhase, rightRefs.current, rightBaseX, rightBaseY, false, rightLabelRefs.current, rightWalkPhase, rightWalkAmp)
+      paintFigure(leftPhase, leftRefs.current, leftBaseX, leftBaseY, true, leftLabelRefs.current, leftWalkPhase, leftWalkAmp)
       if (ballRef.current) {
         ballRef.current.setAttribute('cx', String(ball.x))
         ballRef.current.setAttribute('cy', String(ball.y))
