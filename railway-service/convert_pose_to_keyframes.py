@@ -241,6 +241,45 @@ def main():
     for key in smoothed_angles:
         smoothed_angles[key] = [mirror(a) for a in smoothed_angles[key]]
 
+    # 7.5. Cap arm vertical reach so the racket tip during follow-
+    # through stays at shoulder height instead of sweeping above the
+    # head. Pulls each angle toward the nearest horizontal axis (0 or
+    # +/-180) by 50% when the angle has a strong vertical component.
+    # Preserves left/right sweep direction (key for the cross-body
+    # follow-through arc that gives the swing its real-tennis feel).
+    def cap_vertical(angle, gain=0.5):
+        # angle in (-180, 180]; positive = pointing down (positive y)
+        # Only cap negative angles (pointing up).
+        if angle >= 0:
+            return angle
+        # Negative => upper half. Pull toward nearest horizontal:
+        # cos<0 (angle in (-180, -90)): pull toward -180.
+        # cos>=0 (angle in (-90, 0)):    pull toward 0.
+        if angle < -90:
+            target = -180.0
+        else:
+            target = 0.0
+        return angle + (target - angle) * gain
+
+    # fArmR uses the up-axis cap above (forearm rotates through
+    # straight-up during follow-through).
+    smoothed_angles["fArmR"] = [cap_vertical(a, 0.5) for a in smoothed_angles["fArmR"]]
+
+    # uArmR is different — during post-contact the upper arm reaches
+    # past horizontal-LEFT (uArmR raw ~170, or ~-170 wrapping into
+    # ~190 unwrapped). The "up" angles for uArmR live in the
+    # unwrapped (140, 260) range. Cap excess above 145 by 70%.
+    def cap_uArmR_horizontal(raw):
+        unwrapped = raw if raw >= 0 else raw + 360
+        if unwrapped <= 145:
+            return raw
+        capped = 145 + (unwrapped - 145) * 0.30
+        return capped if capped <= 180 else capped - 360
+    smoothed_angles["uArmR"] = [cap_uArmR_horizontal(a) for a in smoothed_angles["uArmR"]]
+    # racket follows fArmR (we set racket = fArmR earlier) — re-sync
+    # after the cap so they stay aligned.
+    smoothed_angles["racket"] = list(smoothed_angles["fArmR"])
+
     # 8. hipCenter: dampen motion (so the figure doesn't walk across
     # the screen) + mirror around 0.5 to flip swing direction.
     avg_hip_x = sum(c[0] for c in hip_centers) / n_window
