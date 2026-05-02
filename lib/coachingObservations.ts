@@ -25,6 +25,8 @@
 
 import type { JointAngles, PoseFrame } from './supabase'
 import { detectSwings, RTMPOSE_FILLED_LANDMARK_IDS } from './jointAngles'
+import { detectStrokes } from './swingDetect'
+import { scoreStrokes } from './strokeQuality'
 import type { ShotType } from './shotTypeConfig'
 
 // ---------------------------------------------------------------------------
@@ -61,6 +63,12 @@ export interface ExtractionInput {
   todaySummary: PoseFrame[]
   baselineSummary?: PoseFrame[]
   shotType: ShotType | null
+  // Player handedness from the auth profile. Drives which side of the
+  // body the observation rules read (a left-hander's "dominant elbow"
+  // is left_elbow on a forehand, right_elbow on a one-handed backhand).
+  // Defaults to 'right' when null/missing — the historical assumption
+  // baked into the original rule code.
+  dominantHand?: 'right' | 'left' | null
 }
 
 // ---------------------------------------------------------------------------
@@ -174,10 +182,48 @@ function meanVisibility(frames: PoseFrame[]): number {
  * with the most joint-angle activity, which is a reasonable proxy for the
  * contact phase.
  */
+/**
+ * Of the SwingSegments in `swings`, pick the index of the best stroke
+ * to coach. "Best" = highest non-NaN score from scoreStrokes (peak
+ * wrist speed + kinetic-chain timing + wrist-angle variance), which
+ * filters out strokes flagged as low-visibility / camera-pan / too-
+ * short. If every stroke scores NaN (all rejected) or scoring fails,
+ * fall back to swings[0] for backwards compatibility.
+ *
+ * Was: always picked swings[0]. On a rally upload that meant the user
+ * got coaching on whatever the first detected swing was — often a
+ * warm-up stroke at the start of the clip.
+ */
+function pickPrimarySwingIndex(
+  swings: ReturnType<typeof detectSwings>,
+  allFrames: PoseFrame[],
+): number {
+  if (swings.length <= 1) return 0
+  try {
+    const detectedStrokes = detectStrokes(allFrames)
+    if (detectedStrokes.length !== swings.length) return 0
+    const scores = scoreStrokes(detectedStrokes, allFrames)
+    let bestIdx = -1
+    let bestScore = -Infinity
+    for (let i = 0; i < scores.length; i++) {
+      const s = scores[i]
+      if (!s || s.rejected || !Number.isFinite(s.score)) continue
+      if (s.score > bestScore) {
+        bestScore = s.score
+        bestIdx = i
+      }
+    }
+    return bestIdx >= 0 ? bestIdx : 0
+  } catch {
+    return 0
+  }
+}
+
 function pickPeakFrame(frames: PoseFrame[]): PoseFrame | null {
   if (frames.length === 0) return null
   const swings = detectSwings(frames)
-  const primary = swings[0]
+  if (swings.length === 0) return frames[Math.floor(frames.length / 2)] ?? null
+  const primary = swings[pickPrimarySwingIndex(swings, frames)]
   if (!primary) return frames[Math.floor(frames.length / 2)] ?? null
   const peakIdxInSlice = primary.peakFrame - primary.startFrame
   const idx = Math.max(0, Math.min(primary.frames.length - 1, peakIdxInSlice))
@@ -248,7 +294,8 @@ function angleMax(frames: PoseFrame[], key: keyof JointAngles): number | null {
 function primarySwingFrames(frames: PoseFrame[]): PoseFrame[] {
   if (frames.length === 0) return frames
   const swings = detectSwings(frames)
-  const primary = swings[0]
+  if (swings.length === 0) return frames
+  const primary = swings[pickPrimarySwingIndex(swings, frames)]
   if (!primary || primary.frames.length === 0) return frames
   return primary.frames
 }
@@ -292,17 +339,31 @@ function undershootMargin(actual: number, threshold: number, anchor: number): nu
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the dominant elbow + knee keys for a shot. We default to right side
- * when shot type is unknown (the existing pipeline assumes right-handed unless
- * told otherwise). This is intentionally simple — handedness is encoded in
- * the profile, not here, and the prompt layer adapts the cue language.
+ * Returns the dominant elbow + knee keys for a shot, taking handedness
+ * into account. A right-handed forehand uses the right side; a left-
+ * handed forehand uses the left. Backhand flips: a right-hander's
+ * backhand uses the left elbow (one-handed) / both arms (two-handed),
+ * a left-hander's backhand uses the right.
  */
-function dominantElbowKey(shot: ShotType | null): keyof JointAngles {
-  return shot === 'backhand' ? 'left_elbow' : 'right_elbow'
+function dominantSideForShot(
+  shot: ShotType | null,
+  handedness: 'right' | 'left' | null | undefined,
+): 'right' | 'left' {
+  const hand = handedness ?? 'right'
+  if (shot === 'backhand') return hand === 'right' ? 'left' : 'right'
+  return hand
 }
 
-function dominantKneeKey(shot: ShotType | null): keyof JointAngles {
-  return shot === 'backhand' ? 'left_knee' : 'right_knee'
+// Take a resolved dominant side (already accounts for handedness +
+// shot type via dominantSideForShot) and return the matching joint
+// key. Callers pull side from ctx.dominantSide so handedness threads
+// through every rule consistently.
+function dominantElbowKey(side: 'right' | 'left'): keyof JointAngles {
+  return side === 'right' ? 'right_elbow' : 'left_elbow'
+}
+
+function dominantKneeKey(side: 'right' | 'left'): keyof JointAngles {
+  return side === 'right' ? 'right_knee' : 'left_knee'
 }
 
 interface RuleContext {
@@ -325,7 +386,10 @@ function buildRuleContext(input: ExtractionInput): RuleContext | null {
   let applicability = 1.0
   if (input.shotType === null) applicability = 0.5
   else if (input.shotType === 'volley' || input.shotType === 'slice') applicability = 0.8
-  const dominantSide: 'right' | 'left' = input.shotType === 'backhand' ? 'left' : 'right'
+  const dominantSide: 'right' | 'left' = dominantSideForShot(
+    input.shotType,
+    input.dominantHand,
+  )
   return { shotFrames, peakFrame, meanVis, applicability, dominantSide }
 }
 
@@ -347,7 +411,7 @@ function checkElbowAtContact(
   shot: ShotType | null,
 ): Observation[] {
   const out: Observation[] = []
-  const key = dominantElbowKey(shot)
+  const key = dominantElbowKey(ctx.dominantSide)
 
   const elbow = ctx.peakFrame.joint_angles?.[key]
   if (typeof elbow !== 'number' || !Number.isFinite(elbow)) return out
@@ -416,7 +480,7 @@ function checkKneeLoad(
   shot: ShotType | null,
 ): Observation[] {
   const out: Observation[] = []
-  const key = dominantKneeKey(shot)
+  const key = dominantKneeKey(ctx.dominantSide)
   const v = angleMin(ctx.shotFrames, key)
   if (v === null) return out
 
@@ -629,8 +693,8 @@ function compareDrift(
 ): Observation[] {
   const out: Observation[] = []
 
-  const elbowKey = dominantElbowKey(shot)
-  const kneeKey = dominantKneeKey(shot)
+  const elbowKey = dominantElbowKey(todayCtx.dominantSide)
+  const kneeKey = dominantKneeKey(todayCtx.dominantSide)
 
   /**
    * Compare a single-frame extremum across the two swing slices. `pick`

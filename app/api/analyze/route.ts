@@ -174,8 +174,9 @@ function buildUserPrompt(args: {
   shotType: ShotType | null
   tier: SkillTier | null
   focus: string | null
+  handedness: 'right' | 'left' | null
 }): string {
-  const { primary, secondary, exemplars, register, shotType, tier, focus } = args
+  const { primary, secondary, exemplars, register, shotType, tier, focus, handedness } = args
 
   const exemplarLines = exemplars
     .map((ex) => `- ${register === 'technical' ? ex.technical : ex.plain}`)
@@ -189,12 +190,16 @@ function buildUserPrompt(args: {
     ? `Player skill: ${tier}. Calibrate vocabulary to that level.`
     : `Player skill: unknown. Use plain coaching language.`
   const shotHint = shotType ? `Shot: ${shotType}.` : `Shot: not specified.`
+  const handednessHint = handedness
+    ? `Player handedness: ${handedness}-handed. Cue accordingly (a left-hander's forehand uses their left arm).`
+    : `Player handedness: not specified.`
   const focusHint = focus
     ? `Player asked: "${focus}". Address it in your primary cue when relevant.`
     : ''
 
   return `${tierHint}
 ${shotHint}
+${handednessHint}
 ${focusHint}
 
 EXEMPLARS (imitate this voice register, do not copy verbatim):
@@ -233,13 +238,17 @@ function buildFallbackUserPrompt(args: {
   shotType: ShotType | null
   tier: SkillTier | null
   focus: string | null
+  handedness: 'right' | 'left' | null
 }): string {
-  const { userSummary, register, shotType, tier, focus } = args
+  const { userSummary, register, shotType, tier, focus, handedness } = args
 
   const tierHint = tier
     ? `Player skill: ${tier}. Calibrate vocabulary to that level.`
     : `Player skill: unknown. Use plain coaching language.`
   const shotHint = shotType ? `Shot: ${shotType}.` : `Shot: not specified.`
+  const handednessHint = handedness
+    ? `Player handedness: ${handedness}-handed.`
+    : `Player handedness: not specified.`
   const registerHint =
     register === 'technical'
       ? 'Use the technical register (skilled-player vocabulary, e.g. "load the trail leg").'
@@ -250,6 +259,7 @@ function buildFallbackUserPrompt(args: {
 
   return `${tierHint}
 ${shotHint}
+${handednessHint}
 ${registerHint}
 ${focusHint}
 
@@ -488,6 +498,7 @@ export async function POST(request: NextRequest) {
     todaySummary: userKeypoints.frames,
     baselineSummary: baselineFrames,
     shotType: resolvedShotType,
+    dominantHand: profile?.dominant_hand ?? null,
   })
 
   const primary = pickPrimary(observations)
@@ -592,6 +603,7 @@ export async function POST(request: NextRequest) {
       shotType: resolvedShotType,
       tier,
       focus,
+      handedness: profile?.dominant_hand ?? null,
     })
   } else {
     userPrompt = buildFallbackUserPrompt({
@@ -600,6 +612,7 @@ export async function POST(request: NextRequest) {
       shotType: resolvedShotType,
       tier,
       focus,
+      handedness: profile?.dominant_hand ?? null,
     })
   }
 

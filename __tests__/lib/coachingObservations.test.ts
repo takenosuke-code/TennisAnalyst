@@ -120,6 +120,38 @@ describe('extractObservations', () => {
     ).toEqual([])
   })
 
+  it('flips dominant elbow to left for a left-handed forehand', () => {
+    // Left-handed player's dominant arm is the LEFT arm. Cramped left
+    // elbow on a forehand should fire as joint='left_elbow', not the
+    // hardcoded right side that the previous pipeline used.
+    const frames = makeSwingAroundPeak(
+      {
+        left_elbow: 70, // cramped (left, because the player is a lefty)
+        left_knee: 150,
+        right_elbow: 130, // normal
+        right_knee: 165,
+        hip_rotation: 50,
+        trunk_rotation: 60,
+      },
+      {
+        left_elbow: 130,
+        left_knee: 165,
+        right_elbow: 130,
+        right_knee: 165,
+        hip_rotation: 10,
+        trunk_rotation: 10,
+      },
+    )
+    const obs = extractObservations({
+      todaySummary: frames,
+      shotType: 'forehand',
+      dominantHand: 'left',
+    })
+    const cramped = obs.find((o) => o.pattern === 'cramped_elbow')
+    expect(cramped).toBeDefined()
+    expect(cramped!.joint).toBe('left_elbow')
+  })
+
   it('detects cramped_elbow at contact when right elbow < 90°', () => {
     const frames = makeSwingAroundPeak(
       {
