@@ -285,20 +285,16 @@ def main():
     # after the cap so they stay aligned.
     smoothed_angles["racket"] = list(smoothed_angles["fArmR"])
 
-    # 7.6. Off-arm gets a LIGHT dampening (25%) toward its circular
-    # mean: same motion shape, smaller amplitude. User wanted off-arm
-    # "less intense, same motion" — full dampen (50%) flattened it
-    # too much.
-    def circular_mean(angles):
-        sx = sum(math.cos(math.radians(a)) for a in angles) / len(angles)
-        sy = sum(math.sin(math.radians(a)) for a in angles) / len(angles)
-        return math.degrees(math.atan2(sy, sx))
-
-    def dampen_toward(angles, gain):
-        mean = circular_mean(angles)
+    # 7.6. Off-arm dampened toward a LOW REST target (not circular
+    # mean). User feedback: off-arm was reading "high" at rest. The
+    # natural mean for Alcaraz's off-arm is mid-air because his off-
+    # arm is active across the swing; pulling toward a fixed
+    # arm-hanging-at-side pose keeps the resting / non-active phases
+    # low.
+    def dampen_toward_target(angles, target, gain):
         out = []
         for a in angles:
-            delta = mean - a
+            delta = target - a
             while delta > 180:
                 delta -= 360
             while delta <= -180:
@@ -311,8 +307,12 @@ def main():
             out.append(new_a)
         return out
 
-    smoothed_angles["uArmL"] = dampen_toward(smoothed_angles["uArmL"], gain=0.25)
-    smoothed_angles["fArmL"] = dampen_toward(smoothed_angles["fArmL"], gain=0.25)
+    UARML_REST = 95.0   # straight-down with slight outward bias
+    FARML_REST = 100.0  # forearm hanging slightly forward of straight down
+    smoothed_angles["uArmL"] = dampen_toward_target(
+        smoothed_angles["uArmL"], UARML_REST, gain=0.4)
+    smoothed_angles["fArmL"] = dampen_toward_target(
+        smoothed_angles["fArmL"], FARML_REST, gain=0.4)
 
     # 8. hipCenter: dampen motion (so the figure doesn't walk across
     # the screen) + mirror around 0.5 to flip swing direction.
@@ -321,11 +321,71 @@ def main():
     HIP_SHIFT_GAIN = 0.4
     final_hips = []
     for c in hip_centers:
-        # Dampen relative to the per-window average.
         sx_dampened = avg_hip_x + (c[0] - avg_hip_x) * HIP_SHIFT_GAIN
         sy_dampened = avg_hip_y + (c[1] - avg_hip_y) * HIP_SHIFT_GAIN
-        # Mirror around 0.5.
         final_hips.append((round(1.0 - sx_dampened, 4), round(sy_dampened, 4)))
+
+    # 8.5. Racket-tip trajectory smoothed at POSITION level. Forward-
+    # evaluate the bone chain per frame -> get wrist + forearm-direction
+    # racket-head. Smooth those positions with a 9-frame moving avg.
+    # Recompute racket angle/len from the smoothed head positions. This
+    # decouples racket smoothness from forearm-angle noise — the racket
+    # traces a clean curve in space rather than inheriting every wobble
+    # of fArmR.
+    BONE_HIP_HALF = 0.04
+    BONE_SH_HALF = 0.05
+    BONE_TRUNK = 0.25
+    BONE_UPPER_ARM = 0.139
+    BONE_FOREARM = 0.133
+    DESIRED_RACKET_LEN = 0.10
+
+    def polar_pt(L, deg):
+        r = math.radians(deg)
+        return (L * math.cos(r), L * math.sin(r))
+
+    wrists = []
+    racket_heads_raw = []
+    for i in range(n_window):
+        hcx, hcy = final_hips[i]
+        a_trunk = smoothed_angles["trunk"][i]
+        a_uArmR = smoothed_angles["uArmR"][i]
+        a_fArmR = smoothed_angles["fArmR"][i]
+        a_racket = smoothed_angles["racket"][i]
+
+        tx, ty = polar_pt(BONE_TRUNK, a_trunk)
+        sh_mid_render = (hcx + tx, hcy + ty)
+        rs = (sh_mid_render[0] + BONE_SH_HALF, sh_mid_render[1])
+        ueRx, ueRy = polar_pt(BONE_UPPER_ARM, a_uArmR)
+        re_render = (rs[0] + ueRx, rs[1] + ueRy)
+        feRx, feRy = polar_pt(BONE_FOREARM, a_fArmR)
+        rw_render = (re_render[0] + feRx, re_render[1] + feRy)
+        rkx, rky = polar_pt(DESIRED_RACKET_LEN, a_racket)
+        racket_head_render = (rw_render[0] + rkx, rw_render[1] + rky)
+        wrists.append(rw_render)
+        racket_heads_raw.append(racket_head_render)
+
+    # Smooth the racket-head trajectory in screen space. 5-frame
+    # window is the sweet spot — kills jitter without attenuating the
+    # contact-frame extension (a 9-frame window pulls the racket back
+    # toward body center at contact because the average folds in
+    # post-contact wrap-around frames).
+    smoothed_racket_heads = moving_average_2d(racket_heads_raw, window=5)
+
+    # Recompute racket angle + len per frame so the keyframes' racket
+    # field puts the head at the smoothed position relative to the
+    # (un-smoothed) wrist.
+    racket_lens = []
+    for i in range(n_window):
+        wx, wy = wrists[i]
+        rhx, rhy = smoothed_racket_heads[i]
+        dx = rhx - wx
+        dy = rhy - wy
+        smoothed_angles["racket"][i] = math.degrees(math.atan2(dy, dx))
+        racket_lens[i:i+1] = [max(0.08, min(0.16, math.hypot(dx, dy)))]
+
+    # Replace the static-len racket lengths with these per-frame ones.
+    # racket_lens is now the authoritative list for emit.
+    racket_lens_per_frame = racket_lens
 
     # 9. t values: contact at 0.65, final at 0.92. The post-contact
     # span (0.27 of cycle) is wider than the pre-contact span per
@@ -365,7 +425,7 @@ def main():
     a_uArmR = smoothed_angles["uArmR"][contact_local_idx]
     a_fArmR = smoothed_angles["fArmR"][contact_local_idx]
     a_racket = smoothed_angles["racket"][contact_local_idx]
-    racketLen_at_contact = FIXED_RACKET_LEN
+    racketLen_at_contact = racket_lens[contact_local_idx]
 
     tx, ty = polar_pt(BONE_TRUNK, a_trunk)
     sh_mid_render = (hcx + tx, hcy + ty)
