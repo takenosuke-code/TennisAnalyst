@@ -1,5 +1,6 @@
 import type { PoseFrame, Landmark } from './supabase'
 import type { DetectedStroke } from './strokeAnalysis'
+import { verifySwingShape } from './swingShape'
 
 // Re-export so consumers that have always imported DetectedStroke from
 // '@/lib/swingDetect' (or via the '@/lib/jointAngles' re-export) keep
@@ -128,6 +129,17 @@ export interface DetectStrokesOptions {
    * certainly walking / prep positioning, not a stroke.
    */
   widthMaxMs?: number
+  /**
+   * When true, runs the swing-shape verifier (lib/swingShape.ts) on
+   * every refractory survivor and drops candidates whose surrounding
+   * joint trajectories don't look like a real swing. Specifically:
+   * hip rotation excursion ≥8°, trunk rotation excursion ≥10°, and
+   * hip angular-velocity peak preceding the wrist peak by 25–400ms.
+   *
+   * Opt-in (default false) because synthetic test fixtures don't
+   * populate joint_angles. The analyze-page UI surface enables it.
+   */
+  verifyShape?: boolean
 }
 
 const VISIBILITY_FLOOR = 0.5
@@ -165,6 +177,7 @@ interface ResolvedOptions {
   prominenceFloorMadK: number
   widthMinMs: number
   widthMaxMs: number
+  verifyShape: boolean
 }
 
 function applyDefaults(
@@ -188,6 +201,7 @@ function applyDefaults(
       opts.prominenceFloorMadK ?? STROKE_DEFAULTS.prominenceFloorMadK,
     widthMinMs: opts.widthMinMs ?? STROKE_DEFAULTS.widthMinMs,
     widthMaxMs: opts.widthMaxMs ?? STROKE_DEFAULTS.widthMaxMs,
+    verifyShape: opts.verifyShape ?? false,
   }
 }
 
@@ -583,8 +597,22 @@ export function detectStrokes(
   // closer than the refractory window, keep the more prominent one.
   // Most of the work has already been done by prominence — this kills
   // the rare same-real-swing-double-peak that survived width checks.
-  const survivors = applyRefractoryByProminence(candidates, refractoryFrames)
+  let survivors = applyRefractoryByProminence(candidates, refractoryFrames)
   survivors.sort((a, b) => a.idx - b.idx)
+
+  // Optional second-stage shape verifier. Drops candidates whose
+  // surrounding joint trajectories don't look like a real swing
+  // (insufficient hip rotation, no proximal-to-distal kinetic chain).
+  // The wrist-speed pipeline alone has no notion of "swing shape"
+  // and fires on walking-toward-camera, prep bouncing, etc. This
+  // gate is opt-in because synthetic-fixture tests bypass joint
+  // angles; the analyze-page UI surface turns it on.
+  if (resolved.verifyShape && survivors.length > 0) {
+    survivors = survivors.filter((s) =>
+      verifySwingShape(frames, s.idx, resolved.fps).passed,
+    )
+  }
+  if (survivors.length === 0) return []
 
   const prePadFrames = Math.ceil((resolved.prePadMs / 1000) * resolved.fps)
   const postPadFrames = Math.ceil((resolved.postPadMs / 1000) * resolved.fps)

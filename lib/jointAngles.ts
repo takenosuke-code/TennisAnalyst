@@ -241,9 +241,16 @@ export function detectSwings(
      * strokes don't reach users.
      */
     dropRejected?: boolean
+    /**
+     * When true, runs the swing-shape verifier on each candidate and
+     * drops those whose joint trajectories don't match a real swing
+     * (insufficient hip rotation, no proximal-to-distal kinetic
+     * chain). Forwarded to detectStrokes. Default false.
+     */
+    verifyShape?: boolean
   } = {}
 ): SwingSegment[] {
-  const { minSwingFrames = 12, dropRejected = false } = opts
+  const { minSwingFrames = 12, dropRejected = false, verifyShape = false } = opts
 
   // Whole-clip fallback for very short inputs — preserves the legacy
   // "always return something" behavior callers rely on.
@@ -262,6 +269,7 @@ export function detectSwings(
   let strokes = detectStrokes(allFrames, {
     fps: opts.fps,
     dominantHand: opts.dominantHand,
+    verifyShape,
   })
 
   if (dropRejected && strokes.length > 0) {

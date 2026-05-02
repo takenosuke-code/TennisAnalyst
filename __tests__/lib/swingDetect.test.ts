@@ -642,6 +642,95 @@ describe('detectStrokes — width filter rejects long slow drifts', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// verifyShape integration — kinetic-chain gate kills walking false positives
+// ---------------------------------------------------------------------------
+
+describe('detectStrokes — verifyShape kinetic-chain gate', () => {
+  it('with verifyShape: true, a pure-walking clip returns ZERO strokes', () => {
+    // The user's IMG_1098 failure mode: detector fires on walking
+    // toward the camera. Walking has no hip rotation pattern and no
+    // proximal-to-distal kinetic chain. The verifier must reject.
+    const FPS = 30
+    const frames: PoseFrame[] = []
+    for (let i = 0; i < 150; i++) {
+      // Wrist sways at stride freq with growing amplitude as the
+      // player "approaches" — the realistic walking-toward-camera
+      // signature.
+      const stride = 0.06 * (1 + i * 0.005) * Math.sin(i * 0.5)
+      const drift = 0.002 * i
+      const wristX = 0.4 + drift + stride
+      const landmarks = makeStandingPose().map((lm) =>
+        lm.id === LANDMARK_INDICES.RIGHT_WRIST
+          ? { ...lm, x: wristX, y: 0.55, visibility: 0.9 }
+          : lm,
+      )
+      frames.push(
+        makeFrame(i, (i * 1000) / FPS, landmarks, {
+          // Hips and trunk barely rotate — the definitive non-swing
+          // signature.
+          hip_rotation: 2 * Math.sin(i * 0.4),
+          trunk_rotation: 3 * Math.sin(i * 0.4),
+        }),
+      )
+    }
+    const strokes = detectStrokes(frames, { verifyShape: true })
+    expect(strokes.length).toBe(0)
+  })
+
+  it('with verifyShape: true, a real swing with hip rotation pattern is preserved', () => {
+    const FPS = 30
+    const swingPeak = 60
+    const frames: PoseFrame[] = []
+    for (let i = 0; i < 120; i++) {
+      const u = (i - swingPeak) * 0.5
+      const wristX = 0.4 + 0.45 / (1 + Math.exp(-u))
+      const hipT = Math.tanh((i - (swingPeak - 5)) * 0.25)
+      const hipRot = -20 + 25 * (hipT + 1)
+      const trunkT = Math.tanh((i - (swingPeak - 2)) * 0.25)
+      const trunkRot = -25 + 30 * (trunkT + 1)
+      const landmarks = makeStandingPose().map((lm) =>
+        lm.id === LANDMARK_INDICES.RIGHT_WRIST
+          ? { ...lm, x: wristX, y: 0.55, visibility: 0.9 }
+          : lm,
+      )
+      frames.push(
+        makeFrame(i, (i * 1000) / FPS, landmarks, {
+          hip_rotation: hipRot,
+          trunk_rotation: trunkRot,
+        }),
+      )
+    }
+    // Force right-wrist tracking. Left wrist stays at the standing-
+    // pose default (vis=1) so it would otherwise win the dominant-
+    // hand auto-pick over the right wrist (vis=0.9).
+    const strokes = detectStrokes(frames, { verifyShape: true, dominantHand: 'right' })
+    expect(strokes.length).toBe(1)
+    expect(strokes[0].peakFrame).toBeGreaterThanOrEqual(swingPeak - 5)
+    expect(strokes[0].peakFrame).toBeLessThanOrEqual(swingPeak + 5)
+  })
+
+  it('with verifyShape: true, a swing without hip rotation data returns zero strokes', () => {
+    // Conservative-on-missing-data: when joint_angles don't carry
+    // hip rotation, the verifier can't run, so it rejects rather
+    // than passing through.
+    const FPS = 30
+    const frames = singlePeakSwing(120, FPS, 60) // no joint_angles set
+    const strokes = detectStrokes(frames, { verifyShape: true })
+    expect(strokes.length).toBe(0)
+  })
+
+  it('without verifyShape (default false), the same swing still returns one stroke', () => {
+    // Sanity-check that the verifier is genuinely opt-in. Existing
+    // tests + synthetic fixtures (which don't set joint_angles)
+    // continue to behave the way they did before this change.
+    const FPS = 30
+    const frames = singlePeakSwing(120, FPS, 60)
+    const strokes = detectStrokes(frames)
+    expect(strokes.length).toBe(1)
+  })
+})
+
 // Reference type usage — purely a compile-time check that DetectedStroke
 // is exported correctly. Doesn't run any assertions.
 const _typecheck: DetectedStroke = {
