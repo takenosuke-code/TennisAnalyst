@@ -272,34 +272,40 @@ def main():
     # AFTER smoothing so racket inherits the wider 9-frame fArmR MA.
     smoothed_angles["racket"] = list(smoothed_angles["fArmR"])
 
-    # 7.6. Off-arm dampened toward a LOW REST target IN UNWRAPPED
-    # SPACE. Per-frame shortDelta dampening had a failure mode at
-    # full-rotation arms: Alcaraz's off-arm sweeps ~340 deg
-    # unwrapped during the swing, and per-frame dampening with
-    # shortDelta to a fixed target=100 still left the unwrapped
-    # span >180, so the rendered trajectory wrapped through ±180
-    # and read as "the off-arm doing a full circle". Operating on
-    # unwrapped values + stronger gain (0.65) compresses the span
-    # to <180, so the off-arm raises and returns without a wrap.
-    def dampen_toward_target_unwrapped(angles, target, gain):
-        unwrapped = unwrap_angle_series(angles)
-        new_unwrapped = [u + (target - u) * gain for u in unwrapped]
-        # Re-wrap to (-180, 180]
-        out = []
-        for a in new_unwrapped:
-            while a > 180:
-                a -= 360
-            while a <= -180:
-                a += 360
-            out.append(a)
-        return out
-
-    UARML_REST = 95.0   # straight-down with slight outward bias
-    FARML_REST = 100.0  # forearm hanging slightly forward of straight down
-    smoothed_angles["uArmL"] = dampen_toward_target_unwrapped(
-        smoothed_angles["uArmL"], UARML_REST, gain=0.65)
-    smoothed_angles["fArmL"] = dampen_toward_target_unwrapped(
-        smoothed_angles["fArmL"], FARML_REST, gain=0.65)
+    # 7.6. Off-arm trajectory SYNTHESIZED (not extracted from Alcaraz).
+    # User feedback: "off-arm should never go toward the person —
+    # let it point to the ball then go back down." Alcaraz's actual
+    # off-arm sweeps inward across his body during contact, even
+    # after dampening. Replacing with a synthesized half-sine
+    # envelope that goes (idle -> peak-out -> idle) keeps the off-arm
+    # strictly on the outward side at every frame.
+    UARML_IDLE = 95.0   # arm hanging at side
+    FARML_IDLE = 100.0  # forearm hanging slightly down-LEFT
+    UARML_PEAK = 125.0  # upper arm angled forward-down
+    FARML_PEAK = 165.0  # forearm pointing nearly horizontal-LEFT (at ball)
+    PEAK_FRAC = 0.40    # peak of off-arm raise lands ~40% through cycle
+    END_FRAC = 0.92     # off-arm returned to idle by end of post window
+    for ch_name, idle, peak in (
+        ("uArmL", UARML_IDLE, UARML_PEAK),
+        ("fArmL", FARML_IDLE, FARML_PEAK),
+    ):
+        synth = []
+        for i in range(n_window):
+            # Compute the same t-value the keyframes will be emitted with.
+            if i <= contact_local_idx:
+                t = (i / contact_local_idx) * 0.65 if contact_local_idx > 0 else 0.0
+            else:
+                local = i - contact_local_idx
+                post = n_window - 1 - contact_local_idx
+                t = 0.65 + (local / post) * (END_FRAC - 0.65)
+            # Half-sine envelope: 0 at t=0, peak at PEAK_FRAC, 0 at END_FRAC.
+            if t <= PEAK_FRAC:
+                u = t / PEAK_FRAC
+            else:
+                u = max(0.0, 1.0 - (t - PEAK_FRAC) / (END_FRAC - PEAK_FRAC))
+            envelope = math.sin(math.pi / 2 * u) if u > 0 else 0
+            synth.append(idle + (peak - idle) * envelope)
+        smoothed_angles[ch_name] = synth
 
     # 8. hipCenter: dampen motion (so the figure doesn't walk across
     # the screen) + mirror around 0.5 to flip swing direction.
