@@ -280,6 +280,36 @@ def main():
     # after the cap so they stay aligned.
     smoothed_angles["racket"] = list(smoothed_angles["fArmR"])
 
+    # 7.6. Dampen off-arm motion: pull each uArmL/fArmL value 50%
+    # toward its circular mean so the non-racket hand reads as
+    # supportive rather than active. (User feedback: off-arm was
+    # too busy.) Use circular mean to handle wrap-around correctly.
+    def circular_mean(angles):
+        sx = sum(math.cos(math.radians(a)) for a in angles) / len(angles)
+        sy = sum(math.sin(math.radians(a)) for a in angles) / len(angles)
+        return math.degrees(math.atan2(sy, sx))
+
+    def dampen_toward(angles, gain=0.5):
+        mean = circular_mean(angles)
+        out = []
+        for a in angles:
+            # shortDelta from a to mean, scaled by gain
+            delta = mean - a
+            while delta > 180:
+                delta -= 360
+            while delta <= -180:
+                delta += 360
+            new_a = a + delta * gain
+            while new_a > 180:
+                new_a -= 360
+            while new_a <= -180:
+                new_a += 360
+            out.append(new_a)
+        return out
+
+    smoothed_angles["uArmL"] = dampen_toward(smoothed_angles["uArmL"], gain=0.5)
+    smoothed_angles["fArmL"] = dampen_toward(smoothed_angles["fArmL"], gain=0.5)
+
     # 8. hipCenter: dampen motion (so the figure doesn't walk across
     # the screen) + mirror around 0.5 to flip swing direction.
     avg_hip_x = sum(c[0] for c in hip_centers) / n_window
@@ -293,9 +323,14 @@ def main():
         # Mirror around 0.5.
         final_hips.append((round(1.0 - sx_dampened, 4), round(sy_dampened, 4)))
 
-    # 9. t values: contact at 0.65, final at 0.85.
+    # 9. t values: contact at 0.65, final at 0.92. The post-contact
+    # span (0.27 of cycle) is wider than the pre-contact span per
+    # frame, so the follow-through plays back ~35% slower than the
+    # prep — matches the user's "make the follow-through a little
+    # slower" feedback. Recovery (t=0.92 -> t=0 on loop) gets 0.08
+    # of the cycle = ~190ms at SWING_MS=2400.
     t_contact = 0.65
-    t_final = 0.85
+    t_final = 0.92
     ts = []
     for i in range(n_window):
         if i <= contact_local_idx:
