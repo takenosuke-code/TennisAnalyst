@@ -29,7 +29,7 @@ Voice rules:
 4. NO em-dashes / en-dashes (commas or full sentences instead).
 5. NO biomechanics jargon (no "kinetic chain", no "trunk rotation", etc.).
 6. External focus on racket, ball, court targets, not muscles.
-7. Stay grounded in the prior analysis — don't invent observations the analysis doesn't support. If the question can't be answered from what you saw, say so honestly and ask what they'd like you to look for next time.
+7. Ground every claim in the OBSERVATIONS list (when present) and the prior analysis. If the player asks about something covered by an observation that the prior text did not surface, address it directly with what the observation shows — do not refuse. If a question cannot be answered from either source, say so honestly and offer to look for it next time.
 8. Keep the answer to 2 to 4 short paragraphs at most. No section headers.`
 
 const REJECT_DIGIT_RE = /\d/
@@ -82,6 +82,67 @@ export async function POST(request: NextRequest) {
     })
   }
 
+  // Optional structured observation rows from the original /api/analyze
+  // call. When present the LLM can ground "what about X?" follow-ups in
+  // the actual rule firing instead of refusing because the prior text
+  // didn't mention it. Defensive: accept only objects with the four
+  // required Observation fields (phase, joint, pattern, severity); drop
+  // anything else so a malformed client payload can't poison the prompt.
+  const rawObservations = Array.isArray(b.observations) ? b.observations : []
+  type ObservationLike = {
+    phase: string
+    joint: string
+    pattern: string
+    severity: string
+    todayValue?: number
+  }
+  const observations: ObservationLike[] = []
+  for (const o of rawObservations.slice(0, 12)) {
+    if (!o || typeof o !== 'object') continue
+    const r = o as Record<string, unknown>
+    if (
+      typeof r.phase === 'string' &&
+      typeof r.joint === 'string' &&
+      typeof r.pattern === 'string' &&
+      typeof r.severity === 'string'
+    ) {
+      observations.push({
+        phase: r.phase,
+        joint: r.joint,
+        pattern: r.pattern,
+        severity: r.severity,
+        todayValue: typeof r.todayValue === 'number' ? r.todayValue : undefined,
+      })
+    }
+  }
+
+  function patternHumanLabel(pattern: string): string {
+    switch (pattern) {
+      case 'cramped_elbow': return 'cramped elbow at contact'
+      case 'over_extended_elbow': return 'arm locked straight at contact'
+      case 'shallow_knee_load': return 'shallow knee load'
+      case 'locked_knees': return 'legs staying tall through the load'
+      case 'insufficient_hip_excursion': return 'hips barely turning through the swing'
+      case 'insufficient_trunk_excursion': return 'shoulders barely turning through the swing'
+      case 'insufficient_unit_turn': return 'no full unit turn into preparation'
+      case 'truncated_followthrough': return 'follow-through cut short'
+      case 'weak_leg_drive': return 'legs not driving up through the shot'
+      case 'short_pushout': return 'racket not extending out toward the target after contact'
+      case 'unstable_base': return 'head and base shifting through contact'
+      case 'drift_from_baseline': return 'drift from your best-day baseline'
+      default: return pattern.replace(/_/g, ' ')
+    }
+  }
+  const observationsBlock =
+    observations.length > 0
+      ? `\n\nOBSERVATIONS the rule layer flagged on this clip:\n${observations
+          .map(
+            (o) =>
+              `- ${o.joint.replace(/_/g, ' ')} at ${o.phase}: ${patternHumanLabel(o.pattern)} (severity: ${o.severity})`,
+          )
+          .join('\n')}`
+      : ''
+
   // Optional: previous Q&A turns. Cap to last 6 to keep token count tight.
   const rawHistory = Array.isArray(b.history) ? b.history : []
   const history: ChatTurn[] = []
@@ -115,7 +176,7 @@ export async function POST(request: NextRequest) {
   const messages: { role: 'user' | 'assistant'; content: string }[] = [
     {
       role: 'user',
-      content: `Here is the swing analysis you already gave me:\n\n${priorAnalysis}`,
+      content: `Here is the swing analysis you already gave me:\n\n${priorAnalysis}${observationsBlock}`,
     },
     {
       role: 'assistant',

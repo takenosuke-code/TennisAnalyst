@@ -487,4 +487,45 @@ describe('POST /api/analyze (observation-driven pipeline)', () => {
     expect(beforeShow).not.toContain('\u2014')
     expect(beforeShow).toContain('Turn your shoulders earlier')
   })
+
+  it('emits X-Analyze-Observations header with the chosen primary + secondary rows', async () => {
+    mockGetCoachingContext.mockResolvedValue({
+      profile: {
+        skill_tier: 'intermediate',
+        dominant_hand: 'right',
+        backhand_style: 'two_handed',
+        primary_goal: 'consistency',
+      },
+      skipped: false,
+    })
+    responseQueue.push(
+      '## Quick Read\n- Shoulders late.\n\n## Primary cue\nTurn your shoulders earlier.\n\n## Other things I noticed\n- Bend the knees.\n\n## Recommended drills\n- Mini-tennis at the service line.',
+    )
+
+    const { POST } = await import('@/app/api/analyze/route')
+    const res = await POST(
+      makeReq({
+        keypointsJson: makeFakeKeypoints(60),
+        shotType: 'forehand',
+      }),
+    )
+    expect(res.status).toBe(200)
+    await readStream(res)
+
+    const obsHeader = res.headers.get('X-Analyze-Observations')
+    expect(obsHeader, 'observation header should be set').toBeTruthy()
+    // Decode base64 \u2192 JSON. Should be an array of observation rows
+    // with the canonical fields.
+    const decoded = JSON.parse(
+      Buffer.from(obsHeader!, 'base64').toString('utf8'),
+    )
+    expect(Array.isArray(decoded)).toBe(true)
+    expect(decoded.length).toBeGreaterThan(0)
+    for (const o of decoded) {
+      expect(typeof o.phase).toBe('string')
+      expect(typeof o.joint).toBe('string')
+      expect(typeof o.pattern).toBe('string')
+      expect(typeof o.severity).toBe('string')
+    }
+  })
 })

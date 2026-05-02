@@ -5,6 +5,7 @@ import {
   isFrameConfident,
   isBodyVisible,
   smoothFrames,
+  smoothFramesForRules,
   filterImplausibleArmJoints,
   createStreamingLandmarkSmoother,
 } from '@/lib/poseSmoothing'
@@ -555,6 +556,72 @@ describe('smoothFrames', () => {
         const orig = frames[i].landmarks.find((l) => l.id === lm.id)!
         expect(lm.x).toBeCloseTo(orig.x, 3)
       }
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// smoothFramesForRules
+// ---------------------------------------------------------------------------
+
+describe('smoothFramesForRules', () => {
+  it('passes synthetic frames through unchanged when no frame has landmarks', () => {
+    // Hand-crafted joint_angles fixtures bypass landmarks; smoothing
+    // them would invoke computeJointAngles on [] and wipe the angles.
+    const frames: PoseFrame[] = Array.from({ length: 10 }, (_, i) => ({
+      frame_index: i,
+      timestamp_ms: i * 33,
+      landmarks: [],
+      joint_angles: { hip_rotation: 30, trunk_rotation: 45 },
+    }))
+    const result = smoothFramesForRules(frames)
+    expect(result).toBe(frames)
+    expect(result[0].joint_angles.hip_rotation).toBe(30)
+    expect(result[0].joint_angles.trunk_rotation).toBe(45)
+  })
+
+  it('preserves angles on a mid-clip frame with empty landmarks', () => {
+    // Most frames have a real pose; one mid-clip frame has empty
+    // landmarks (tracking dropout). That frame's smoother output
+    // would have joint_angles={}; the wrapper must keep the raw
+    // angles instead of grafting the empty ones.
+    const frames: PoseFrame[] = []
+    for (let i = 0; i < 10; i++) {
+      frames.push({
+        frame_index: i,
+        timestamp_ms: i * 33,
+        landmarks:
+          i === 5
+            ? []
+            : makeStandingPose().map((l) => ({ ...l, visibility: 0.9 })),
+        joint_angles:
+          i === 5
+            ? { hip_rotation: 99, trunk_rotation: 88, right_elbow: 77 }
+            : { hip_rotation: 0, trunk_rotation: 0 },
+      })
+    }
+    const result = smoothFramesForRules(frames)
+    expect(result.length).toBe(10)
+    // Mid-clip empty-landmark frame retains its hand-set angles.
+    expect(result[5].joint_angles.hip_rotation).toBe(99)
+    expect(result[5].joint_angles.trunk_rotation).toBe(88)
+    expect(result[5].joint_angles.right_elbow).toBe(77)
+  })
+
+  it('keeps landmarks raw when smoothing the angle series', () => {
+    // The wrapper's contract is "smooth angles, keep landmarks raw" so
+    // detectSwings (which reads wrist coords) sees the same stream as
+    // it would on the unmoothed input.
+    const frames: PoseFrame[] = Array.from({ length: 30 }, (_, i) =>
+      makeFrame(
+        i,
+        i * 33,
+        makeStandingPose().map((l) => ({ ...l, visibility: 0.9 })),
+      ),
+    )
+    const result = smoothFramesForRules(frames)
+    for (let i = 0; i < frames.length; i++) {
+      expect(result[i].landmarks).toBe(frames[i].landmarks)
     }
   })
 })

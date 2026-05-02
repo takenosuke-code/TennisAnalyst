@@ -29,6 +29,8 @@ import {
   pickPrimary,
   pickSecondary,
 } from '@/lib/coachingObservations'
+import { smoothFramesForRules } from '@/lib/poseSmoothing'
+import { gateClipQuality } from '@/lib/poseGate'
 import type { Landmark, PoseFrame } from '@/lib/supabase'
 
 const FIXTURE_PATH = join(
@@ -53,12 +55,20 @@ function loadFixture(): FixtureJSON {
 }
 
 function recomputeFrames(fixture: FixtureJSON): PoseFrame[] {
-  return fixture.frames.map((f) => ({
+  // Mirror the analyze route: recompute angles from raw landmarks, then
+  // smooth the angle series via smoothFramesForRules. Landmarks stay
+  // raw so the swing detector picks the same window it would on the
+  // raw fixture (regression-safe). beta=0.05 matches the analyze route.
+  const raw: PoseFrame[] = fixture.frames.map((f) => ({
     frame_index: f.frame_index,
     timestamp_ms: f.timestamp_ms,
     landmarks: f.landmarks,
     joint_angles: computeJointAngles(f.landmarks),
   }))
+  return smoothFramesForRules(raw, {
+    minCutoff: 1.0,
+    beta: 0.05,
+  })
 }
 
 describe('Real-clip regression: Alcaraz forehand', () => {
@@ -191,5 +201,28 @@ describe('Real-clip regression: Alcaraz forehand', () => {
       // Secondary must not duplicate primary.
       expect(secondary.find((s) => s === primary)).toBeUndefined()
     }
+  })
+
+  it('clean Alcaraz fixture passes the clip-quality gate', () => {
+    // Mirror the analyze route exactly: gate runs on RAW frames
+    // (pre-smoothing) so smoothing can't tame a structural keypoint
+    // flip into a sub-threshold series of small deltas. Build raw
+    // frames separately rather than calling recomputeFrames (which
+    // smooths).
+    const fx = loadFixture()
+    const rawFrames: PoseFrame[] = fx.frames.map((f) => ({
+      frame_index: f.frame_index,
+      timestamp_ms: f.timestamp_ms,
+      landmarks: f.landmarks,
+      joint_angles: computeJointAngles(f.landmarks),
+    }))
+    const gate = gateClipQuality(rawFrames)
+    expect(
+      gate.passed,
+      `gate failed unexpectedly on clean fixture: ${gate.reason} (metrics=${JSON.stringify(gate.metrics)})`,
+    ).toBe(true)
+    expect(gate.metrics.medianVisibility).toBeGreaterThan(0.5)
+    expect(gate.metrics.bodyVisibleFraction).toBeGreaterThan(0.6)
+    expect(gate.metrics.jumpFraction).toBeLessThanOrEqual(0.25)
   })
 })

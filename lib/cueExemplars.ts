@@ -165,6 +165,54 @@ export const CUE_EXEMPLARS: CueExemplar[] = [
     externalFocus: false,
   },
 
+  // ----- weak_leg_drive --------------------------------------------------
+  {
+    pattern: 'weak_leg_drive',
+    phase: 'contact',
+    plain: 'Push up through your legs into the ball, finish a little taller than you started.',
+    technical: 'Drive vertically off the back leg into contact, the legs power the swing.',
+    externalFocus: false,
+  },
+  {
+    pattern: 'weak_leg_drive',
+    phase: 'contact',
+    plain: 'Sit deeper before you swing, then explode up through the shot.',
+    technical: 'Load the back leg, then extend it through contact and let the swing flow up the body.',
+    externalFocus: false,
+  },
+
+  // ----- short_pushout ---------------------------------------------------
+  {
+    pattern: 'short_pushout',
+    phase: 'follow-through',
+    plain: 'Send the racket out toward where you want the ball to go before it wraps over your shoulder.',
+    technical: 'Extend through the line of the shot before the racket comes across the body.',
+    externalFocus: true,
+  },
+  {
+    pattern: 'short_pushout',
+    phase: 'follow-through',
+    plain: 'Reach forward through the contact, do not stop the racket at the ball.',
+    technical: 'Carry the racket head out toward the target on the follow-through path.',
+    externalFocus: true,
+  },
+
+  // ----- unstable_base ---------------------------------------------------
+  {
+    pattern: 'unstable_base',
+    phase: 'contact',
+    plain: 'Keep your head still through contact, like balancing a glass of water on top.',
+    technical: 'Hold the head and the eyes quiet through contact, balance stays over the front foot.',
+    externalFocus: false,
+  },
+  {
+    pattern: 'unstable_base',
+    phase: 'contact',
+    plain: 'Stay tall and centered, do not fall away as you hit.',
+    technical: 'Stack the head over the hips through contact, no lateral drift off the shot.',
+    externalFocus: false,
+  },
+
   // ----- drift_from_baseline ---------------------------------------------
   {
     pattern: 'drift_from_baseline',

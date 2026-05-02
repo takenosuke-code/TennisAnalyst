@@ -569,6 +569,60 @@ export function smoothFrames(
   return reverseFramesForFiltfilt(reverseSmoothed)
 }
 
+/**
+ * Smooth joint_angles only, leaving landmarks at their raw values.
+ *
+ * Why: the analyze pipeline's swing detector (lib/swingDetect.ts) reads
+ * raw wrist (x, y) landmarks to find peak-velocity windows, while the
+ * rule layer (lib/coachingObservations.ts) reads joint_angles. If we
+ * smooth landmarks and recompute angles (`smoothFrames`), the swing
+ * detector also sees smoothed wrist coords — peak velocities blunt
+ * and the detector picks different (wrong) windows on clean clips
+ * (Alcaraz fixture: 1 swing → 2 swings, primary window 7..54 → 0..35,
+ * lights up insufficient_hip_excursion as a false positive).
+ *
+ * Smoothing the derived angle series only — keeping raw landmarks for
+ * the detector — fixes both the noisy-clip false positives (validated
+ * on IMG_1245) and the clean-clip detection regression. Frame indices
+ * preserved so segment alignment downstream stays intact.
+ */
+export function smoothFramesForRules(
+  frames: PoseFrame[],
+  opts: SmoothOptions = {},
+): PoseFrame[] {
+  if (frames.length === 0) return []
+  // Pass-through when no frame carries landmark data — synthetic test
+  // fixtures bypass landmarks and trust their hand-crafted
+  // joint_angles. Smoothing them would invoke computeJointAngles on
+  // empty arrays and wipe the angles, breaking unit tests that assert
+  // specific rule behavior.
+  const anyLandmarks = frames.some(
+    (f) => Array.isArray(f.landmarks) && f.landmarks.length > 0,
+  )
+  if (!anyLandmarks) return frames
+  const smoothed = smoothFrames(frames, {
+    ...opts,
+    warmupDiscard: 0,
+    visibilityThreshold: 0,
+    minBboxArea: 0,
+  })
+  // Re-map by frame_index in case the smoother dropped/reordered (it
+  // shouldn't with the gates disabled, but be defensive).
+  const byIdx = new Map<number, PoseFrame>()
+  for (const sf of smoothed) byIdx.set(sf.frame_index, sf)
+  return frames.map((raw) => {
+    const sf = byIdx.get(raw.frame_index)
+    // A mid-clip frame with empty landmarks gets `joint_angles: {}`
+    // from the smoother (computeJointAngles on []). Only graft the
+    // smoothed angles when the original frame actually had landmark
+    // data to derive them from — otherwise preserve whatever angles
+    // the raw frame carried.
+    if (!sf) return raw
+    if (!Array.isArray(raw.landmarks) || raw.landmarks.length === 0) return raw
+    return { ...raw, joint_angles: sf.joint_angles }
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Bone-length plausibility
 // ---------------------------------------------------------------------------

@@ -40,6 +40,8 @@ import {
   pickSecondary,
   type Observation,
 } from '@/lib/coachingObservations'
+import { smoothFramesForRules } from '@/lib/poseSmoothing'
+import { gateClipQuality } from '@/lib/poseGate'
 import {
   CUE_EXEMPLARS,
   findExemplars,
@@ -113,6 +115,12 @@ function patternHumanLabel(pattern: Observation['pattern']): string {
       return 'no full unit turn into preparation'
     case 'truncated_followthrough':
       return 'follow-through cut short'
+    case 'weak_leg_drive':
+      return 'legs not driving up through the shot'
+    case 'short_pushout':
+      return 'racket not extending out toward the target after contact'
+    case 'unstable_base':
+      return 'head and base shifting through contact'
     case 'drift_from_baseline':
       return 'drift from your best-day baseline'
   }
@@ -219,7 +227,7 @@ Two or three short bullets summarizing the swing at a glance. Each bullet under 
 One short paragraph addressing the primary issue. Imperative, second person, no numbers, no jargon, no em-dashes.
 
 ## Other things I noticed
-A short bulleted list (one bullet per secondary observation). Each bullet: imperative, single-issue, no numbers, no jargon, no em-dashes. If there are no secondary observations, write a single bullet acknowledging the swing has otherwise hung together.
+One bullet for EVERY secondary observation listed above — do not drop any. Each bullet: imperative, single-issue, no numbers, no jargon, no em-dashes. The order can match severity. If there are no secondary observations, write a single bullet acknowledging the swing has otherwise hung together.
 
 ## Recommended drills
 Two or three concrete on-court drills tied to the cues above. One drill per bullet, each one a single sentence the player can act on. No numbers, no jargon, no em-dashes.`
@@ -487,22 +495,59 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  // Smooth joint angles before any rule fires. Empirically validated
+  // on IMG_1245: kills jitter-driven cramped_elbow false positives
+  // (peak r_elbow 12° → 158° post-smoothing). Landmarks stay raw so
+  // detectSwings's wrist-velocity peak-pick still finds the right
+  // window — smoothing landmark coords blunts peak velocities and
+  // shifts detection (regression on Alcaraz fixture). beta=0.05 (vs
+  // the render-path default 0.007) preserves real angular range
+  // through ~200°/s hip rotation at peak.
+  const ANALYSIS_SMOOTH_OPTS = {
+    minCutoff: 1.0,
+    beta: 0.05,
+  } as const
+  const smoothedFrames = smoothFramesForRules(userKeypoints.frames, ANALYSIS_SMOOTH_OPTS)
+  const smoothedBaselineFrames = baselineFrames
+    ? smoothFramesForRules(baselineFrames, ANALYSIS_SMOOTH_OPTS)
+    : undefined
+
+  // Clip-level confidence gate. Runs on RAW frames so the smoother
+  // can't mask structural keypoint failures: angle smoothing tames the
+  // frame-to-frame hip rotation jumps that the gate's jumpFraction
+  // check uses as a proxy for left/right hip flips. When the gate
+  // fails we skip the LLM call entirely and surface the reason via
+  // X-Analyze-Gate-Reason for the UI to render a reshoot banner.
+  const gateResult = gateClipQuality(userKeypoints.frames)
+
   // Compact angle summary kept for telemetry — `composite_metrics.user_summary`
   // backs the existing capture-quality / drift dashboards. Not part of the
   // new prompt path.
-  const userSummary = buildAngleSummary(userKeypoints.frames)
+  const userSummary = buildAngleSummary(smoothedFrames)
 
   // Run the observation extractor. This is the new core: rule-based detection
   // emits typed Observation rows, and we choose primary + secondary from there.
-  const observations = extractObservations({
-    todaySummary: userKeypoints.frames,
-    baselineSummary: baselineFrames,
-    shotType: resolvedShotType,
-    dominantHand: profile?.dominant_hand ?? null,
-  })
+  // Skip when the gate failed — running rules on garbage input produces
+  // garbage output, and the route falls through to the low-confidence
+  // path which renders the banner instead.
+  const observations = gateResult.passed
+    ? extractObservations({
+        todaySummary: smoothedFrames,
+        baselineSummary: smoothedBaselineFrames,
+        shotType: resolvedShotType,
+        dominantHand: profile?.dominant_hand ?? null,
+      })
+    : []
 
   const primary = pickPrimary(observations)
-  const secondary = pickSecondary(observations, primary, 3)
+  // Cap raised 3 → 6: prior cap dropped real observations off the
+  // bottom on swings with multiple genuine faults, e.g. a clip that
+  // also fired weak_leg_drive showed up as "I didn't focus on legs"
+  // when the player asked. The voice rules still produce one Primary
+  // cue + a tight bulleted list, so 6 secondaries doesn't bloat the
+  // response — it just stops the rule layer from silently hiding real
+  // signal.
+  const secondary = pickSecondary(observations, primary, 6)
 
   // Telemetry insert. Wrapped — must NEVER fail the coaching stream.
   let eventId: string | null = null
@@ -717,5 +762,24 @@ export async function POST(request: NextRequest) {
   // Soft signal so the UI can render a hint banner. Replaces the prior
   // hard X-Analyze-Empty-State that blocked the whole response.
   if (isLowConfidence) headers['X-Analyze-Low-Confidence'] = 'true'
+  // Specific gate reason so the UI can tailor the reshoot guidance.
+  // Only set when the gate explicitly failed; isLowConfidence can also
+  // be true on clips that passed the gate but had no observation clear
+  // the confidence floor (different failure mode, no specific reshoot
+  // advice to give).
+  if (!gateResult.passed && gateResult.reason) {
+    headers['X-Analyze-Gate-Reason'] = gateResult.reason
+  }
+  // Forward the chosen primary + secondary observations to the client
+  // so /api/coach-followup can ground "what about my legs?"-style
+  // questions in the actual rule firings instead of just the prior
+  // analysis text. Base64-encoded JSON to dodge header-charset issues.
+  const surfacedObservations = primary ? [primary, ...secondary] : secondary
+  if (surfacedObservations.length > 0) {
+    headers['X-Analyze-Observations'] = Buffer.from(
+      JSON.stringify(surfacedObservations),
+      'utf8',
+    ).toString('base64')
+  }
   return new NextResponse(stream, { headers })
 }

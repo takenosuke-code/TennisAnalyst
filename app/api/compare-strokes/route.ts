@@ -279,6 +279,12 @@ function patternHumanLabel(pattern: Observation['pattern']): string {
       return 'no full unit turn into preparation'
     case 'truncated_followthrough':
       return 'follow-through cut short'
+    case 'weak_leg_drive':
+      return 'legs not driving up through the shot'
+    case 'short_pushout':
+      return 'racket not extending out toward the target after contact'
+    case 'unstable_base':
+      return 'head and base shifting through contact'
     case 'drift_from_baseline':
       return 'drift from your best-day baseline'
   }

@@ -110,6 +110,12 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
   // but flagged that the read may be less precise. Drives a banner
   // above the normal three-section render.
   const [isLowConfidence, setIsLowConfidence] = useState(false)
+  // The chosen primary + secondary observations from /api/analyze,
+  // forwarded to /api/coach-followup as structured grounding so a
+  // follow-up about something covered by an observation (e.g. "what
+  // about my legs?") gets the underlying rule-fire as context instead
+  // of a refusal to discuss it.
+  const [surfacedObservations, setSurfacedObservations] = useState<unknown[]>([])
 
   // Effective frames: prop-passed `frames` win (baseline/compare path
   // sends them in directly), with the Zustand store as the fallback for
@@ -133,6 +139,7 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
       setAnalysisEventId(null)
       setIsEmptyState(false)
       setIsLowConfidence(false)
+      setSurfacedObservations([])
       setQaThread([])
       setQaInput('')
     }
@@ -195,6 +202,21 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
       if (res.headers.get('X-Analyze-Low-Confidence') === 'true') {
         setIsLowConfidence(true)
       }
+      const obsHeader = res.headers.get('X-Analyze-Observations')
+      if (obsHeader) {
+        try {
+          // Browser-safe base64 decode (atob), then JSON parse. If
+          // either step fails we just drop the observations and the
+          // follow-up falls back to its prior-text-only path.
+          const decoded = JSON.parse(
+            decodeURIComponent(escape(atob(obsHeader))),
+          )
+          if (Array.isArray(decoded)) setSurfacedObservations(decoded)
+        } catch {
+          // Header malformed — silently ignore; follow-up still works
+          // with the prior analysis text alone.
+        }
+      }
 
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
@@ -238,6 +260,13 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
           // Send only the prior turns (excluding the empty assistant turn
           // we just inserted as a placeholder).
           history: qaThread,
+          // Structured rule firings from the original /api/analyze
+          // call. Lets the follow-up answer "what about X?" with the
+          // actual observation row instead of refusing because X
+          // wasn't named in the prior text.
+          ...(surfacedObservations.length > 0
+            ? { observations: surfacedObservations }
+            : {}),
         }),
       })
       if (!res.ok || !res.body) throw new Error('follow-up failed')

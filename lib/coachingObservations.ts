@@ -42,6 +42,21 @@ export type DeviationPattern =
   | 'insufficient_trunk_excursion'
   | 'insufficient_unit_turn'
   | 'truncated_followthrough'
+  // Vertical hip-midpoint rise from loading frame to contact frame,
+  // normalized by torso length. Proxy for whether the legs drove the
+  // shot. Below ~3% torso = no leg push.
+  | 'weak_leg_drive'
+  // Horizontal wrist displacement from contact to T+150ms (5 frames at
+  // 30fps), normalized by shoulder width. Proxy for "racket extends out
+  // toward target" — the coaching cue the user explicitly called out
+  // when their follow-through ended at the shoulder without pushing
+  // the ball forward. Below ~0.3 shoulder-widths = short pushout.
+  | 'short_pushout'
+  // Horizontal nose drift across an 8-frame window centered on contact,
+  // normalized by shoulder width. Proxy for postural stability — head
+  // sway through contact is the universal coaching cue for "still
+  // platform". Above ~0.15 shoulder-widths = unstable.
+  | 'unstable_base'
   | 'drift_from_baseline'
 
 export type Phase = 'preparation' | 'loading' | 'contact' | 'follow-through' | 'finish'
@@ -676,6 +691,297 @@ function checkFollowThrough(ctx: RuleContext): Observation[] {
   return out
 }
 
+// ---------------------------------------------------------------------------
+// Spatial-trajectory rules — all read landmark (x, y) directly rather
+// than joint_angles, so they need real landmark data and abstain on
+// synthetic / zero-variation fixtures (where every frame's landmarks
+// are identical, the metric is trivially zero and the rule would fire
+// every clean test).
+// ---------------------------------------------------------------------------
+
+const ID_NOSE = 0
+const ID_LEFT_SHOULDER = 11
+const ID_RIGHT_SHOULDER = 12
+const ID_LEFT_WRIST = 15
+const ID_RIGHT_WRIST = 16
+const ID_LEFT_HIP = 23
+const ID_RIGHT_HIP = 24
+const SPATIAL_VIS_FLOOR = 0.4
+
+function inferFps(frames: PoseFrame[]): number {
+  if (frames.length < 2) return 30
+  const deltas: number[] = []
+  for (let i = 1; i < Math.min(frames.length, 11); i++) {
+    const dt = frames[i].timestamp_ms - frames[i - 1].timestamp_ms
+    if (dt > 0 && Number.isFinite(dt)) deltas.push(dt)
+  }
+  if (deltas.length === 0) return 30
+  deltas.sort((a, b) => a - b)
+  const medianDt = deltas[Math.floor(deltas.length / 2)]
+  return medianDt > 0 ? 1000 / medianDt : 30
+}
+
+function landmarkAt(frame: PoseFrame, id: number) {
+  if (!frame.landmarks) return undefined
+  const lm = frame.landmarks.find((l) => l.id === id)
+  if (!lm) return undefined
+  if (typeof lm.visibility !== 'number' || lm.visibility < SPATIAL_VIS_FLOOR) return undefined
+  return lm
+}
+
+function midpoint(
+  a: { x: number; y: number } | undefined,
+  b: { x: number; y: number } | undefined,
+): { x: number; y: number } | null {
+  if (!a || !b) return null
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+}
+
+function torsoLength(frame: PoseFrame): number | null {
+  const ls = landmarkAt(frame, ID_LEFT_SHOULDER)
+  const rs = landmarkAt(frame, ID_RIGHT_SHOULDER)
+  const lh = landmarkAt(frame, ID_LEFT_HIP)
+  const rh = landmarkAt(frame, ID_RIGHT_HIP)
+  const sm = midpoint(ls, rs)
+  const hm = midpoint(lh, rh)
+  if (!sm || !hm) return null
+  const dy = hm.y - sm.y
+  const dx = hm.x - sm.x
+  const len = Math.sqrt(dx * dx + dy * dy)
+  return len > 0 ? len : null
+}
+
+function shoulderWidth(frame: PoseFrame): number | null {
+  const ls = landmarkAt(frame, ID_LEFT_SHOULDER)
+  const rs = landmarkAt(frame, ID_RIGHT_SHOULDER)
+  if (!ls || !rs) return null
+  const dx = ls.x - rs.x
+  const dy = ls.y - rs.y
+  const w = Math.sqrt(dx * dx + dy * dy)
+  return w > 0 ? w : null
+}
+
+/**
+ * Vertical hip-midpoint rise from a "loading" frame (~150ms before
+ * contact) to the contact frame, normalized by torso length. In image
+ * coords y increases downward, so a rising body has loadingY > contactY.
+ *
+ * Backed by Reid 2023 / Landlinger 2010: clean forehands show 3-8% torso
+ * rise; flat or negative = no leg push. Threshold here at 3% (`target`),
+ * anchor at 0 (`shortfallMargin` clamps).
+ */
+function checkLegDrive(ctx: RuleContext, fps: number): Observation[] {
+  const out: Observation[] = []
+  const frames = ctx.shotFrames
+  if (frames.length < 6) return out
+  const peakIdx = frames.indexOf(ctx.peakFrame)
+  if (peakIdx < 0) return out
+  // Loading frame ~150ms before contact. At 30fps that's 5 frames.
+  const offset = Math.max(2, Math.round((fps * 150) / 1000))
+  const loadingIdx = Math.max(0, peakIdx - offset)
+  if (loadingIdx === peakIdx) return out
+
+  const contact = frames[peakIdx]
+  const loading = frames[loadingIdx]
+  const cMid = midpoint(landmarkAt(contact, ID_LEFT_HIP), landmarkAt(contact, ID_RIGHT_HIP))
+  const lMid = midpoint(landmarkAt(loading, ID_LEFT_HIP), landmarkAt(loading, ID_RIGHT_HIP))
+  if (!cMid || !lMid) return out
+
+  // Use the longer of the two torso-length readings as the normalizer
+  // — single-frame torso can collapse on perspective foreshortening.
+  const tL = torsoLength(loading)
+  const tC = torsoLength(contact)
+  const torso = tL && tC ? Math.max(tL, tC) : tL ?? tC
+  if (!torso || torso <= 0) return out
+
+  // y decreases upward → rise = loadingY - contactY.
+  const rise = lMid.y - cMid.y
+  const riseFraction = rise / torso
+
+  // Only fire when there's actual landmark variation. A static fixture
+  // produces rise=0 exactly; a real swing where the player happened
+  // not to drive will produce a small rise (or a tiny negative). The
+  // 0.005 floor (~0.5% torso) bypasses synthetic noise without
+  // missing real flat-leg cases.
+  if (Math.abs(riseFraction) < 0.005) return out
+
+  const target = 0.03
+  if (riseFraction >= target) return out
+
+  // shortfall margin: 0 if rise just matches target, 1 if rise is at
+  // or below 0 (no push). Anchored at 0 so a negative rise (player
+  // dropped) reads as severe.
+  const shortfall = Math.max(0, target - riseFraction)
+  const margin = clamp01(shortfall / target)
+  const confidence = computeConfidence({
+    landmarkVisibility: ctx.meanVis,
+    thresholdMargin: margin,
+    ruleApplicability: ctx.applicability,
+  })
+  if (confidence < CONFIDENCE_FLOOR) return out
+  out.push({
+    phase: 'contact',
+    joint: 'hips',
+    pattern: 'weak_leg_drive',
+    severity: severityFromMargin(margin),
+    confidence,
+    todayValue: riseFraction * 100,
+  })
+  return out
+}
+
+/**
+ * Horizontal wrist displacement from the contact frame to T+150ms,
+ * normalized by shoulder width. Direction is signed: a positive value
+ * means the wrist moved in the direction it was already moving at
+ * contact (push-out). A small forward extension means the racket
+ * stopped at contact instead of driving through.
+ *
+ * Backed by tennis-coaching standard "out, up, and through" — a clean
+ * follow-through extends the wrist forward >0.6 shoulder-widths before
+ * crossing the body. Below 0.3 = short.
+ */
+function checkPushout(ctx: RuleContext, fps: number): Observation[] {
+  const out: Observation[] = []
+  const frames = ctx.shotFrames
+  if (frames.length < 6) return out
+  const peakIdx = frames.indexOf(ctx.peakFrame)
+  if (peakIdx < 0) return out
+
+  // T+150ms post contact = ~5 frames at 30fps.
+  const offset = Math.max(2, Math.round((fps * 150) / 1000))
+  const postIdx = Math.min(frames.length - 1, peakIdx + offset)
+  if (postIdx === peakIdx) return out
+
+  const wristId = ctx.dominantSide === 'right' ? ID_RIGHT_WRIST : ID_LEFT_WRIST
+  const cWrist = landmarkAt(frames[peakIdx], wristId)
+  const pWrist = landmarkAt(frames[postIdx], wristId)
+  if (!cWrist || !pWrist) return out
+
+  const sw =
+    shoulderWidth(frames[peakIdx]) ?? shoulderWidth(frames[postIdx])
+  if (!sw || sw <= 0) return out
+
+  // Signed wrist motion in the direction of motion at contact: take the
+  // wrist velocity vector at contact and project the wrist displacement
+  // (contact→T+150) onto it.
+  const prevIdx = Math.max(0, peakIdx - 1)
+  const prevWrist = landmarkAt(frames[prevIdx], wristId)
+  if (!prevWrist) return out
+  const vx = cWrist.x - prevWrist.x
+  const vy = cWrist.y - prevWrist.y
+  const vmag = Math.sqrt(vx * vx + vy * vy)
+  if (vmag < 1e-6) return out
+
+  const dispX = pWrist.x - cWrist.x
+  const dispY = pWrist.y - cWrist.y
+  const projection = (dispX * vx + dispY * vy) / vmag
+  const fraction = projection / sw
+
+  if (Math.abs(fraction) < 0.02) return out
+
+  const target = 0.3
+  if (fraction >= target) return out
+
+  const shortfall = Math.max(0, target - fraction)
+  const margin = clamp01(shortfall / target)
+  const confidence = computeConfidence({
+    landmarkVisibility: ctx.meanVis,
+    thresholdMargin: margin,
+    ruleApplicability: ctx.applicability,
+  })
+  if (confidence < CONFIDENCE_FLOOR) return out
+  out.push({
+    phase: 'follow-through',
+    joint: `${ctx.dominantSide}_wrist`,
+    pattern: 'short_pushout',
+    severity: severityFromMargin(margin),
+    confidence,
+    todayValue: fraction * 100,
+  })
+  return out
+}
+
+/**
+ * 2D nose drift across a tight window around contact (±2 frames =
+ * ~150ms at 30fps), measured RELATIVE to the hip midpoint (body-frame
+ * to cancel broadcast camera motion) and normalized by torso length.
+ * Combines X and Y drift via Euclidean magnitude — captures both head
+ * bob (Y) and side-shifts (X) without missing one or the other.
+ *
+ * Threshold deliberately conservative (0.20 torso) so a clean elite
+ * forehand doesn't trigger from normal swing rotation; biomech "still
+ * head at contact" coaches against gross instability, not micro-motion.
+ * Anchor at 0.40 so margin reaches 1.0 at 2x threshold.
+ */
+function checkStability(ctx: RuleContext): Observation[] {
+  const out: Observation[] = []
+  const frames = ctx.shotFrames
+  if (frames.length < 4) return out
+  const peakIdx = frames.indexOf(ctx.peakFrame)
+  if (peakIdx < 0) return out
+
+  // Tight window — head should be quiet in the immediate contact zone.
+  const lo = Math.max(0, peakIdx - 2)
+  const hi = Math.min(frames.length - 1, peakIdx + 2)
+  if (hi - lo < 2) return out
+
+  // Nose position relative to hip-midpoint cancels camera pan.
+  const relX: number[] = []
+  const relY: number[] = []
+  for (let i = lo; i <= hi; i++) {
+    const n = landmarkAt(frames[i], ID_NOSE)
+    const hMid = midpoint(landmarkAt(frames[i], ID_LEFT_HIP), landmarkAt(frames[i], ID_RIGHT_HIP))
+    if (n && hMid) {
+      relX.push(n.x - hMid.x)
+      relY.push(n.y - hMid.y)
+    }
+  }
+  if (relX.length < 3) return out
+
+  // Median torso length across the window dampens single-frame pose
+  // noise on the normalizer.
+  const torsoSamples: number[] = []
+  for (let i = lo; i <= hi; i++) {
+    const t = torsoLength(frames[i])
+    if (t) torsoSamples.push(t)
+  }
+  if (torsoSamples.length === 0) return out
+  torsoSamples.sort((a, b) => a - b)
+  const torso = torsoSamples[Math.floor(torsoSamples.length / 2)]
+  if (!torso || torso <= 0) return out
+
+  // 2D drift radius: how far did the nose-relative-to-hips move at all
+  // through the contact window?
+  const dx = Math.max(...relX) - Math.min(...relX)
+  const dy = Math.max(...relY) - Math.min(...relY)
+  const drift = Math.sqrt(dx * dx + dy * dy)
+  const fraction = drift / torso
+
+  if (fraction < 0.005) return out
+
+  const threshold = 0.20
+  const anchor = 0.40
+  if (fraction <= threshold) return out
+
+  const margin = overshootMargin(fraction, threshold, anchor)
+  const confidence = computeConfidence({
+    landmarkVisibility: ctx.meanVis,
+    thresholdMargin: margin,
+    ruleApplicability: ctx.applicability,
+  })
+  if (confidence < CONFIDENCE_FLOOR) return out
+  out.push({
+    phase: 'contact',
+    joint: 'head',
+    pattern: 'unstable_base',
+    severity: severityFromMargin(margin),
+    confidence,
+    todayValue: fraction * 100,
+  })
+  return out
+}
+
 /**
  * Drift-from-baseline observations. For each rule output we already produced,
  * compute the same value on the baseline and flag it if the |today - baseline|
@@ -861,6 +1167,14 @@ export function extractObservations(input: ExtractionInput): Observation[] {
   observations.push(...checkKneeLoad(todayCtx, input.shotType))
   observations.push(...checkRotationExcursion(todayCtx))
   observations.push(...checkFollowThrough(todayCtx))
+  // Spatial-trajectory rules need fps to time the loading frame
+  // (contact - 150ms) and post-contact frame (contact + 150ms). Derive
+  // from the median frame timestamp delta; default to 30 if timestamps
+  // are unusable.
+  const fps = inferFps(input.todaySummary)
+  observations.push(...checkLegDrive(todayCtx, fps))
+  observations.push(...checkPushout(todayCtx, fps))
+  observations.push(...checkStability(todayCtx))
 
   // Baseline-compare layer adds drift_from_baseline rows on top of the
   // standard rules. The standard rules still run on `todaySummary` so we can

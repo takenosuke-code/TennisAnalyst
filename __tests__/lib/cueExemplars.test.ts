@@ -23,9 +23,9 @@ const FORBIDDEN_SUBSTRINGS = [
 ]
 
 describe('CUE_EXEMPLARS shape and vocabulary', () => {
-  it('contains 15-20 exemplars (closed set)', () => {
+  it('contains 15-30 exemplars (closed set)', () => {
     expect(CUE_EXEMPLARS.length).toBeGreaterThanOrEqual(15)
-    expect(CUE_EXEMPLARS.length).toBeLessThanOrEqual(20)
+    expect(CUE_EXEMPLARS.length).toBeLessThanOrEqual(30)
   })
 
   it('every exemplar has plain and technical strings, both non-empty', () => {
@@ -47,6 +47,9 @@ describe('CUE_EXEMPLARS shape and vocabulary', () => {
       'insufficient_trunk_excursion',
       'insufficient_unit_turn',
       'truncated_followthrough',
+      'weak_leg_drive',
+      'short_pushout',
+      'unstable_base',
       'drift_from_baseline',
     ]
     for (const ex of CUE_EXEMPLARS) {
@@ -64,6 +67,9 @@ describe('CUE_EXEMPLARS shape and vocabulary', () => {
       'insufficient_trunk_excursion',
       'insufficient_unit_turn',
       'truncated_followthrough',
+      'weak_leg_drive',
+      'short_pushout',
+      'unstable_base',
       'drift_from_baseline',
     ]
     for (const p of required) {
