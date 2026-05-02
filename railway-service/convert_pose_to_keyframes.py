@@ -159,33 +159,21 @@ def main():
     avg_torso_len = math.hypot(avg_sh[0] - avg_hip[0], avg_sh[1] - avg_hip[1])
     ref_scale = TRUNK_FIGURE_LEN / max(avg_torso_len, 1e-6)
 
+    # Racket-head is derived from the SMOOTHED forearm direction (not
+    # the per-frame racket_head detection). The detector wobbles ~50°
+    # between adjacent frames during fast follow-through; using
+    # forearm extension produces a clean, racket-tracks-wrist arc with
+    # no jitter in the post-contact phase.
     per_frame_pts = []
-    racket_pts = []
     for raw in raw_per_frame:
         pts = normalize_to_figure_space(raw, avg_hip, ref_scale)
-
-        rh_pt = window[len(per_frame_pts)].get("racket_head")
-        if rh_pt and rh_pt.get("confidence", 0) > 0.2:
-            rh_xy = (rh_pt["x"], rh_pt["y"])
-        else:
-            rw_raw, re_raw = raw["rw"], raw["re"]
-            ext = 0.10
-            mag = math.hypot(rw_raw[0] - re_raw[0], rw_raw[1] - re_raw[1]) or 1.0
-            rh_xy = (rw_raw[0] + (rw_raw[0] - re_raw[0]) / mag * ext,
-                     rw_raw[1] + (rw_raw[1] - re_raw[1]) / mag * ext)
-        rh_norm = (
-            0.5 + (rh_xy[0] - avg_hip[0]) * ref_scale,
-            0.55 + (rh_xy[1] - avg_hip[1]) * ref_scale,
-        )
         per_frame_pts.append(pts)
-        racket_pts.append(rh_norm)
 
     # 4. Smooth joint trajectories (5-frame centered moving average).
     smoothed = {}
     for name in JOINT_NAMES:
         series = [pts[name] for pts in per_frame_pts]
         smoothed[name] = moving_average_2d(series, window=5)
-    racket_smoothed = moving_average_2d(racket_pts, window=5)
 
     # 5. Compute angles from smoothed positions.
     raw_angles = {key: [] for key in [
@@ -193,7 +181,6 @@ def main():
         "thighL", "shinL", "thighR", "shinR", "racket"
     ]}
     hip_centers = []
-    racket_lens = []
     for i in range(n_window):
         nose = smoothed["nose"][i]
         ls = smoothed["ls"][i]; rs = smoothed["rs"][i]
@@ -202,7 +189,6 @@ def main():
         lh = smoothed["lh"][i]; rh = smoothed["rh"][i]
         lk = smoothed["lk"][i]; rk = smoothed["rk"][i]
         la = smoothed["la"][i]; ra = smoothed["ra"][i]
-        rh_pt = racket_smoothed[i]
 
         hip_c = ((lh[0] + rh[0]) / 2, (lh[1] + rh[1]) / 2)
         sh_c = ((ls[0] + rs[0]) / 2, (ls[1] + rs[1]) / 2)
@@ -219,9 +205,15 @@ def main():
         raw_angles["thighR"].append(polar_angle_deg(*vec(rh, rk)))
         raw_angles["shinR"].append(polar_angle_deg(*vec(rk, ra)))
 
-        rdx, rdy = vec(rw, rh_pt)
-        raw_angles["racket"].append(polar_angle_deg(rdx, rdy))
-        racket_lens.append(max(0.08, min(0.16, math.hypot(rdx, rdy))))
+        # Racket extends along the smoothed forearm direction —
+        # eliminates the per-frame detector noise that was causing
+        # 50-degree jumps in the post-contact phase.
+        raw_angles["racket"].append(polar_angle_deg(*vec(re, rw)))
+
+    # Fixed racketLen for every frame — was bouncing 0.08 to 0.16
+    # because of detection-distance noise.
+    FIXED_RACKET_LEN = 0.13
+    racket_lens = [FIXED_RACKET_LEN] * n_window
 
     # 6. Unwrap each angle channel + re-smooth.
     smoothed_angles = {}
@@ -295,7 +287,7 @@ def main():
     a_uArmR = smoothed_angles["uArmR"][contact_local_idx]
     a_fArmR = smoothed_angles["fArmR"][contact_local_idx]
     a_racket = smoothed_angles["racket"][contact_local_idx]
-    racketLen_at_contact = racket_lens[contact_local_idx]
+    racketLen_at_contact = FIXED_RACKET_LEN
 
     tx, ty = polar_pt(BONE_TRUNK, a_trunk)
     sh_mid_render = (hcx + tx, hcy + ty)
