@@ -92,6 +92,12 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
   const [userFocus, setUserFocus] = useState('')
   const [analysisEventId, setAnalysisEventId] = useState<string | null>(null)
   const [feedbackState, setFeedbackState] = useState<FeedbackState>('idle')
+  // Follow-up Q&A thread shown after the initial analysis. Each turn is
+  // either a user question or an assistant answer; we render them as a
+  // chat history below the coach panel sections.
+  const [qaThread, setQaThread] = useState<{ role: 'user' | 'assistant'; content: string }[]>([])
+  const [qaInput, setQaInput] = useState('')
+  const [qaSending, setQaSending] = useState(false)
   // True when /api/analyze responded with the X-Analyze-Empty-State
   // header (pose was unreadable). Drives a softer, no-disclosure render
   // path — no Primary cue heading, no thumbs strip.
@@ -127,6 +133,8 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
       setAnalysisEventId(null)
       setIsEmptyState(false)
       setIsLowConfidence(false)
+      setQaThread([])
+      setQaInput('')
     }
   }, [feedback])
 
@@ -208,6 +216,68 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
       setFeedback('Analysis failed. Please try again.')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const askFollowUp = async () => {
+    const q = qaInput.trim()
+    if (!q || qaSending) return
+    setQaSending(true)
+    // Show the user's turn immediately + an empty assistant turn we
+    // append streamed tokens into.
+    const turnsBeforeRequest = [...qaThread, { role: 'user' as const, content: q }]
+    setQaThread([...turnsBeforeRequest, { role: 'assistant' as const, content: '' }])
+    setQaInput('')
+    try {
+      const res = await fetch('/api/coach-followup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question: q,
+          priorAnalysis: feedback,
+          // Send only the prior turns (excluding the empty assistant turn
+          // we just inserted as a placeholder).
+          history: qaThread,
+        }),
+      })
+      if (!res.ok || !res.body) throw new Error('follow-up failed')
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        // Replace the last (assistant) turn's content with the running buffer.
+        setQaThread((prev) => {
+          if (prev.length === 0) return prev
+          const next = prev.slice(0, -1)
+          next.push({ role: 'assistant', content: buf })
+          return next
+        })
+      }
+      const tail = decoder.decode()
+      if (tail) {
+        buf += tail
+        setQaThread((prev) => {
+          if (prev.length === 0) return prev
+          const next = prev.slice(0, -1)
+          next.push({ role: 'assistant', content: buf })
+          return next
+        })
+      }
+    } catch {
+      setQaThread((prev) => {
+        if (prev.length === 0) return prev
+        const next = prev.slice(0, -1)
+        next.push({
+          role: 'assistant',
+          content: 'Sorry, I couldn’t answer that one. Try asking again?',
+        })
+        return next
+      })
+    } finally {
+      setQaSending(false)
     }
   }
 
@@ -343,6 +413,19 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
             </>
           )}
         </div>
+      )}
+
+      {/* Follow-up Q&A. Only shown after the analysis has finished
+          streaming and isn't an empty-state response. The thread
+          renders chronologically; the input pins below. */}
+      {feedback && !loading && !isEmptyState && (
+        <FollowUpThread
+          turns={qaThread}
+          input={qaInput}
+          onInputChange={setQaInput}
+          onSend={askFollowUp}
+          sending={qaSending}
+        />
       )}
 
       {showFeedbackStrip && (
@@ -628,6 +711,100 @@ function FeedbackStrip({
       {state === 'error' && (
         <span className="text-xs text-clay">Couldn&apos;t save — try again?</span>
       )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Follow-up Q&A thread — appears under the streamed coaching sections so
+// the player can ask clarifying questions about the analysis. Each turn
+// is rendered as a simple message bubble. Streaming answers append to
+// the last assistant turn live.
+// ---------------------------------------------------------------------------
+
+function FollowUpThread({
+  turns,
+  input,
+  onInputChange,
+  onSend,
+  sending,
+}: {
+  turns: { role: 'user' | 'assistant'; content: string }[]
+  input: string
+  onInputChange: (v: string) => void
+  onSend: () => void
+  sending: boolean
+}) {
+  return (
+    <div className="border-t border-ink/10 px-5 py-4 space-y-3">
+      <p className="text-[11px] uppercase tracking-[0.18em] text-ink/50 font-semibold">
+        Ask a follow-up
+      </p>
+
+      {turns.length > 0 && (
+        <ul className="space-y-3">
+          {turns.map((t, i) => (
+            <li
+              key={i}
+              className={
+                t.role === 'user'
+                  ? 'text-sm text-ink/85 leading-relaxed bg-cream-soft border border-ink/10 px-3 py-2'
+                  : 'text-sm text-ink leading-relaxed'
+              }
+            >
+              {t.role === 'user' ? (
+                <>
+                  <span className="text-[10px] uppercase tracking-[0.18em] text-clay font-semibold mr-2">
+                    You
+                  </span>
+                  {t.content}
+                </>
+              ) : (
+                <span className="whitespace-pre-line">
+                  {t.content || (
+                    <span className="text-ink/50 inline-flex items-center gap-2">
+                      <span className="inline-block w-1.5 h-4 bg-clay animate-pulse" />
+                      Coach is thinking…
+                    </span>
+                  )}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="relative">
+        <textarea
+          value={input}
+          onChange={(e) => onInputChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              if (!sending && input.trim()) onSend()
+            }
+          }}
+          placeholder={
+            turns.length === 0
+              ? `e.g. "what should I focus on first?" or "is my contact point too late?"`
+              : `Ask another question…`
+          }
+          rows={2}
+          className="w-full bg-cream-soft border border-ink/15 px-3 py-2 pr-20 text-sm text-ink placeholder:text-ink/30 focus:outline-none focus:border-clay/60 resize-none"
+        />
+        <button
+          type="button"
+          onClick={onSend}
+          disabled={sending || !input.trim()}
+          className={`absolute bottom-2 right-2 px-3 py-1 text-xs font-semibold transition-colors ${
+            sending || !input.trim()
+              ? 'bg-ink/10 text-ink/40 cursor-not-allowed'
+              : 'bg-clay hover:bg-[#c4633f] text-cream'
+          }`}
+        >
+          {sending ? '…' : 'Ask ↵'}
+        </button>
+      </div>
     </div>
   )
 }
