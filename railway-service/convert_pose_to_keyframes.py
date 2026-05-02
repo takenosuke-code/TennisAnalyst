@@ -212,7 +212,7 @@ def main():
 
     # Fixed racketLen for every frame — was bouncing 0.08 to 0.16
     # because of detection-distance noise.
-    FIXED_RACKET_LEN = 0.13
+    FIXED_RACKET_LEN = 0.10
     racket_lens = [FIXED_RACKET_LEN] * n_window
 
     # 6. Unwrap each angle channel + re-smooth.
