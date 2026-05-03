@@ -221,13 +221,59 @@ export default function LLMCoachingPanel({ compareMode = 'solo', frames, compare
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
 
+      // The route streams LLM tokens directly. When a streamed attempt
+      // fails the digit/jargon post-filter, the route emits a sentinel
+      // — STREAM_CLEAR_MARKER below — telling us to discard everything
+      // we've appended so far and start fresh from the next chunk. We
+      // also have to handle the marker straddling chunk boundaries, so
+      // we keep a small carryover buffer and only forward content that
+      // can't possibly be a partial marker.
+      const STREAM_CLEAR_MARKER = '\x00CLEAR\x00'
+      let pending = ''
+      const findIncompleteMarkerSuffix = (s: string): number => {
+        for (let i = Math.min(STREAM_CLEAR_MARKER.length - 1, s.length); i > 0; i--) {
+          if (s.endsWith(STREAM_CLEAR_MARKER.slice(0, i))) return i
+        }
+        return 0
+      }
+
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-        appendFeedback(decoder.decode(value, { stream: true }))
+        pending += decoder.decode(value, { stream: true })
+
+        // Drain every complete CLEAR marker.
+        let clearIdx = pending.indexOf(STREAM_CLEAR_MARKER)
+        while (clearIdx !== -1) {
+          // Discard everything before AND the marker itself; this
+          // attempt failed validation, replace the rendered feedback.
+          setFeedback('')
+          pending = pending.slice(clearIdx + STREAM_CLEAR_MARKER.length)
+          clearIdx = pending.indexOf(STREAM_CLEAR_MARKER)
+        }
+
+        // Hold back any trailing prefix that could be the start of a
+        // marker (e.g. '\x00' or '\x00CLE'), so we never split a
+        // marker across two appendFeedback calls.
+        const incomplete = findIncompleteMarkerSuffix(pending)
+        const forwardable = incomplete > 0
+          ? pending.slice(0, pending.length - incomplete)
+          : pending
+        if (forwardable.length > 0) appendFeedback(forwardable)
+        pending = incomplete > 0 ? pending.slice(pending.length - incomplete) : ''
       }
-      const remaining = decoder.decode()
-      if (remaining) appendFeedback(remaining)
+      const tail = decoder.decode()
+      if (tail) pending += tail
+      // Final flush. Any complete marker at the very end means the
+      // last attempt failed and the route fell back to the static
+      // path — handle that final clear too.
+      let lastClear = pending.indexOf(STREAM_CLEAR_MARKER)
+      while (lastClear !== -1) {
+        setFeedback('')
+        pending = pending.slice(lastClear + STREAM_CLEAR_MARKER.length)
+        lastClear = pending.indexOf(STREAM_CLEAR_MARKER)
+      }
+      if (pending.length > 0) appendFeedback(pending)
 
       const currentFeedback = useAnalysisStore.getState().feedback
       if (currentFeedback.includes('\n\n[ERROR] ')) {

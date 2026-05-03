@@ -89,6 +89,14 @@ const STRICT_RETRY_NOTE = `\n\nSTRICT RETRY: Your previous output included disal
 // Patterns we reject in LLM output. Show your work is appended AFTER the
 // filter runs, so the digit pattern there does not trip it.
 const REJECT_DIGIT_RE = /\d/
+
+// Sentinel emitted to the client when a streamed attempt fails
+// validation mid-flight. The client buffers incoming text and, on
+// seeing this marker, discards everything before it (i.e. clears the
+// rendered feedback so far) and continues building from the next
+// chunk. NUL byte prefix keeps it unlikely to collide with real
+// model output, which is plain markdown and never contains \x00.
+const STREAM_CLEAR_MARKER = '\x00CLEAR\x00'
 // 2026-05 — voice loosened to advisor register. "kinetic chain" is now
 // allowed (the example output the user liked uses the term explicitly).
 // "joint angle" stays banned per user feedback ("no one understands it").
@@ -507,166 +515,17 @@ Two or three concrete on-court drills any player at this level benefits from. On
 }
 
 /**
- * Buffer-and-validate one LLM call. Returns the cleaned body or null when
- * the post-filter rejected it.
+ * Removed in 2026-05: streamLlmBody (buffer-and-validate helper) and
+ * the senior-coach validator (reviewWithSeniorCoach +
+ * SENIOR_COACH_SYSTEM_PROMPT). The route now streams tokens directly
+ * to the client per attempt, so a buffered helper is no longer
+ * needed; and the senior-coach validator ran AFTER the full junior
+ * response, which would cause a jarring "replace what the user just
+ * watched stream in" flicker. The strict prompt rules + post-filter
+ * remain as the safety net. If we want a senior reviewer back, the
+ * cleanest path is a separate route that runs against the saved
+ * markdown asynchronously.
  */
-async function streamLlmBody(args: {
-  systemPrompt: string
-  userPrompt: string
-  maxTokens: number
-}): Promise<{ text: string | null; outputTokens: number | null; error: string | null }> {
-  let buffered = ''
-  let outputTokens: number | null = null
-  let error: string | null = null
-  try {
-    const messageStream = anthropic.messages.stream({
-      model: 'claude-sonnet-4-6',
-      max_tokens: args.maxTokens,
-      system: [
-        { type: 'text', text: args.systemPrompt, cache_control: { type: 'ephemeral' } },
-      ],
-      messages: [{ role: 'user', content: args.userPrompt }],
-    })
-    for await (const chunk of messageStream) {
-      if (
-        chunk.type === 'content_block_delta' &&
-        chunk.delta.type === 'text_delta'
-      ) {
-        buffered += chunk.delta.text
-      } else if (chunk.type === 'message_delta' && chunk.usage?.output_tokens) {
-        outputTokens = chunk.usage.output_tokens
-      }
-    }
-  } catch (err) {
-    error = err instanceof Error ? err.message : 'Anthropic stream failed'
-  }
-  if (error) return { text: null, outputTokens, error }
-  if (REJECT_DIGIT_RE.test(buffered) || REJECT_JARGON_RE.test(buffered)) {
-    return { text: null, outputTokens, error: null }
-  }
-  return { text: buffered.trim(), outputTokens, error: null }
-}
-
-// ---------------------------------------------------------------------------
-// Senior-coach validator
-// ---------------------------------------------------------------------------
-//
-// A second LLM pass that reads the draft coaching response alongside the
-// observations that drove it, and either approves or rewrites. Modeled
-// after a senior tennis coach reviewing a junior's analysis. The
-// specific job: catch cases where a body-mechanic difference is
-// flagged as a fault when a contact-context difference would have
-// explained it. Without this pass, the model occasionally writes
-// "your knees aren't loading" when the truthful answer is "your knees
-// matched, but you contacted the ball higher today."
-//
-// Only runs in baseline-compare mode AND only when at least one
-// contact-context observation is present (otherwise there's no
-// explanation chain to verify and the validator is wasted latency).
-//
-// Output is a structured JSON object. If approved, we keep the draft.
-// If rewritten, we use the rewrite (still subject to the digit/jargon
-// post-filter). At most one validator pass per request — no looping.
-
-const SENIOR_COACH_SYSTEM_PROMPT = `You are a senior tennis coach reviewing a junior coach's analysis of a player's swing. Your job is to check the junior's reasoning against the underlying observations and decide if it correctly contextualizes body-mechanic differences with contact-context differences.
-
-Rules of review:
-1. A "contact-context" observation describes where the player met the ball relative to their body — higher / lower / jammed / extended. The player rarely controls these swing-by-swing; they're a function of how the ball came in.
-2. A body-mechanic difference (knee load, elbow angle, hip rotation, follow-through length, etc.) can be EXPLAINED by a contact-context difference. Higher contact → lighter knee load is expected. Jammed contact → cramped elbow is expected. Lower contact → deeper knee load is expected.
-3. When the junior flags a body-mechanic difference as a fault to fix, but a contact-context difference in the SAME observation set would have explained it, REJECT and rewrite. The correct framing is "your mechanics are on-pattern, your contact context was different today."
-4. When the junior correctly says "shots are similar, the difference in X is because the ball came in differently," APPROVE.
-5. When there's no body/contact mismatch at all (only body diffs, only contact diffs, or neither), APPROVE — there's nothing for you to override.
-6. REJECT if the junior hedges on missing ball context. The system has no ball-tracking data. If the OBSERVATIONS list doesn't contain a contact-context row, the contact location was not meaningfully different from baseline. The junior must NOT say "without knowing where the ball came in," "if the ball came in differently," "watch the video to see if contact changed," "was it further out / higher / lower," or any equivalent question that asks the player to verify ball context. If you see this kind of hedge, REJECT and rewrite the analysis to coach the body-mechanic differences confidently as real drift, removing all references to unknown ball context.
-7. NEVER rewrite to add coaching cues that aren't grounded in the observations. Don't expand scope. Stay within what the observation rows say.
-8. Respect the same voice rules as the junior: no digits, no degrees, no em-dashes, no "joint angle". Plain biomech terms (unit turn, kinetic chain, follow-through) are fine.
-
-Output format — respond with EXACTLY this JSON, no other text:
-{
-  "approved": <true | false>,
-  "reason": "<one short sentence on why you approved or rejected>",
-  "rewrite": <null if approved, otherwise the COMPLETE revised analysis as a string in the same four-section markdown format the junior used (## Quick Read / ## Primary cue / ## Other things I noticed / ## Recommended drills)>
-}`
-
-interface SeniorCoachVerdict {
-  approved: boolean
-  reason: string
-  rewrite: string | null
-}
-
-async function reviewWithSeniorCoach(args: {
-  observations: Observation[]
-  draftMarkdown: string
-  maxTokens: number
-}): Promise<SeniorCoachVerdict | null> {
-  const observationLines = args.observations
-    .map((o) => `- ${renderObservationLine(o)}`)
-    .join('\n')
-  const userPrompt = `OBSERVATIONS the junior coach was given:
-${observationLines}
-
-JUNIOR COACH'S DRAFT ANALYSIS:
-${args.draftMarkdown}
-
-Review the draft against the observations and emit your JSON verdict.`
-
-  let buffered = ''
-  try {
-    // Validator runs on Haiku 4.5 — well-defined judgment + rewrite
-    // task that Haiku handles reliably, at ~5-10x lower cost than the
-    // Sonnet junior call. Keeps the senior-coach feature affordable
-    // even when it fires on every baseline-compare save with mixed
-    // observations. If parse fails or Haiku produces a malformed
-    // verdict, the route falls back to the junior's draft (already
-    // validated by the digit/jargon filter), so a Haiku quality dip
-    // degrades gracefully rather than breaking the user-visible flow.
-    const stream = anthropic.messages.stream({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: args.maxTokens,
-      system: [
-        {
-          type: 'text',
-          text: SENIOR_COACH_SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: [{ role: 'user', content: userPrompt }],
-    })
-    for await (const chunk of stream) {
-      if (
-        chunk.type === 'content_block_delta' &&
-        chunk.delta.type === 'text_delta'
-      ) {
-        buffered += chunk.delta.text
-      }
-    }
-  } catch (err) {
-    console.error('[senior-coach] anthropic call failed:', err)
-    return null
-  }
-
-  // Strip code fences if the model wrapped the JSON.
-  const cleaned = buffered
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/```\s*$/i, '')
-  try {
-    const parsed = JSON.parse(cleaned) as Partial<SeniorCoachVerdict>
-    if (typeof parsed.approved !== 'boolean') return null
-    if (typeof parsed.reason !== 'string') return null
-    if (parsed.approved) {
-      return { approved: true, reason: parsed.reason, rewrite: null }
-    }
-    if (typeof parsed.rewrite !== 'string' || parsed.rewrite.length === 0) {
-      // Rejected without a rewrite — treat as approved (don't drop the
-      // junior's work just because the senior had nothing better).
-      return { approved: true, reason: parsed.reason, rewrite: null }
-    }
-    return { approved: false, reason: parsed.reason, rewrite: parsed.rewrite }
-  } catch (err) {
-    console.error('[senior-coach] JSON parse failed:', err, cleaned.slice(0, 200))
-    return null
-  }
-}
 
 /**
  * Static fallback used when all LLM retries fail validation. Constructs a
@@ -1076,12 +935,16 @@ export async function POST(request: NextRequest) {
     })
   }
 
-  // The LLM call is buffered (not streamed straight to the client) so we can
-  // run the post-filter and re-roll on rejection. Streaming AND retries are
-  // incoherent — we'd have to roll back already-emitted tokens — so the call
-  // buffers and we stream the cleaned result + Show Your Work to the client
-  // in one shot. Tokens-per-second perception is preserved by keeping the
-  // overall response under ~3 seconds.
+  // 2026-05 — switched from buffer-and-validate to live token streaming
+  // so the user sees the response build up in real time instead of
+  // waiting ~5-10s for the full response. Each LLM attempt streams its
+  // tokens directly to the client AS they arrive. If a digit/jargon
+  // hits the buffered text, we abort the stream, send a CLEAR_MARKER
+  // sentinel that the client uses to discard the bad attempt, then
+  // retry. The senior-coach validator was removed from this path —
+  // it ran AFTER the full junior response and would have caused a
+  // jarring "replace what the user just watched stream in" flicker.
+  // The strict prompt rules + post-filter remain as the safety net.
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -1090,34 +953,83 @@ export async function POST(request: NextRequest) {
       let lastError: string | null = null
       let outputTokens: number | null = null
       let usedFallback = false
+      // True once we've streamed any tokens of an attempt to the
+      // client. On retry we send CLEAR_MARKER to tell the client to
+      // discard what it has so far.
+      let hasStreamed = false
 
       while (attempts <= MAX_LLM_RETRIES && cleanedBody === null) {
+        if (hasStreamed) {
+          controller.enqueue(encoder.encode(STREAM_CLEAR_MARKER))
+          hasStreamed = false
+        }
         const userContent =
           attempts === 0 ? userPrompt : userPrompt + STRICT_RETRY_NOTE
-        const result = await streamLlmBody({
-          systemPrompt: SYSTEM_PROMPT,
-          userPrompt: userContent,
-          maxTokens,
-        })
-        if (result.outputTokens != null) outputTokens = result.outputTokens
-        if (result.error) {
-          lastError = result.error
-          break // stream errored; do not retry — fall back below.
-        }
-        if (result.text) {
-          cleanedBody = result.text
+        let buffered = ''
+        let aborted = false
+        try {
+          const messageStream = anthropic.messages.stream({
+            model: 'claude-sonnet-4-6',
+            max_tokens: maxTokens,
+            system: [
+              { type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+            ],
+            messages: [{ role: 'user', content: userContent }],
+          })
+          for await (const chunk of messageStream) {
+            if (
+              chunk.type === 'content_block_delta' &&
+              chunk.delta.type === 'text_delta'
+            ) {
+              const newText = chunk.delta.text
+              buffered += newText
+              // Mid-stream abort: if the buffered output trips the
+              // post-filter, stop emitting tokens immediately so we
+              // don't waste tokens (and CLEAR_MARKER on the next
+              // iteration discards what we already streamed).
+              if (
+                REJECT_DIGIT_RE.test(buffered) ||
+                REJECT_JARGON_RE.test(buffered)
+              ) {
+                aborted = true
+                break
+              }
+              controller.enqueue(encoder.encode(newText))
+              hasStreamed = true
+            } else if (
+              chunk.type === 'message_delta' &&
+              chunk.usage?.output_tokens
+            ) {
+              outputTokens = chunk.usage.output_tokens
+            }
+          }
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : 'Anthropic stream failed'
           break
         }
-        attempts += 1
+        if (aborted) {
+          attempts += 1
+          continue
+        }
+        if (
+          REJECT_DIGIT_RE.test(buffered) ||
+          REJECT_JARGON_RE.test(buffered)
+        ) {
+          attempts += 1
+          continue
+        }
+        cleanedBody = buffered.trim()
       }
 
       if (cleanedBody === null) {
         usedFallback = true
-        // exemplarSet is only populated in the structured (primary-present)
-        // path; the fallback prompt builder doesn't construct one. Pull a
-        // generic exemplar from the global table when we're in low-
-        // confidence mode so the static fallback still has a phrasing
-        // anchor instead of the generic-pattern text.
+        // Fallback path: build a deterministic response from the chosen
+        // observations. If we had streamed bad attempts, clear them
+        // first so the static fallback replaces — not appends.
+        if (hasStreamed) {
+          controller.enqueue(encoder.encode(STREAM_CLEAR_MARKER))
+          hasStreamed = false
+        }
         const fallbackExemplar = primary
           ? findExemplars(primary, 1)[0] ?? CUE_EXEMPLARS[0] ?? null
           : CUE_EXEMPLARS[0] ?? null
@@ -1127,53 +1039,16 @@ export async function POST(request: NextRequest) {
           exemplar: fallbackExemplar,
           register,
         })
-      }
-
-      // Senior-coach review pass. Fires in baseline-compare mode any
-      // time the observation set contains at least one observation.
-      // Two failure modes the validator catches:
-      //   1. Mis-framing: junior flags a body-mechanic diff as a fault
-      //      when a contact-context diff in the same set explained it.
-      //   2. Hedging: junior says "without knowing where the ball came
-      //      in" or asks the player to verify contact context. The
-      //      system has no ball-tracking data; admitting it inline
-      //      reads as evasive and pushes the diagnosis onto the user.
-      // Skipped when there are zero observations (the match prompt
-      // path runs and there's nothing for a senior to second-guess).
-      const allObservations = primary ? [primary, ...secondary] : secondary
-      let seniorVerdict: SeniorCoachVerdict | null = null
-      if (
-        isBaselineCompare &&
-        !usedFallback &&
-        allObservations.length > 0 &&
-        cleanedBody
-      ) {
-        seniorVerdict = await reviewWithSeniorCoach({
-          observations: allObservations,
-          draftMarkdown: cleanedBody,
-          maxTokens,
-        })
-        if (seniorVerdict && !seniorVerdict.approved && seniorVerdict.rewrite) {
-          // Run the rewrite through the same digit/jargon filter we
-          // apply to the junior — never trust upstream output blindly.
-          const rewrite = seniorVerdict.rewrite.trim()
-          if (
-            !REJECT_DIGIT_RE.test(rewrite) &&
-            !REJECT_JARGON_RE.test(rewrite)
-          ) {
-            cleanedBody = rewrite
-          }
-        }
+        controller.enqueue(encoder.encode(cleanedBody))
       }
 
       const showWork = renderShowYourWork(primary, secondary)
-      // Low-confidence path emits no "Show your work" block (no
-      // observations cleared the floor). The warning is purely a header
-      // signal; UI renders the banner above the sections.
       const fullResponse = showWork
         ? `${cleanedBody}\n${showWork}`
         : cleanedBody
-      controller.enqueue(encoder.encode(fullResponse))
+      if (showWork) {
+        controller.enqueue(encoder.encode(`\n${showWork}`))
+      }
       if (lastError) {
         controller.enqueue(encoder.encode(`\n\n[ERROR] ${lastError}`))
       }
