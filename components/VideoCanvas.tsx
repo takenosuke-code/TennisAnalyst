@@ -606,19 +606,25 @@ export default function VideoCanvas({
     const video = videoRef.current
     if (!video) return
     if (syncPlaying) {
-      // If we're at windowEnd and the parent wants to play, the
-      // restartTrigger effect should have already moved us back. If
-      // we're still at end (e.g. parent only toggled syncPlaying
-      // without bumping the trigger), seek to start before playing.
-      if (hasWindow && video.currentTime >= windowEndSec - 0.05) {
-        video.currentTime = windowStartSec
+      // If we're parked at the end from a previous holdAtEnd cycle,
+      // seek back to the start before playing — otherwise video.play()
+      // resumes at end frame and immediately re-pauses via the
+      // reachedEnd check, looking like "click play, nothing happens."
+      // Handles BOTH the windowed case (today's swing window) and the
+      // un-windowed case (baseline's full duration).
+      const atWindowEnd =
+        hasWindow && video.currentTime >= windowEndSec - 0.05
+      const atNaturalEnd =
+        !hasWindow && duration > 0 && video.currentTime >= duration - 0.05
+      if (atWindowEnd || atNaturalEnd) {
+        video.currentTime = hasWindow ? windowStartSec : 0
         hasFiredEndRef.current = false
       }
       void video.play().catch(() => {})
     } else if (!video.paused) {
       video.pause()
     }
-  }, [syncPlaying, hasWindow, windowStartSec, windowEndSec])
+  }, [syncPlaying, hasWindow, windowStartSec, windowEndSec, duration])
 
   // videoEl.duration is untrustworthy — broken moov boxes and MediaRecorder
   // uploads report 0, NaN, or Infinity even when the file plays end-to-end.
@@ -674,14 +680,16 @@ export default function VideoCanvas({
     const video = videoRef.current
     if (!video) return
     if (video.paused) {
-      // If parked at windowEnd from holdAtEnd, seek back to windowStart
-      // before resuming so playback isn't immediately punted out by
-      // the reachedEnd check on the next timeupdate. Without this, the
-      // first frame of video.play() lands at windowEnd, fires the
-      // holdAtEnd branch, and the video pauses again — the user sees
-      // "click play, nothing happens."
-      if (hasWindow && video.currentTime >= windowEndSec - 0.05) {
-        video.currentTime = windowStartSec
+      // If parked at the end from holdAtEnd (windowed OR un-windowed),
+      // seek back to start so playback can actually resume. Without
+      // this, video.play() resumes at end and immediately re-pauses
+      // via the reachedEnd check.
+      const atWindowEnd =
+        hasWindow && video.currentTime >= windowEndSec - 0.05
+      const atNaturalEnd =
+        !hasWindow && duration > 0 && video.currentTime >= duration - 0.05
+      if (atWindowEnd || atNaturalEnd) {
+        video.currentTime = hasWindow ? windowStartSec : 0
         hasFiredEndRef.current = false
       }
       video.play()
