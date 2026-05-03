@@ -359,6 +359,8 @@ EXPLANATION CHAINS — some observations explain others. Among the observations 
 - A higher / lower contact can explain a different finish line on the follow-through.
 When a contact-context observation explains a body-mechanic one, frame the body difference as "expected given how the ball came in" rather than as a fault to fix. Lead the analysis with "your shot is on-pattern with your baseline" and then explain what was different about the contact context. Do NOT coach the contact context itself — the player rarely controls bounce height or ball depth swing-by-swing.
 
+NEVER hedge on ball context that you don't have. If NO contact-context observation appears in the OBSERVATIONS list, the system has determined the contact location was not meaningfully different from baseline. Do NOT say "without knowing where the ball came in" or "if the ball came in differently" or "watch your video and see if the contact point changed" or any equivalent. Do NOT ask the player to verify their contact context. Do NOT speculate about what would have happened if the ball had been different. When contact-context is absent from the observations, treat the body-mechanic differences as REAL drift and coach them confidently with the strength + gap framing. Hedging on missing ball data reads as evasive — coach what the rules saw.
+
 EXEMPLARS (imitate this voice register, do not copy verbatim):
 ${exemplarLines}
 
@@ -574,8 +576,9 @@ Rules of review:
 3. When the junior flags a body-mechanic difference as a fault to fix, but a contact-context difference in the SAME observation set would have explained it, REJECT and rewrite. The correct framing is "your mechanics are on-pattern, your contact context was different today."
 4. When the junior correctly says "shots are similar, the difference in X is because the ball came in differently," APPROVE.
 5. When there's no body/contact mismatch at all (only body diffs, only contact diffs, or neither), APPROVE — there's nothing for you to override.
-6. NEVER rewrite to add coaching cues that aren't grounded in the observations. Don't expand scope. Stay within what the observation rows say.
-7. Respect the same voice rules as the junior: no digits, no degrees, no em-dashes, no "joint angle". Plain biomech terms (unit turn, kinetic chain, follow-through) are fine.
+6. REJECT if the junior hedges on missing ball context. The system has no ball-tracking data. If the OBSERVATIONS list doesn't contain a contact-context row, the contact location was not meaningfully different from baseline. The junior must NOT say "without knowing where the ball came in," "if the ball came in differently," "watch the video to see if contact changed," "was it further out / higher / lower," or any equivalent question that asks the player to verify ball context. If you see this kind of hedge, REJECT and rewrite the analysis to coach the body-mechanic differences confidently as real drift, removing all references to unknown ball context.
+7. NEVER rewrite to add coaching cues that aren't grounded in the observations. Don't expand scope. Stay within what the observation rows say.
+8. Respect the same voice rules as the junior: no digits, no degrees, no em-dashes, no "joint angle". Plain biomech terms (unit turn, kinetic chain, follow-through) are fine.
 
 Output format — respond with EXACTLY this JSON, no other text:
 {
@@ -1126,32 +1129,23 @@ export async function POST(request: NextRequest) {
         })
       }
 
-      // Senior-coach review pass. Only fires in baseline-compare mode
-      // when the observation set contains BOTH a contact-context row
-      // (height/position) AND at least one body-mechanic row — that's
-      // the case where the explanation chain matters and a junior model
-      // can mis-frame "expected given the ball" as "fault to fix." On
-      // pure-body or pure-context observation sets the validator has
-      // nothing to override and we skip it to save latency.
+      // Senior-coach review pass. Fires in baseline-compare mode any
+      // time the observation set contains at least one observation.
+      // Two failure modes the validator catches:
+      //   1. Mis-framing: junior flags a body-mechanic diff as a fault
+      //      when a contact-context diff in the same set explained it.
+      //   2. Hedging: junior says "without knowing where the ball came
+      //      in" or asks the player to verify contact context. The
+      //      system has no ball-tracking data; admitting it inline
+      //      reads as evasive and pushes the diagnosis onto the user.
+      // Skipped when there are zero observations (the match prompt
+      // path runs and there's nothing for a senior to second-guess).
       const allObservations = primary ? [primary, ...secondary] : secondary
-      const hasContactContext = allObservations.some((o) =>
-        o.pattern === 'contact_height_higher' ||
-        o.pattern === 'contact_height_lower' ||
-        o.pattern === 'contact_position_jammed' ||
-        o.pattern === 'contact_position_extended',
-      )
-      const hasBodyMechanic = allObservations.some((o) =>
-        o.pattern !== 'contact_height_higher' &&
-        o.pattern !== 'contact_height_lower' &&
-        o.pattern !== 'contact_position_jammed' &&
-        o.pattern !== 'contact_position_extended',
-      )
       let seniorVerdict: SeniorCoachVerdict | null = null
       if (
         isBaselineCompare &&
         !usedFallback &&
-        hasContactContext &&
-        hasBodyMechanic &&
+        allObservations.length > 0 &&
         cleanedBody
       ) {
         seniorVerdict = await reviewWithSeniorCoach({
