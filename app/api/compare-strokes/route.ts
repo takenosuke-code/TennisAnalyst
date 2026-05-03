@@ -287,6 +287,14 @@ function patternHumanLabel(pattern: Observation['pattern']): string {
       return 'head and base shifting through contact'
     case 'drift_from_baseline':
       return 'drift from your best-day baseline'
+    case 'contact_height_higher':
+      return 'ball met higher above the body than baseline'
+    case 'contact_height_lower':
+      return 'ball met lower below the usual contact height'
+    case 'contact_position_jammed':
+      return 'contact crowded against the body, less extension than baseline'
+    case 'contact_position_extended':
+      return 'contact further out from the body than baseline'
   }
 }
 

@@ -557,8 +557,16 @@ Review the draft against the observations and emit your JSON verdict.`
 
   let buffered = ''
   try {
+    // Validator runs on Haiku 4.5 — well-defined judgment + rewrite
+    // task that Haiku handles reliably, at ~5-10x lower cost than the
+    // Sonnet junior call. Keeps the senior-coach feature affordable
+    // even when it fires on every baseline-compare save with mixed
+    // observations. If parse fails or Haiku produces a malformed
+    // verdict, the route falls back to the junior's draft (already
+    // validated by the digit/jargon filter), so a Haiku quality dip
+    // degrades gracefully rather than breaking the user-visible flow.
     const stream = anthropic.messages.stream({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: args.maxTokens,
       system: [
         {
