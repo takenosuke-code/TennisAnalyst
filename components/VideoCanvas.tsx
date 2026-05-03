@@ -162,6 +162,19 @@ interface VideoCanvasProps {
   // the video play exactly the swing range, so pose and video align.
   windowStartMs?: number
   windowEndMs?: number
+  // When true, video pauses at windowEnd instead of looping. Parent
+  // controls when both videos restart together (used in baseline-
+  // compare so the shorter clip waits at end frame for the longer
+  // one to finish before both loop in unison).
+  holdAtEnd?: boolean
+  // Fires when the video reaches windowEnd (or natural end if no
+  // window). Used by ComparisonLayout to detect "both clips done"
+  // and coordinate a synchronized restart.
+  onWindowEnd?: () => void
+  // Bumping this number triggers an immediate seek to windowStart
+  // and resumes playback (if syncPlaying). Lets the parent restart
+  // both videos together after both have hit their respective ends.
+  restartTrigger?: number
 }
 
 export default function VideoCanvas({
@@ -192,10 +205,17 @@ export default function VideoCanvas({
   proStartDelay = 0,
   windowStartMs,
   windowEndMs,
+  holdAtEnd = false,
+  onWindowEnd,
+  restartTrigger,
 }: VideoCanvasProps) {
   const hasWindow = typeof windowStartMs === 'number' && typeof windowEndMs === 'number'
   const windowStartSec = hasWindow ? (windowStartMs as number) / 1000 : 0
   const windowEndSec = hasWindow ? (windowEndMs as number) / 1000 : 0
+  // Tracks whether onWindowEnd has fired for the current "session"
+  // (i.e. since the last restartTrigger / startup). Prevents repeated
+  // firing when the video stays paused at windowEnd.
+  const hasFiredEndRef = useRef(false)
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   // Tracks the most recent syncedTime so the secondary can detect
@@ -519,31 +539,86 @@ export default function VideoCanvas({
     const video = videoRef.current
     if (!video) return
     const t = video.currentTime ?? 0
-    // Loop within the window: if the video reaches windowEndMs, seek
-    // back to windowStartMs. Browsers' built-in `loop` attribute would
-    // jump to 0 instead, breaking the swing-window playback model.
-    if (hasWindow && t >= windowEndSec - 0.02) {
-      video.currentTime = windowStartSec
-      tracerRef.current.reset()
-      lastFrameIndexRef.current = -1
-      // After the seek, keep playing — the timeupdate event will fire
-      // again from the new position.
-      if (isPrimary && !video.paused) {
-        // Emit window-relative time = 0 so the slave snaps back too.
-        onTimeUpdate?.(0)
+
+    // Window/end coordination. Two modes:
+    // - holdAtEnd=true: pause at windowEnd, fire onWindowEnd callback
+    //   so the parent can coordinate a synchronized restart. Used by
+    //   baseline-compare so the shorter clip waits at end frame for
+    //   the longer one to finish.
+    // - holdAtEnd=false (default): loop back to windowStart on hitting
+    //   windowEnd. Browsers' built-in `loop` attribute would jump to
+    //   0 — the wrong target when the swing window starts past 0.
+    const reachedEnd = hasWindow
+      ? t >= windowEndSec - 0.02
+      : duration > 0 && t >= duration - 0.02
+    if (reachedEnd) {
+      if (holdAtEnd) {
+        if (!hasFiredEndRef.current) {
+          hasFiredEndRef.current = true
+          // Pin to windowEnd so the displayed frame is the final
+          // frame of the swing, not whatever happens after it in the
+          // source clip.
+          if (hasWindow) video.currentTime = windowEndSec - 0.001
+          video.pause()
+          setPlaying(false)
+          onWindowEnd?.()
+          setCurrentTime(hasWindow ? windowEndSec : duration)
+        }
+        return
       }
-      setCurrentTime(windowStartSec)
-      return
+      // Loop mode: seek back to start, keep playing.
+      if (hasWindow) {
+        video.currentTime = windowStartSec
+        tracerRef.current.reset()
+        lastFrameIndexRef.current = -1
+        if (isPrimary && !video.paused) onTimeUpdate?.(0)
+        setCurrentTime(windowStartSec)
+        return
+      }
     }
     setCurrentTime(t)
-    // Only the primary video drives syncedTime to avoid a feedback loop
-    // where two synced videos ping-pong time updates infinitely. When
-    // a window is set, syncedTime is window-relative so the slave's
-    // start-delay math works against a 0-anchored clock.
     if (isPrimary) {
       onTimeUpdate?.(hasWindow ? Math.max(0, t - windowStartSec) : t)
     }
   }
+
+  // restartTrigger effect: when bumped, seek to windowStart (or 0)
+  // and resume playback if syncPlaying. Lets the parent coordinate
+  // synchronized restarts in baseline-compare mode.
+  useEffect(() => {
+    if (restartTrigger === undefined || restartTrigger === 0) return
+    const video = videoRef.current
+    if (!video) return
+    hasFiredEndRef.current = false
+    video.currentTime = hasWindow ? windowStartSec : 0
+    tracerRef.current.reset()
+    lastFrameIndexRef.current = -1
+    if (syncPlaying) {
+      void video.play().catch(() => {})
+    }
+  }, [restartTrigger, hasWindow, windowStartSec, syncPlaying])
+
+  // syncPlaying effect: in independent-pair mode (baseline-compare),
+  // both videos coordinate via this prop. When parent toggles
+  // bothPlaying, each VideoCanvas plays/pauses to match.
+  useEffect(() => {
+    if (syncPlaying === undefined) return
+    const video = videoRef.current
+    if (!video) return
+    if (syncPlaying) {
+      // If we're at windowEnd and the parent wants to play, the
+      // restartTrigger effect should have already moved us back. If
+      // we're still at end (e.g. parent only toggled syncPlaying
+      // without bumping the trigger), seek to start before playing.
+      if (hasWindow && video.currentTime >= windowEndSec - 0.05) {
+        video.currentTime = windowStartSec
+        hasFiredEndRef.current = false
+      }
+      void video.play().catch(() => {})
+    } else if (!video.paused) {
+      video.pause()
+    }
+  }, [syncPlaying, hasWindow, windowStartSec, windowEndSec])
 
   // videoEl.duration is untrustworthy — broken moov boxes and MediaRecorder
   // uploads report 0, NaN, or Infinity even when the file plays end-to-end.
