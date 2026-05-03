@@ -348,7 +348,10 @@ function angleExcursion(frames: PoseFrame[], key: keyof JointAngles): number | n
       unwrapped.push(prev)
       continue
     }
-    const u = prev + delta
+    // Explicit type annotation here breaks a TS circular-inference
+    // chain: `u` depends on `prev`, but later `prev = u` makes prev's
+    // narrowed type depend on `u`. Annotating breaks the loop.
+    const u: number = prev + delta
     unwrapped.push(u)
     prev = u
   }
