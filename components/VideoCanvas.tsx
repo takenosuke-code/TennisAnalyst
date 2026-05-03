@@ -712,18 +712,32 @@ export default function VideoCanvas({
           className="w-full block"
           playsInline
           muted
-          // Only the PRIMARY video auto-loops. If the secondary loops on
-          // its own, both videos cycle independently at different
-          // durations and the sync drifts apart on every replay. The
-          // sync effect explicitly drives the secondary's currentTime
-          // each render, including on primary-loop detection (see the
-          // "loop detected" hard-seek below).
-          loop={!isSecondary}
+          // The PRIMARY video auto-loops normally. holdAtEnd
+          // explicitly disables this — when set, we want the video to
+          // pause at windowEnd so the parent can coordinate a
+          // synchronized restart with another video (baseline-compare
+          // case). Without disabling the native loop, the browser
+          // restarts to t=0 of the source video before our handleTime-
+          // Update can intercept at windowEnd, dragging playback into
+          // pre-swing footage where there's no pose data — the
+          // "tracing is off" symptom.
+          loop={!isSecondary && !holdAtEnd}
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
           onDurationChange={handleVideoDurationChange}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
+          onEnded={() => {
+            // Backup signal for holdAtEnd. If timeupdate's reachedEnd
+            // check missed the windowEnd boundary (timeupdate is
+            // throttled to ~250ms and the browser's natural-end event
+            // can fire between samples), this catches it so the parent
+            // sees onWindowEnd reliably.
+            if (holdAtEnd && !hasFiredEndRef.current) {
+              hasFiredEndRef.current = true
+              onWindowEnd?.()
+            }
+          }}
           onError={() => setVideoError(true)}
         />
         <canvas
