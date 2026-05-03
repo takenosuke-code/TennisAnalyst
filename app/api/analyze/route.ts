@@ -128,6 +128,14 @@ function patternHumanLabel(pattern: Observation['pattern']): string {
       return 'head and base shifting through contact'
     case 'drift_from_baseline':
       return 'drift from your best-day baseline'
+    case 'contact_height_higher':
+      return 'ball met higher above the body than baseline'
+    case 'contact_height_lower':
+      return 'ball met lower below the usual contact height'
+    case 'contact_position_jammed':
+      return 'contact crowded against the body, less extension than baseline'
+    case 'contact_position_extended':
+      return 'contact further out from the body than baseline'
   }
 }
 
@@ -293,6 +301,12 @@ ${focusHint}
 ${baselineHint}
 
 CONTEXT — this is a CONSISTENCY check, not coaching. The player wants to know how today's swing differs from their saved baseline. The list below contains ONLY differences between today and baseline (or new faults today that the baseline did not show). Do NOT invent additional generic coaching cues. Do NOT critique anything that wasn't flagged. If the list is light (one mild drift), the swing is mostly matching the baseline — say so.
+
+EXPLANATION CHAINS — some observations explain others. Among the observations you receive, "ball met higher / lower than baseline" and "contact crowded / further out than baseline" are CONTEXT signals, not faults the player controls. They describe where the ball was when the player met it. When a body-mechanic difference (for example shallow knee load, cramped elbow, or shorter follow-through) shows up alongside a contact-context difference, ASK YOURSELF: does the contact context EXPLAIN the body difference?
+- A higher contact point can explain lighter knee load: the player did not need to drive up as much.
+- A jammed contact can explain a cramped elbow: the player was rushed close to the body.
+- A higher / lower contact can explain a different finish line on the follow-through.
+When a contact-context observation explains a body-mechanic one, frame the body difference as "expected given how the ball came in" rather than as a fault to fix. Lead the analysis with "your shot is on-pattern with your baseline" and then explain what was different about the contact context. Do NOT coach the contact context itself — the player rarely controls bounce height or ball depth swing-by-swing.
 
 EXEMPLARS (imitate this voice register, do not copy verbatim):
 ${exemplarLines}
@@ -478,6 +492,118 @@ async function streamLlmBody(args: {
     return { text: null, outputTokens, error: null }
   }
   return { text: buffered.trim(), outputTokens, error: null }
+}
+
+// ---------------------------------------------------------------------------
+// Senior-coach validator
+// ---------------------------------------------------------------------------
+//
+// A second LLM pass that reads the draft coaching response alongside the
+// observations that drove it, and either approves or rewrites. Modeled
+// after a senior tennis coach reviewing a junior's analysis. The
+// specific job: catch cases where a body-mechanic difference is
+// flagged as a fault when a contact-context difference would have
+// explained it. Without this pass, the model occasionally writes
+// "your knees aren't loading" when the truthful answer is "your knees
+// matched, but you contacted the ball higher today."
+//
+// Only runs in baseline-compare mode AND only when at least one
+// contact-context observation is present (otherwise there's no
+// explanation chain to verify and the validator is wasted latency).
+//
+// Output is a structured JSON object. If approved, we keep the draft.
+// If rewritten, we use the rewrite (still subject to the digit/jargon
+// post-filter). At most one validator pass per request — no looping.
+
+const SENIOR_COACH_SYSTEM_PROMPT = `You are a senior tennis coach reviewing a junior coach's analysis of a player's swing. Your job is to check the junior's reasoning against the underlying observations and decide if it correctly contextualizes body-mechanic differences with contact-context differences.
+
+Rules of review:
+1. A "contact-context" observation describes where the player met the ball relative to their body — higher / lower / jammed / extended. The player rarely controls these swing-by-swing; they're a function of how the ball came in.
+2. A body-mechanic difference (knee load, elbow angle, hip rotation, follow-through length, etc.) can be EXPLAINED by a contact-context difference. Higher contact → lighter knee load is expected. Jammed contact → cramped elbow is expected. Lower contact → deeper knee load is expected.
+3. When the junior flags a body-mechanic difference as a fault to fix, but a contact-context difference in the SAME observation set would have explained it, REJECT and rewrite. The correct framing is "your mechanics are on-pattern, your contact context was different today."
+4. When the junior correctly says "shots are similar, the difference in X is because the ball came in differently," APPROVE.
+5. When there's no body/contact mismatch at all (only body diffs, only contact diffs, or neither), APPROVE — there's nothing for you to override.
+6. NEVER rewrite to add coaching cues that aren't grounded in the observations. Don't expand scope. Stay within what the observation rows say.
+7. Respect the same voice rules as the junior: no digits, no degrees, no em-dashes, no "joint angle". Plain biomech terms (unit turn, kinetic chain, follow-through) are fine.
+
+Output format — respond with EXACTLY this JSON, no other text:
+{
+  "approved": <true | false>,
+  "reason": "<one short sentence on why you approved or rejected>",
+  "rewrite": <null if approved, otherwise the COMPLETE revised analysis as a string in the same four-section markdown format the junior used (## Quick Read / ## Primary cue / ## Other things I noticed / ## Recommended drills)>
+}`
+
+interface SeniorCoachVerdict {
+  approved: boolean
+  reason: string
+  rewrite: string | null
+}
+
+async function reviewWithSeniorCoach(args: {
+  observations: Observation[]
+  draftMarkdown: string
+  maxTokens: number
+}): Promise<SeniorCoachVerdict | null> {
+  const observationLines = args.observations
+    .map((o) => `- ${renderObservationLine(o)}`)
+    .join('\n')
+  const userPrompt = `OBSERVATIONS the junior coach was given:
+${observationLines}
+
+JUNIOR COACH'S DRAFT ANALYSIS:
+${args.draftMarkdown}
+
+Review the draft against the observations and emit your JSON verdict.`
+
+  let buffered = ''
+  try {
+    const stream = anthropic.messages.stream({
+      model: 'claude-sonnet-4-6',
+      max_tokens: args.maxTokens,
+      system: [
+        {
+          type: 'text',
+          text: SENIOR_COACH_SYSTEM_PROMPT,
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+      messages: [{ role: 'user', content: userPrompt }],
+    })
+    for await (const chunk of stream) {
+      if (
+        chunk.type === 'content_block_delta' &&
+        chunk.delta.type === 'text_delta'
+      ) {
+        buffered += chunk.delta.text
+      }
+    }
+  } catch (err) {
+    console.error('[senior-coach] anthropic call failed:', err)
+    return null
+  }
+
+  // Strip code fences if the model wrapped the JSON.
+  const cleaned = buffered
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+  try {
+    const parsed = JSON.parse(cleaned) as Partial<SeniorCoachVerdict>
+    if (typeof parsed.approved !== 'boolean') return null
+    if (typeof parsed.reason !== 'string') return null
+    if (parsed.approved) {
+      return { approved: true, reason: parsed.reason, rewrite: null }
+    }
+    if (typeof parsed.rewrite !== 'string' || parsed.rewrite.length === 0) {
+      // Rejected without a rewrite — treat as approved (don't drop the
+      // junior's work just because the senior had nothing better).
+      return { approved: true, reason: parsed.reason, rewrite: null }
+    }
+    return { approved: false, reason: parsed.reason, rewrite: parsed.rewrite }
+  } catch (err) {
+    console.error('[senior-coach] JSON parse failed:', err, cleaned.slice(0, 200))
+    return null
+  }
 }
 
 /**
@@ -930,6 +1056,52 @@ export async function POST(request: NextRequest) {
           exemplar: fallbackExemplar,
           register,
         })
+      }
+
+      // Senior-coach review pass. Only fires in baseline-compare mode
+      // when the observation set contains BOTH a contact-context row
+      // (height/position) AND at least one body-mechanic row — that's
+      // the case where the explanation chain matters and a junior model
+      // can mis-frame "expected given the ball" as "fault to fix." On
+      // pure-body or pure-context observation sets the validator has
+      // nothing to override and we skip it to save latency.
+      const allObservations = primary ? [primary, ...secondary] : secondary
+      const hasContactContext = allObservations.some((o) =>
+        o.pattern === 'contact_height_higher' ||
+        o.pattern === 'contact_height_lower' ||
+        o.pattern === 'contact_position_jammed' ||
+        o.pattern === 'contact_position_extended',
+      )
+      const hasBodyMechanic = allObservations.some((o) =>
+        o.pattern !== 'contact_height_higher' &&
+        o.pattern !== 'contact_height_lower' &&
+        o.pattern !== 'contact_position_jammed' &&
+        o.pattern !== 'contact_position_extended',
+      )
+      let seniorVerdict: SeniorCoachVerdict | null = null
+      if (
+        isBaselineCompare &&
+        !usedFallback &&
+        hasContactContext &&
+        hasBodyMechanic &&
+        cleanedBody
+      ) {
+        seniorVerdict = await reviewWithSeniorCoach({
+          observations: allObservations,
+          draftMarkdown: cleanedBody,
+          maxTokens,
+        })
+        if (seniorVerdict && !seniorVerdict.approved && seniorVerdict.rewrite) {
+          // Run the rewrite through the same digit/jargon filter we
+          // apply to the junior — never trust upstream output blindly.
+          const rewrite = seniorVerdict.rewrite.trim()
+          if (
+            !REJECT_DIGIT_RE.test(rewrite) &&
+            !REJECT_JARGON_RE.test(rewrite)
+          ) {
+            cleanedBody = rewrite
+          }
+        }
       }
 
       const showWork = renderShowYourWork(primary, secondary)

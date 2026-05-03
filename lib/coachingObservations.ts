@@ -58,6 +58,23 @@ export type DeviationPattern =
   // platform". Above ~0.15 shoulder-widths = unstable.
   | 'unstable_base'
   | 'drift_from_baseline'
+  // Baseline-compare only. Wrist (proxy for racket head) at the contact
+  // frame is significantly higher / lower today vs baseline, normalized
+  // by torso length and referenced to the shoulder midpoint so camera-
+  // height differences cancel. The LLM uses this as CONTEXT for body-
+  // mechanic differences: a higher contact point can EXPLAIN a lighter
+  // knee load, because the player didn't have to drive up as much. Not
+  // a fault on its own — the player rarely controls bounce height.
+  | 'contact_height_higher'
+  | 'contact_height_lower'
+  // Baseline-compare only. Distance from wrist to body center at the
+  // contact frame, normalized by shoulder width. "Jammed" = today's
+  // contact is much closer to the body than baseline (rushed or late
+  // swing); "extended" = much further out (reaching). Like contact
+  // height, this is a context signal that explains body-mechanic
+  // differences (e.g. a jammed contact can explain a cramped elbow).
+  | 'contact_position_jammed'
+  | 'contact_position_extended'
 
 export type Phase = 'preparation' | 'loading' | 'contact' | 'follow-through' | 'finish'
 
@@ -1120,7 +1137,152 @@ function compareDrift(
   compareExcursion('hip_rotation', 'hips', 'loading', 15)
   compareExcursion('trunk_rotation', 'shoulders', 'loading', 15)
 
+  // Contact-context observations: where the player met the ball
+  // relative to their body at the moment of contact. These act as
+  // CONTEXT for body-mechanic differences — a higher contact point can
+  // explain a lighter knee load (the player didn't have to drive up
+  // as much); a jammed contact can explain a cramped elbow. The LLM
+  // uses them to write coaching like "your mechanics matched baseline
+  // but you contacted the ball higher today, which is why it felt
+  // different" instead of either silently matching ("trust your
+  // foundation") or wrongly flagging ("your knees aren't loading").
+  //
+  // Single-frame measurement at peakFrame. Pose extraction's wrist
+  // landmark can be noisy at peak (fastest motion of the swing) — we
+  // gate on visibility and abstain on low confidence.
+  const contactHeightDelta = compareContactHeightAtPeak(todayCtx, baselineCtx)
+  if (contactHeightDelta) out.push(contactHeightDelta)
+  const contactPositionDelta = compareContactPositionAtPeak(todayCtx, baselineCtx)
+  if (contactPositionDelta) out.push(contactPositionDelta)
+
   return out
+}
+
+// ---------------------------------------------------------------------------
+// Contact-context comparison helpers (baseline-compare only)
+// ---------------------------------------------------------------------------
+
+function dominantWristId(side: 'right' | 'left'): number {
+  return side === 'right' ? ID_RIGHT_WRIST : ID_LEFT_WRIST
+}
+
+/**
+ * Compare wrist height at peakFrame, normalized by torso length and
+ * referenced to the shoulder midpoint (so camera-height shifts cancel).
+ * Image-coords y increases downward, so "wrist above shoulder" = positive.
+ */
+function compareContactHeightAtPeak(
+  todayCtx: RuleContext,
+  baselineCtx: RuleContext,
+): Observation | null {
+  const wristId = dominantWristId(todayCtx.dominantSide)
+  const todayWrist = landmarkAt(todayCtx.peakFrame, wristId)
+  const baseWrist = landmarkAt(baselineCtx.peakFrame, wristId)
+  if (!todayWrist || !baseWrist) return null
+  // Abstain when peak-frame wrist visibility is low — pose tracking is
+  // hardest at the fastest moment of the swing, so a confident-wrong
+  // height delta is the failure mode to avoid.
+  if (todayWrist.visibility < 0.5 || baseWrist.visibility < 0.5) return null
+
+  const todayShoulder = midpoint(
+    landmarkAt(todayCtx.peakFrame, ID_LEFT_SHOULDER),
+    landmarkAt(todayCtx.peakFrame, ID_RIGHT_SHOULDER),
+  )
+  const baseShoulder = midpoint(
+    landmarkAt(baselineCtx.peakFrame, ID_LEFT_SHOULDER),
+    landmarkAt(baselineCtx.peakFrame, ID_RIGHT_SHOULDER),
+  )
+  if (!todayShoulder || !baseShoulder) return null
+
+  const todayTorso = torsoLength(todayCtx.peakFrame)
+  const baseTorso = torsoLength(baselineCtx.peakFrame)
+  if (!todayTorso || !baseTorso) return null
+
+  // Wrist Y above the shoulder midpoint, normalized by torso length.
+  // Positive = wrist above shoulder. Negative = below.
+  const todayHeight = (todayShoulder.y - todayWrist.y) / todayTorso
+  const baseHeight = (baseShoulder.y - baseWrist.y) / baseTorso
+  const delta = todayHeight - baseHeight
+  const threshold = 0.08 // 8% of torso length
+  if (Math.abs(delta) < threshold) return null
+
+  const margin = clamp01((Math.abs(delta) - threshold) / threshold)
+  const meanVis = (todayCtx.meanVis + baselineCtx.meanVis) / 2
+  const confidence = computeConfidence({
+    landmarkVisibility: meanVis,
+    thresholdMargin: margin,
+    ruleApplicability: Math.min(todayCtx.applicability, baselineCtx.applicability),
+  })
+  if (confidence < CONFIDENCE_FLOOR) return null
+
+  return {
+    phase: 'contact',
+    joint: `${todayCtx.dominantSide}_wrist`,
+    pattern: delta > 0 ? 'contact_height_higher' : 'contact_height_lower',
+    severity: severityFromMargin(margin),
+    confidence,
+    todayValue: todayHeight,
+    baselineValue: baseHeight,
+    driftMagnitude: Math.abs(delta),
+  }
+}
+
+/**
+ * Compare horizontal wrist distance from body center at peakFrame,
+ * normalized by shoulder width. "Jammed" = today's distance much
+ * smaller than baseline (rushed contact close to body). "Extended" =
+ * today's distance much larger (reaching).
+ */
+function compareContactPositionAtPeak(
+  todayCtx: RuleContext,
+  baselineCtx: RuleContext,
+): Observation | null {
+  const wristId = dominantWristId(todayCtx.dominantSide)
+  const todayWrist = landmarkAt(todayCtx.peakFrame, wristId)
+  const baseWrist = landmarkAt(baselineCtx.peakFrame, wristId)
+  if (!todayWrist || !baseWrist) return null
+  if (todayWrist.visibility < 0.5 || baseWrist.visibility < 0.5) return null
+
+  const todayHip = midpoint(
+    landmarkAt(todayCtx.peakFrame, ID_LEFT_HIP),
+    landmarkAt(todayCtx.peakFrame, ID_RIGHT_HIP),
+  )
+  const baseHip = midpoint(
+    landmarkAt(baselineCtx.peakFrame, ID_LEFT_HIP),
+    landmarkAt(baselineCtx.peakFrame, ID_RIGHT_HIP),
+  )
+  if (!todayHip || !baseHip) return null
+
+  const todayShoulderW = shoulderWidth(todayCtx.peakFrame)
+  const baseShoulderW = shoulderWidth(baselineCtx.peakFrame)
+  if (!todayShoulderW || !baseShoulderW) return null
+
+  // Distance from wrist to body center, normalized.
+  const todayDistance = Math.abs(todayWrist.x - todayHip.x) / todayShoulderW
+  const baseDistance = Math.abs(baseWrist.x - baseHip.x) / baseShoulderW
+  const delta = todayDistance - baseDistance
+  const threshold = 0.15 // 15% of shoulder width
+  if (Math.abs(delta) < threshold) return null
+
+  const margin = clamp01((Math.abs(delta) - threshold) / threshold)
+  const meanVis = (todayCtx.meanVis + baselineCtx.meanVis) / 2
+  const confidence = computeConfidence({
+    landmarkVisibility: meanVis,
+    thresholdMargin: margin,
+    ruleApplicability: Math.min(todayCtx.applicability, baselineCtx.applicability),
+  })
+  if (confidence < CONFIDENCE_FLOOR) return null
+
+  return {
+    phase: 'contact',
+    joint: `${todayCtx.dominantSide}_wrist`,
+    pattern: delta > 0 ? 'contact_position_extended' : 'contact_position_jammed',
+    severity: severityFromMargin(margin),
+    confidence,
+    todayValue: todayDistance,
+    baselineValue: baseDistance,
+    driftMagnitude: Math.abs(delta),
+  }
 }
 
 // ---------------------------------------------------------------------------

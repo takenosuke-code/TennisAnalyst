@@ -518,6 +518,96 @@ describe('extractObservations', () => {
     expect(obs.find((o) => o.pattern === 'cramped_elbow')).toBeUndefined()
   })
 
+  // ---------------------------------------------------------------------
+  // Contact-context observations
+  //
+  // These rules look at the dominant wrist landmark at peakFrame (proxy
+  // for racket head at contact) and emit context rows the LLM uses to
+  // explain body-mechanic differences. We override the wrist (x, y) at
+  // the peak frame only; surrounding frames use the standing pose.
+  // ---------------------------------------------------------------------
+
+  function makeSwingWithWristAtPeak(
+    peakAngles: JointAngles,
+    restAngles: JointAngles,
+    wristAtPeak: { x: number; y: number },
+    numFrames = 60,
+  ): PoseFrame[] {
+    const frames = makeSwingAroundPeak(peakAngles, restAngles, numFrames)
+    const peakIdx = Math.floor(numFrames / 2)
+    const RIGHT_WRIST_ID = 16
+    // Replace right-wrist landmark at peakFrame with the override.
+    frames[peakIdx] = {
+      ...frames[peakIdx],
+      landmarks: frames[peakIdx].landmarks.map((l) =>
+        l.id === RIGHT_WRIST_ID
+          ? { ...l, x: wristAtPeak.x, y: wristAtPeak.y, visibility: 0.95 }
+          : l,
+      ),
+    }
+    return frames
+  }
+
+  // Default standing-pose right wrist sits at (0.4, 0.55). Shoulders are
+  // higher up the body (smaller y). Hip midpoint is below shoulders.
+  const NEUTRAL_PEAK = {
+    right_elbow: 130,
+    right_knee: 150,
+    hip_rotation: 50,
+    trunk_rotation: 60,
+  }
+  const NEUTRAL_REST = {
+    right_elbow: 130,
+    right_knee: 165,
+    hip_rotation: 10,
+    trunk_rotation: 10,
+  }
+
+  it('emits contact_height_higher when today\'s wrist at peak is well above baseline\'s', () => {
+    // Baseline wrist y=0.55 (default), today wrist y=0.20 (much higher
+    // in image — shoulders are around y=0.30, so wrist sits well above
+    // the shoulder line).
+    const today = makeSwingWithWristAtPeak(NEUTRAL_PEAK, NEUTRAL_REST, { x: 0.4, y: 0.20 })
+    const baseline = makeSwingWithWristAtPeak(NEUTRAL_PEAK, NEUTRAL_REST, { x: 0.4, y: 0.55 })
+    const obs = extractObservations({
+      todaySummary: today,
+      baselineSummary: baseline,
+      shotType: 'forehand',
+    })
+    const heightDelta = obs.find((o) => o.pattern === 'contact_height_higher')
+    expect(heightDelta).toBeDefined()
+    expect(heightDelta!.joint).toBe('right_wrist')
+    expect(heightDelta!.phase).toBe('contact')
+  })
+
+  it('does NOT emit contact_height when wrist matches baseline', () => {
+    const today = makeSwingWithWristAtPeak(NEUTRAL_PEAK, NEUTRAL_REST, { x: 0.4, y: 0.55 })
+    const baseline = makeSwingWithWristAtPeak(NEUTRAL_PEAK, NEUTRAL_REST, { x: 0.4, y: 0.55 })
+    const obs = extractObservations({
+      todaySummary: today,
+      baselineSummary: baseline,
+      shotType: 'forehand',
+    })
+    expect(obs.find((o) => o.pattern === 'contact_height_higher')).toBeUndefined()
+    expect(obs.find((o) => o.pattern === 'contact_height_lower')).toBeUndefined()
+  })
+
+  it('emits contact_position_extended when today\'s wrist is much further from body center', () => {
+    // Hip midpoint sits near x=0.5 in standing pose (left hip ~0.53,
+    // right hip ~0.47). Baseline wrist x=0.4 → distance ~0.1 from
+    // center. Today wrist x=0.85 → distance ~0.35. Shoulder width
+    // around 0.10, so the delta is well over the 15% threshold.
+    const today = makeSwingWithWristAtPeak(NEUTRAL_PEAK, NEUTRAL_REST, { x: 0.85, y: 0.55 })
+    const baseline = makeSwingWithWristAtPeak(NEUTRAL_PEAK, NEUTRAL_REST, { x: 0.4, y: 0.55 })
+    const obs = extractObservations({
+      todaySummary: today,
+      baselineSummary: baseline,
+      shotType: 'forehand',
+    })
+    const positionDelta = obs.find((o) => o.pattern === 'contact_position_extended')
+    expect(positionDelta).toBeDefined()
+  })
+
   it('keeps today-side absolute observations that do NOT fire on baseline', () => {
     // Today is cramped at contact, baseline isn't.
     const todayPeak = {
