@@ -101,12 +101,19 @@ function detectSwingSource(swing: StreamedSwing): SwingSource {
  * live store, which the transcript header renders as an inline banner.
  */
 export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachReturn {
+  // 2026-05 — defaults tightened for the YC demo. The previous values
+  // (4 swings / 10s idle / 4s min interval / 3s grace) compounded with
+  // the upstream Modal extraction batcher to produce 20-60s cue
+  // latency. With pose extraction now running browser-only and the
+  // prompt outputting one ≤6-word cue per batch, the timers can be
+  // much tighter without overwhelming the player. Net: cue arrives
+  // within 4-6s of the third swing instead of 20s+.
   const {
-    maxSwingsPerBatch = 4,
-    idleTimeoutMs = 10_000,
+    maxSwingsPerBatch = 3,
+    idleTimeoutMs = 5_000,
     minSwingsForTimeout = 2,
-    minBatchIntervalMs = 4_000,
-    postSwingGraceMs = 3_000,
+    minBatchIntervalMs = 6_000,
+    postSwingGraceMs = 1_500,
   } = options
 
   const appendTranscriptEntry = useLiveStore((s) => s.appendTranscriptEntry)
@@ -470,5 +477,29 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
     })
   }, [])
 
-  return { pushSwing, setShotType, markSessionStart, primeTts, reset, isRequestInFlight, awaitInFlight }
+  // Memoize the returned object so consumer effects keyed on `coach`
+  // don't re-run every render. Without this, every state update in the
+  // panel produced a fresh `coach` reference, which broke the
+  // 200ms in-flight poll, the start/stop/reset handlers, and any
+  // useCallback that listed coach in its deps.
+  return useMemo(
+    () => ({
+      pushSwing,
+      setShotType,
+      markSessionStart,
+      primeTts,
+      reset,
+      isRequestInFlight,
+      awaitInFlight,
+    }),
+    [
+      pushSwing,
+      setShotType,
+      markSessionStart,
+      primeTts,
+      reset,
+      isRequestInFlight,
+      awaitInFlight,
+    ],
+  )
 }

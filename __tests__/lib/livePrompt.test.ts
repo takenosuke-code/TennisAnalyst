@@ -42,31 +42,29 @@ function makeSwing(i: number): LivePromptSwing {
 }
 
 describe('LIVE_SYSTEM_PROMPT', () => {
-  it('enforces TTS-friendly brevity rules', () => {
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/ONE sentence/i)
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/25 words/i)
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/no markdown/i)
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/no lists/i)
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/external-focus/i)
+  it('enforces the new ≤6-word brevity rule', () => {
+    // 2026-05 — prompt rewritten for YC demo: cues are court-side
+    // shouts (≤6 words, imperative), not 25-word sentences. Old
+    // assertions ("ONE sentence", "25 words") removed.
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/AT MOST 6 WORDS/)
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/imperative/i)
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/no commas/i)
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/no numbers/i)
   })
 
   it('authorizes silence as a first-class response', () => {
-    // The previous prompt forbade silence; this version makes it primary.
     expect(LIVE_SYSTEM_PROMPT).toMatch(/SILENCE IS A FIRST-CLASS RESPONSE/)
-    // The four canonical affirmations called out in the spec must all be
-    // present so the model has concrete patterns to mimic.
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/Clean — repeat that\./)
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/Trust that swing, do it again\./)
+    // Updated affirmations match the new short-cue voice.
     expect(LIVE_SYSTEM_PROMPT).toMatch(/Same swing, again\./)
-    // Empty response must be explicitly allowed.
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/Lock that in\./)
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/Trust it\./)
     expect(LIVE_SYSTEM_PROMPT).toMatch(/empty response/i)
   })
 
   it('enumerates the allowed observables (epistemic surface)', () => {
     expect(LIVE_SYSTEM_PROMPT).toMatch(/WHAT YOU CAN COMMENT ON/)
     expect(LIVE_SYSTEM_PROMPT).toMatch(/angleSummary/i)
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/Peak frame timing/i)
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/symmetry/i)
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/Peak-frame timing|Peak frame timing/i)
     expect(LIVE_SYSTEM_PROMPT).toMatch(/Hip rotation/i)
     expect(LIVE_SYSTEM_PROMPT).toMatch(/trunk rotation/i)
   })
@@ -80,13 +78,9 @@ describe('LIVE_SYSTEM_PROMPT', () => {
     expect(LIVE_SYSTEM_PROMPT).toMatch(/opponent/i)
   })
 
-  it('describes the soft "include one observed measurement" rule', () => {
-    // Soft preference, NOT a requirement — the prompt must explicitly say
-    // not every cue needs a number, otherwise the model produces gimmicky
-    // number-stuffed output.
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/EVIDENCE/)
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/parens|parentheses/i)
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/not required|not a requirement|do NOT force/i)
+  it('teaches the model to look for common patterns across the batch', () => {
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/most COMMON pattern|repeating issue/i)
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/across MULTIPLE swings|repeating across/i)
   })
 })
 
@@ -177,9 +171,6 @@ describe('buildLiveCoachingPrompt', () => {
   })
 
   it('asks for one cue OR silence at the end (non-advanced tiers)', () => {
-    // Intermediate tier should NOT take the baseline-template path; the
-    // closing directive must explicitly allow silence so the model knows
-    // it's a real option, not a fallback.
     const { prompt, usedBaselineTemplate } = buildLiveCoachingPrompt({
       profile: intermediateProfile,
       skipped: false,
@@ -187,7 +178,10 @@ describe('buildLiveCoachingPrompt', () => {
       swings: [makeSwing(0), makeSwing(1), makeSwing(2)],
     })
     expect(usedBaselineTemplate).toBe(false)
-    expect(prompt).toMatch(/ONE cue for the next ball/)
+    // Updated to match the new closing directive — common-pattern
+    // framing + ≤6 words + silence as an option.
+    expect(prompt).toMatch(/most common repeating issue|common repeating/i)
+    expect(prompt).toMatch(/AT MOST SIX WORDS/i)
     expect(prompt).toMatch(/stay silent/i)
   })
 
@@ -204,19 +198,17 @@ describe('buildLiveCoachingPrompt', () => {
 })
 
 describe('buildLiveCoachingPrompt — silence / baseline-template path', () => {
-  it('clean-swing scenario: prompt allows silence and the system prompt carries the affirmations', () => {
-    // Concrete check that the rendered batch directive permits silence, not
-    // just the system prompt's general framing.
+  it('clean-swing scenario: prompt allows silence', () => {
     const { prompt } = buildLiveCoachingPrompt({
       profile: intermediateProfile,
       skipped: false,
       shotType: 'forehand',
       swings: [makeSwing(0), makeSwing(1)],
     })
-    expect(prompt).toMatch(/stay silent if the batch is already clean/i)
-    // System prompt is what the LLM sees as authoritative — the affirmation
-    // examples must be there too.
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/Trust that swing, do it again\./)
+    // Updated to match the new closing directive — silence is still
+    // an option but the framing is "common-pattern or stay silent."
+    expect(prompt).toMatch(/stay silent/i)
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/Trust it\.|Lock that in\./)
   })
 
   it('baseline-template path: advanced tier flips usedBaselineTemplate=true and reframes the closing directive', () => {
@@ -227,10 +219,8 @@ describe('buildLiveCoachingPrompt — silence / baseline-template path', () => {
       swings: [makeSwing(0), makeSwing(1)],
     })
     expect(result.usedBaselineTemplate).toBe(true)
-    // Advanced default is silence-or-affirmation; the prompt should hand
-    // the model the same example phrases the system prompt enumerates.
-    expect(result.prompt).toMatch(/silence or one short affirmation/i)
-    expect(result.prompt).toMatch(/Clean — repeat that\./)
+    // Advanced default is silence-or-affirmation; updated phrasing.
+    expect(result.prompt).toMatch(/silence or "Lock that in\.?"|Trust it/i)
   })
 
   it('non-advanced tiers do NOT take the baseline-template path', () => {
@@ -282,12 +272,12 @@ describe('buildLiveCoachingPrompt — recentCues (session memory)', () => {
     expect(prompt).toMatch(/3\. Trust that swing/)
   })
 
-  it('persistent-flaw scenario: system prompt instructs model to acknowledge persistence', () => {
-    // The "persistence" framing lives in the system prompt — the user-message
-    // body just exposes the prior cues. Combined, they should let the model
-    // emit "still seeing the early finish, try X" instead of repeating verbatim.
+  it('persistent-flaw scenario: system prompt instructs model on prior-cue handling', () => {
     expect(LIVE_SYSTEM_PROMPT).toMatch(/PRIOR CUES/)
-    expect(LIVE_SYSTEM_PROMPT).toMatch(/acknowledge persistence/i)
+    // Updated framing: the new prompt says "if the same problem
+    // persists, repeat the same cue but vary the words." Old
+    // "acknowledge persistence" phrase was removed.
+    expect(LIVE_SYSTEM_PROMPT).toMatch(/same problem persists|change the words slightly/i)
     expect(LIVE_SYSTEM_PROMPT).toMatch(/Do not repeat a recent cue verbatim/i)
 
     const { prompt } = buildLiveCoachingPrompt({
@@ -418,7 +408,7 @@ describe('buildLiveCoachingPrompt — thin-signal / epistemic boundaries', () =>
     expect(LIVE_SYSTEM_PROMPT).toMatch(/zero tolerance/i)
 
     // User message still permits silence so a thin signal can yield no cue.
-    expect(prompt).toMatch(/stay silent if the batch is already clean/i)
+    expect(prompt).toMatch(/stay silent/i)
   })
 
   it('thin-signal scenario advanced tier: prefers silence over invented cues', () => {

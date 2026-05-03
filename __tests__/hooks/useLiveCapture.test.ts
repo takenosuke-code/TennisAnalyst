@@ -572,7 +572,13 @@ function makeSyntheticSwing(swingIndex: number): StreamedSwing {
   }
 }
 
-describe('useLiveCapture — Phase E server extraction', () => {
+// 2026-05 — Phase E (Modal-based batched server extraction) was
+// bypassed for the YC demo so live coaching can fire within seconds
+// of a swing instead of waiting 10-22s for the Modal round-trip.
+// Swings now emit on-device pose frames straight to onSwing. These
+// describe blocks remain as a reference for the disabled path; if
+// Modal extraction is reintroduced, flip back to describe().
+describe.skip('useLiveCapture — Phase E server extraction', () => {
   beforeEach(() => {
     detectMock.mockClear()
     disposeMock.mockClear()
@@ -787,7 +793,9 @@ describe('useLiveCapture — Phase E server extraction', () => {
 // sliding-window slice.
 const chunkIndexRegistry = new WeakMap<Blob, number>()
 
-describe('useLiveCapture — Phase F3 fireBatch memory bounding', () => {
+// Same reason as Phase E above — fireBatch is no longer in the live
+// path. Tests preserved for reference, skipped from the suite.
+describe.skip('useLiveCapture — Phase F3 fireBatch memory bounding', () => {
   beforeEach(() => {
     detectMock.mockClear()
     disposeMock.mockClear()

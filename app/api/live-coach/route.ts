@@ -18,7 +18,20 @@ type LiveShotType = 'forehand' | 'backhand' | 'serve' | 'volley'
 
 const MAX_SWINGS_PER_BATCH = 6
 const MAX_SUMMARY_CHARS = 2000
-const LIVE_MAX_TOKENS = 120
+// 2026-05 — dropped 120 → 35 to enforce the new "≤ 6 words" prompt
+// rule. At 35 tokens the model physically cannot exceed ~10-12 words.
+// Keeps the spoken cue under ~1.5s of TTS audio so it doesn't bleed
+// into the next rally.
+const LIVE_MAX_TOKENS = 35
+
+// Post-filter for live coach output. Mirrors the analyze-route filter
+// but more aggressive: live coaching must be brief and TTS-friendly,
+// so we reject digits, em/en-dashes, and any reading of "joint angle"
+// or raw field names. The route silently swallows rejections rather
+// than retrying because a reject in live mode means "fall through to
+// silence" — better to say nothing than to rush a retry that arrives
+// even later.
+const LIVE_REJECT_RE = /(\d|—|–|joint angle|trunk_rotation|hip_rotation)/i
 // Hard cap on how many recent cues we accept from the client. The prompt
 // builder slices to the last 3 anyway; this is a defense-in-depth limit so
 // a misbehaving client can't blow up the request body.
@@ -188,9 +201,11 @@ export async function POST(request: NextRequest) {
     console.error('live-coach analysis_events insert threw:', err)
   }
 
-  // Stream + buffer. At max_tokens 120 the whole reply is a single sentence,
-  // so there's no perceived UX benefit to chunked streaming. Buffering lets
-  // us collapse stray line breaks so the TTS queue treats it as one utterance.
+  // Buffer-and-validate. At ≤6 words / ≤35 tokens the whole reply is one
+  // ~5-character cue, so chunked SSE streaming buys almost nothing —
+  // network round-trip is the bottleneck, not generation. Buffering lets
+  // us run the post-filter (digits, em-dashes, jargon) before the TTS
+  // queue speaks the cue out loud.
   let text = ''
   let outputTokens: number | null = null
   try {
@@ -212,7 +227,16 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Coaching call failed' }, { status: 502 })
   }
 
-  const collapsed = text.trim().replace(/\s+/g, ' ')
+  let collapsed = text.trim().replace(/\s+/g, ' ')
+
+  // Post-filter: if the cue contains forbidden tokens (digits, em/en
+  // dashes, "joint angle", raw field names), fall through to silence.
+  // No retry — a retry would push the cue past the next rally. Better
+  // to say nothing than to say something wrong with a 4-second delay.
+  if (LIVE_REJECT_RE.test(collapsed)) {
+    console.warn('[live-coach] post-filter rejected:', collapsed.slice(0, 80))
+    collapsed = ''
+  }
 
   if (eventId) {
     const charCount = collapsed.length

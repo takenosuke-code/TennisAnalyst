@@ -896,10 +896,19 @@ export function useLiveCapture(
 
         const emitted = detectorRef.current?.feed(frame) ?? null
         if (emitted) {
-          // Phase E — defer the onSwing forward until the Modal batch
-          // returns. The on-device frames live on `emitted.frames`
-          // and become the fallback if Modal fails for this swing.
-          enqueueSwing(emitted)
+          // 2026-05 (YC demo) — bypass the Modal extraction batcher
+          // and emit on-device pose frames straight to `onSwing`. The
+          // batcher was adding 5-15s of warm latency (Modal poll +
+          // mp4box upload + 4-swing batch wait). For a live demo the
+          // tracing accuracy gain isn't worth the latency hit; the
+          // coach speaks within seconds instead of 20+. The save
+          // flow downstream still uses the on-device frames pushed
+          // into swingsRef here.
+          if (emitted.swingIndex > emittedSwingIndexRef.current) {
+            emittedSwingIndexRef.current = emitted.swingIndex
+            swingsRef.current.push(emitted)
+            onSwing?.(emitted)
+          }
         }
       } catch {
         // A single bad frame should never kill the loop
