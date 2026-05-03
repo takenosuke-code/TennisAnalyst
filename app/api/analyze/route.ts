@@ -879,6 +879,15 @@ export async function POST(request: NextRequest) {
         baselineSummary: smoothedBaselineFrames,
         shotType: resolvedShotType,
         dominantHand: profile?.dominant_hand ?? null,
+        // Baseline-compare mode: today's frames are pre-sliced to a
+        // single swing on the page (compare/page.tsx detectSwings) and
+        // the baseline frames come from a saved swing trim. Tell the
+        // rules to skip server-side re-detection — otherwise the
+        // second pass finds a peak inside the already-sliced data and
+        // re-slices around it, often cutting prep frames entirely and
+        // producing a flat hip / trunk excursion (the "1° today across
+        // every joint" bug).
+        isPreSliced: isBaselineCompare,
       })
     : []
 

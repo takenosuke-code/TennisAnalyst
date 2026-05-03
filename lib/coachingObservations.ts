@@ -101,6 +101,20 @@ export interface ExtractionInput {
   // Defaults to 'right' when null/missing — the historical assumption
   // baked into the original rule code.
   dominantHand?: 'right' | 'left' | null
+  // When true, todaySummary and baselineSummary are ALREADY scoped to a
+  // single swing (e.g. baseline-compare mode pre-slices via
+  // detectSwings on the page). The rules skip the internal
+  // detectSwings re-detection in primarySwingFrames and treat the
+  // entire input as the primary swing slice.
+  //
+  // 2026-05 — added to fix the "1° today excursion" bug: the server
+  // was re-detecting a peak inside an already-sliced swing and
+  // re-slicing around it, often cutting prep frames entirely. The
+  // rotation channels read flat across the post-coil portion, so
+  // hip / trunk / shoulder excursion all reported ~1° simultaneously.
+  // The flag is opt-in (default false) — solo /analyze still relies on
+  // server detection to pick the primary among multiple swings.
+  isPreSliced?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -251,8 +265,13 @@ function pickPrimarySwingIndex(
   }
 }
 
-function pickPeakFrame(frames: PoseFrame[]): PoseFrame | null {
+function pickPeakFrame(frames: PoseFrame[], isPreSliced = false): PoseFrame | null {
   if (frames.length === 0) return null
+  // When the input is already a single swing slice, the peak is in the
+  // middle of the array (Voronoi-bounded slices are roughly centered on
+  // the peak by construction). Skip the redundant detectSwings call
+  // that would otherwise re-find a peak inside the already-sliced data.
+  if (isPreSliced) return frames[Math.floor(frames.length / 2)] ?? null
   const swings = detectSwings(frames)
   if (swings.length === 0) return frames[Math.floor(frames.length / 2)] ?? null
   const primary = swings[pickPrimarySwingIndex(swings, frames)]
@@ -322,9 +341,18 @@ function angleMax(frames: PoseFrame[], key: keyof JointAngles): number | null {
  * Get the swing-window of frames the rules should evaluate against. We pull
  * the primary detected swing slice; if no swing is detected (very short clip)
  * we fall back to the whole frames array.
+ *
+ * When `isPreSliced` is true the caller has already scoped `frames` to a
+ * single swing (e.g. baseline-compare mode pre-slices today via
+ * detectSwings on the page, and saved baselines are stored as a single
+ * swing-trim). Skipping the internal re-detection avoids the "swing
+ * inside a swing" trap where the second pass finds a peak in the middle
+ * of the already-sliced data and re-slices around it, often cutting prep
+ * frames entirely and producing a flat hip/trunk excursion.
  */
-function primarySwingFrames(frames: PoseFrame[]): PoseFrame[] {
+function primarySwingFrames(frames: PoseFrame[], isPreSliced = false): PoseFrame[] {
   if (frames.length === 0) return frames
+  if (isPreSliced) return frames
   const swings = detectSwings(frames)
   if (swings.length === 0) return frames
   const primary = swings[pickPrimarySwingIndex(swings, frames)]
@@ -409,8 +437,8 @@ interface RuleContext {
 function buildRuleContext(input: ExtractionInput): RuleContext | null {
   const frames = input.todaySummary
   if (!frames || frames.length === 0) return null
-  const shotFrames = primarySwingFrames(frames)
-  const peakFrame = pickPeakFrame(frames)
+  const shotFrames = primarySwingFrames(frames, input.isPreSliced ?? false)
+  const peakFrame = pickPeakFrame(frames, input.isPreSliced ?? false)
   if (!peakFrame) return null
   const meanVis = meanVisibility(shotFrames)
   // Unknown shot type -> halve applicability (we don't know which rules really
@@ -1350,9 +1378,13 @@ export function extractObservations(input: ExtractionInput): Observation[] {
   // (joint, phase, pattern) also fires on the baseline. Drift rows
   // stay — those ARE the differences.
   if (input.baselineSummary && input.baselineSummary.length > 0) {
+    // Propagate isPreSliced to the baseline rule-context build too —
+    // saved baselines are stored as a single swing trim, so the flag
+    // should match today's pre-sliced status when the caller set it.
     const baselineCtx = buildRuleContext({
       todaySummary: input.baselineSummary,
       shotType: input.shotType,
+      isPreSliced: input.isPreSliced,
     })
     if (baselineCtx) {
       const baselineAbsolute: Observation[] = []
