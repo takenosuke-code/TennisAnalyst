@@ -426,24 +426,48 @@ async def _upload_file_to_blob(local_path: str, blob_path: str) -> str:
 
     Requires BLOB_READ_WRITE_TOKEN in the environment. *blob_path* is treated
     as the pathname inside the store and must not start with '/'.
+
+    2026-05 — rewritten to match the @vercel/blob v2.3.3 SDK protocol.
+    The previous implementation hit `https://blob.vercel-storage.com/<path>`
+    with only an Authorization header and started 403'ing once Vercel
+    migrated the upload API to `https://vercel.com/api/blob/` with
+    `pathname` as a query param plus a fixed set of required headers
+    (x-api-version, x-vercel-blob-access, x-add-random-suffix,
+    x-api-blob-request-id). The JS SDK works because it tracks these
+    transparently; this Python code didn't.
     """
     blob_token = os.environ.get("BLOB_READ_WRITE_TOKEN")
     if not blob_token:
         raise RuntimeError("BLOB_READ_WRITE_TOKEN not set — cannot upload clips")
 
-    filename = blob_path.lstrip("/")
+    pathname = blob_path.lstrip("/")
 
     with open(local_path, "rb") as f:
         file_bytes = f.read()
 
+    # Mirror the JS SDK's request-id format. The store id is the 4th
+    # underscore-separated token in vercel_blob_rw_<storeId>_<random>.
+    parts = blob_token.split("_")
+    store_id = parts[3] if len(parts) >= 4 else ""
+    request_id = f"{store_id}:{int(time.time() * 1000)}:{uuid.uuid4().hex[:8]}"
+
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.put(
-            f"https://blob.vercel-storage.com/{filename}",
+            "https://vercel.com/api/blob/",
+            params={"pathname": pathname},
             content=file_bytes,
             headers={
-                "Authorization": f"Bearer {blob_token}",
+                "authorization": f"Bearer {blob_token}",
+                "x-api-version": "12",
+                "x-api-blob-request-id": request_id,
+                "x-api-blob-request-attempt": "0",
+                "x-vercel-blob-access": "public",
                 "x-content-type": "video/mp4",
                 "x-cache-control-max-age": "31536000",
+                # The pathname is already a UUID, so we never want the
+                # service to mangle it with a random suffix. "0" matches
+                # what the SDK sends for explicit-path uploads.
+                "x-add-random-suffix": "0",
             },
         )
         resp.raise_for_status()
