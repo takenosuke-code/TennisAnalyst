@@ -147,11 +147,43 @@ function renderObservationLine(o: Observation): string {
   return `${jointHumanLabel(o.joint)} at ${o.phase}: ${patternHumanLabel(o.pattern)} (severity: ${o.severity})`
 }
 
+// Contact-context observations carry NORMALIZED FRACTIONS in their
+// todayValue / baselineValue fields, not degrees. Height observations
+// store wrist-Y above shoulder midpoint as a fraction of torso length;
+// position observations store horizontal wrist distance from body
+// center as a fraction of shoulder width. Rendering them as "0°" (the
+// fraction rounds to 0) was misleading users into thinking the
+// measurement had failed. Render as percentages with descriptive units.
+const CONTACT_CONTEXT_PATTERNS = new Set<Observation['pattern']>([
+  'contact_height_higher',
+  'contact_height_lower',
+  'contact_position_jammed',
+  'contact_position_extended',
+])
+
+function isContactContextPattern(p: Observation['pattern']): boolean {
+  return CONTACT_CONTEXT_PATTERNS.has(p)
+}
+
+function contactContextUnit(p: Observation['pattern']): string {
+  if (p === 'contact_height_higher' || p === 'contact_height_lower') {
+    return '% of torso above shoulders'
+  }
+  // Position patterns
+  return '% of shoulder-width from body center'
+}
+
 /**
  * Render the deterministic Show Your Work block from the chosen observations.
  * Numbers come from the Observation rows. ° is included so the player can
  * tie the human-language coaching back to the underlying angles. This block
  * is concatenated AFTER the LLM body, so post-filter never inspects it.
+ *
+ * Contact-context patterns get a percentage rendering instead of degrees
+ * because their underlying values are 0..1 fractions (torso-normalized
+ * height, shoulder-width-normalized horizontal position) — rendering them
+ * with the degree treatment produces "0°" / "1°" which looks like a
+ * failed measurement.
  */
 function renderShowYourWork(
   primary: Observation | null,
@@ -163,6 +195,25 @@ function renderShowYourWork(
   for (const o of all) {
     const phase = o.phase
     const joint = jointHumanLabel(o.joint)
+    if (isContactContextPattern(o.pattern)) {
+      const unit = contactContextUnit(o.pattern)
+      const todayPct = Math.round(o.todayValue * 100)
+      if (typeof o.baselineValue === 'number') {
+        const basePct = Math.round(o.baselineValue * 100)
+        const driftPct =
+          typeof o.driftMagnitude === 'number'
+            ? Math.round(o.driftMagnitude * 100)
+            : Math.abs(todayPct - basePct)
+        lines.push(
+          `- **${joint} at ${phase}**: baseline ${basePct}${unit}, today ${todayPct}${unit} (drifted ${driftPct} points)`,
+        )
+      } else {
+        lines.push(
+          `- **${joint} at ${phase}**: ${todayPct}${unit} today (${o.severity})`,
+        )
+      }
+      continue
+    }
     if (
       o.pattern === 'drift_from_baseline' &&
       typeof o.baselineValue === 'number' &&
