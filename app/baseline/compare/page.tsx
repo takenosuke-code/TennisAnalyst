@@ -481,6 +481,14 @@ export default function BaselineComparePage() {
                   proVideoUrl={todayObjectUrl ?? ''}
                   userName="Baseline"
                   proName="Today"
+                  // Baseline-compare mode: both clips are user-owned.
+                  // Native 1x playback on both sides; longer side
+                  // drives the loop; contact frames align via slave
+                  // start-delay. Without this flag the layout
+                  // compresses today's clip into baseline's duration
+                  // and the user sees the 3-second clip cut to 2
+                  // seconds and looped (the bug they reported).
+                  compareMode="baseline"
                 />
               </div>
             </div>

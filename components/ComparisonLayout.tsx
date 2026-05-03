@@ -32,6 +32,18 @@ interface ComparisonLayoutProps {
   // keep the original behavior; the baseline-compare page passes
   // "Baseline" since the left video IS the saved baseline.
   userName?: string
+  // 'pro' (default): comparing the user's swing against a slow-mo pro
+  //   reference clip (Federer, Alcaraz). The pro video is typically
+  //   slow-motion, so proPlaybackRate compression is essential to
+  //   align swing speeds. User is always the master; pro plays at
+  //   user's effective rate.
+  // 'baseline': comparing two of the player's own swings (today vs
+  //   their saved baseline). Both should play at native 1x speed —
+  //   compression would distort what the user sees of their own swing.
+  //   The longer-duration side becomes the master so its full
+  //   duration drives the loop; the shorter side holds at end frame
+  //   past its own duration.
+  compareMode?: 'pro' | 'baseline'
 }
 
 export default function ComparisonLayout({
@@ -41,6 +53,7 @@ export default function ComparisonLayout({
   proVideoUrl,
   proName = 'Pro',
   userName = 'You',
+  compareMode = 'pro',
 }: ComparisonLayoutProps) {
   const { visible, showSkeleton, showTrail, showRacket } = useJointStore()
   const { mode, setMode } = useComparisonStore()
@@ -83,6 +96,12 @@ export default function ComparisonLayout({
   // speed that matches the user's real-time swing duration.
   const { setProPlaybackRate } = useSyncStore()
   const proPlaybackRate = useMemo(() => {
+    // Baseline-compare mode plays both clips at native 1x. Compression
+    // would distort what the user sees of their own swing, and the bug
+    // it produced (today's 3s clip cut off at baseline's 2s and looped)
+    // outweighs the historical benefit it served on slow-mo pro clips.
+    if (compareMode === 'baseline') return 1
+
     // Use phase boundaries to calculate real swing duration for both videos.
     // Fall back to total frame duration if phase detection is insufficient.
     const userDurationMs =
@@ -104,7 +123,7 @@ export default function ComparisonLayout({
     const ratio = proDurationMs / userDurationMs
     // Clamp to a reasonable range
     return Math.min(16, Math.max(0.25, ratio))
-  }, [userPhases, proPhases, userFrames, proFrames])
+  }, [userPhases, proPhases, userFrames, proFrames, compareMode])
 
   // Persist the computed playback rate so other components can read it
   useEffect(() => {
@@ -121,6 +140,47 @@ export default function ComparisonLayout({
     }
     return 0
   }, [userPhases])
+
+  // Contact-frame timestamps for baseline-compare mode. Used to align
+  // both videos at the contact moment so the swing-window comparison
+  // is meaningful. Falls back to mid-clip when no contact phase is
+  // detected.
+  const userContactSec = useMemo(() => {
+    const contact = userPhases.find((p) => p.phase === 'contact')
+    if (contact) return contact.timestampMs / 1000
+    if (userFrames.length > 1) {
+      const mid = userFrames[Math.floor(userFrames.length / 2)]
+      return mid?.timestamp_ms ? mid.timestamp_ms / 1000 : 0
+    }
+    return 0
+  }, [userPhases, userFrames])
+  const proContactSec = useMemo(() => {
+    const contact = proPhases.find((p) => p.phase === 'contact')
+    if (contact) return contact.timestampMs / 1000
+    if (proFrames.length > 1) {
+      const mid = proFrames[Math.floor(proFrames.length / 2)]
+      return mid?.timestamp_ms ? mid.timestamp_ms / 1000 : 0
+    }
+    return 0
+  }, [proPhases, proFrames])
+
+  // In baseline-compare mode, the side with the LATER contact frame
+  // becomes the master. That way the slave can hold at frame 0 until
+  // the master reaches the alignment moment, then both play their
+  // contact frames at the same wall-clock time. Without this, a
+  // shorter-duration master (typical baseline) would cap syncedTime
+  // and truncate the longer side — the bug the user reported.
+  const baselineMasterIsUser = useMemo(() => {
+    if (compareMode !== 'baseline') return true // pro mode: user always master
+    return userContactSec >= proContactSec
+  }, [compareMode, userContactSec, proContactSec])
+
+  // Slave start delay (seconds): wait time at frame 0 before playing,
+  // so contact frames align at the same wall-clock moment.
+  const slaveStartDelay = useMemo(() => {
+    if (compareMode !== 'baseline') return userSwingStartSec
+    return Math.max(0, Math.abs(userContactSec - proContactSec))
+  }, [compareMode, userContactSec, proContactSec, userSwingStartSec])
 
   // Determine current phase for the badge
   const activePhase = useMemo(
@@ -166,9 +226,33 @@ export default function ComparisonLayout({
             showTrail={showTrail}
             showRacket={showRacket}
             syncedTime={syncedTime}
-            onTimeUpdate={handleTimeUpdate}
-            onPlayPause={handlePlayPause}
-            isPrimary
+            // Only the master drives syncedTime — slaves seeking
+            // would create an oscillating feedback loop.
+            onTimeUpdate={baselineMasterIsUser ? handleTimeUpdate : undefined}
+            onPlayPause={baselineMasterIsUser ? handlePlayPause : undefined}
+            // In baseline-compare mode, master is whichever side has
+            // the later contact frame (so the slave can hold at frame
+            // zero until the master reaches alignment time). In pro
+            // mode the user is always master.
+            isPrimary={baselineMasterIsUser}
+            isSecondary={compareMode === 'baseline' && !baselineMasterIsUser}
+            // When user is the slave (baseline-compare with later pro
+            // contact), the slave needs a time mapping and start delay
+            // mirroring what the pro side normally gets.
+            timeMapping={
+              compareMode === 'baseline' && !baselineMasterIsUser ? null : null
+            }
+            playbackRate={
+              compareMode === 'baseline' && !baselineMasterIsUser ? 1 : 1
+            }
+            proStartDelay={
+              compareMode === 'baseline' && !baselineMasterIsUser
+                ? slaveStartDelay
+                : 0
+            }
+            syncPlaying={
+              compareMode === 'baseline' && !baselineMasterIsUser ? isPlaying : undefined
+            }
             label={userName}
           />
           <div className="relative">
@@ -180,16 +264,29 @@ export default function ComparisonLayout({
               showTrail={showTrail}
               showRacket={showRacket}
               syncedTime={syncedTime}
-              onTimeUpdate={handleTimeUpdate}
+              // Pro side drives syncedTime only when it's the master in
+              // baseline-compare mode (later contact than user).
+              onTimeUpdate={!baselineMasterIsUser ? handleTimeUpdate : undefined}
+              onPlayPause={!baselineMasterIsUser ? handlePlayPause : undefined}
               syncPlaying={isPlaying}
-              isPrimary={false}
-              isSecondary
-              timeMapping={timeMapping}
+              isPrimary={!baselineMasterIsUser}
+              isSecondary={baselineMasterIsUser}
+              // Baseline mode: identity mapping (no phase warping). Pro
+              // mode: keep the existing computeTimeMapping behavior.
+              timeMapping={compareMode === 'baseline' ? null : timeMapping}
               playbackRate={proPlaybackRate}
-              proStartDelay={userSwingStartSec}
+              // In baseline mode, pro is slave only when pro has the
+              // earlier contact (else it's the master with no delay).
+              proStartDelay={
+                compareMode === 'baseline'
+                  ? baselineMasterIsUser
+                    ? slaveStartDelay
+                    : 0
+                  : userSwingStartSec
+              }
               label={proName}
             />
-            {proPlaybackRate > 1.05 && (
+            {compareMode !== 'baseline' && proPlaybackRate > 1.05 && (
               <span className="absolute top-2 right-2 z-10 px-2 py-0.5 rounded-full text-xs font-medium bg-white/20 text-white backdrop-blur-sm">
                 {proPlaybackRate.toFixed(1)}x speed
               </span>
