@@ -119,6 +119,14 @@ vi.mock('@/lib/supabase', () => ({
   supabaseAdmin: buildAdminClient(),
 }))
 
+// Mirror the from-swing route's wiring: Railway returns trimmed bytes
+// and this route uploads via @vercel/blob. The mock returns a fake URL
+// on the allowed host so the route's allowlist passes.
+let putMock: ReturnType<typeof vi.fn>
+vi.mock('@vercel/blob', () => ({
+  put: (...args: unknown[]) => putMock(...args),
+}))
+
 const originalFetch = globalThis.fetch
 let fetchMock: ReturnType<typeof vi.fn>
 
@@ -169,14 +177,33 @@ beforeEach(() => {
   }
   deactivateError = null
 
-  // Default: Railway responds with a plausible trimmed URL
-  fetchMock = vi.fn(async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({ blob_url: TRIMMED_BLOB_URL }),
-    text: async () => '',
-  }))
+  // Default Railway response: 200 OK with trimmed mp4 bytes streamed
+  // back. Route consumes response.body and uploads via put().
+  fetchMock = vi.fn(async () => {
+    const fakeBytes = new Uint8Array([0, 0, 0, 0])
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(fakeBytes)
+        controller.close()
+      },
+    })
+    return {
+      ok: true,
+      status: 200,
+      body: stream,
+      json: async () => ({}),
+      text: async () => '',
+    } as unknown as Response
+  })
   globalThis.fetch = fetchMock as unknown as typeof fetch
+
+  putMock = vi.fn(async () => ({
+    url: TRIMMED_BLOB_URL,
+    pathname: 'baseline-trims/x.mp4',
+    contentType: 'video/mp4',
+    contentDisposition: 'inline',
+    downloadUrl: TRIMMED_BLOB_URL,
+  }))
 
   // Required for the route to call Railway at all
   process.env.RAILWAY_SERVICE_URL = 'https://railway.test'
@@ -339,14 +366,14 @@ describe('POST /api/baselines/from-segment', () => {
     expect(res.status).toBe(502)
   })
 
-  it('returns 502 when Railway returns a disallowed blob URL host', async () => {
-    fetchMock = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ blob_url: 'https://evil.example.com/foo.mp4' }),
-      text: async () => '',
+  it('returns 502 when the uploaded blob URL ends up off-allowlist', async () => {
+    putMock = vi.fn(async () => ({
+      url: 'https://evil.example.com/foo.mp4',
+      pathname: 'baseline-trims/x.mp4',
+      contentType: 'video/mp4',
+      contentDisposition: 'inline',
+      downloadUrl: 'https://evil.example.com/foo.mp4',
     }))
-    globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const res = await callRoute({ sessionId: SESSION_ID, segmentId: SEGMENT_ID })
     expect(res.status).toBe(502)

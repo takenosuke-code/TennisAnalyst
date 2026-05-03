@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { put } from '@vercel/blob'
+import { randomUUID } from 'node:crypto'
 import { createClient } from '@/lib/supabase/server'
 import { supabaseAdmin } from '@/lib/supabase'
 import type { KeypointsJson, PoseFrame } from '@/lib/supabase'
@@ -233,12 +235,18 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  // Trim the parent video to [startMs, endMs] via Railway. Railway
-  // clamps endMs to the source duration internally (FFmpeg's `-t` won't
-  // run past EOF), so a Voronoi-padded swing that overruns the video
-  // tail still produces a valid clip. If the source is already trimmed
-  // (e.g. the user re-uploaded a short clip), the trim is a near-no-op
-  // and works fine.
+  // Trim via Railway, then upload from THIS function via @vercel/blob.
+  //
+  // 2026-05 — Railway used to handle the upload itself, but its hand-
+  // rolled Python httpx PUT to Vercel's Blob API kept 403'ing despite a
+  // valid token. The JS SDK with the same token works fine (proven by
+  // scripts/smoke-test-blob-write.ts). So we route around the busted
+  // Python upload: Railway returns the trimmed mp4 bytes, this function
+  // calls put() with the SDK that we know works.
+  //
+  // Railway clamps endMs to source duration via ffmpeg's `-t`, so a
+  // Voronoi-padded swing overrunning the tail still produces a valid
+  // clip.
   let trimmedUrl: string
   try {
     const trimResp = await fetch(`${RAILWAY_SERVICE_URL}/trim-video`, {
@@ -256,19 +264,12 @@ export async function POST(request: NextRequest) {
     if (!trimResp.ok) {
       const text = await trimResp.text().catch(() => '')
       console.error('[baselines/from-swing] trim service failed:', trimResp.status, text)
-      // 404 from Railway typically means the source video was deleted
-      // before the trim ran. Surface that as a 404 to the client so
-      // the UI can guide the user to re-upload.
       if (trimResp.status === 404) {
         return NextResponse.json(
           { error: 'Source video no longer available — re-upload the video and try again' },
           { status: 404 },
         )
       }
-      // Bubble up the Railway error text (capped) so the client error
-      // message says WHY ffmpeg failed (codec missing, source URL
-      // unreachable, etc.) instead of an opaque "Trim service returned
-      // 500." Critical for diagnosis without Vercel function-log access.
       const detail = text ? text.slice(0, 500) : ''
       return NextResponse.json(
         {
@@ -279,19 +280,36 @@ export async function POST(request: NextRequest) {
         { status: 502 },
       )
     }
-    const data = (await trimResp.json()) as { blob_url?: unknown }
-    if (typeof data.blob_url !== 'string' || !data.blob_url) {
-      return NextResponse.json({ error: 'Trim service returned no blob_url' }, { status: 502 })
+    if (!trimResp.body) {
+      return NextResponse.json(
+        { error: 'Trim service returned an empty body' },
+        { status: 502 },
+      )
     }
-    trimmedUrl = data.blob_url
+    // Stream the trimmed bytes from Railway directly into put(). Buffering
+    // both upstream (fetch -> ArrayBuffer) and downstream (put) would
+    // hold the full mp4 in memory twice; passing the ReadableStream
+    // through lets @vercel/blob fetch consume it once.
+    const blobPath = `baseline-trims/${randomUUID()}.mp4`
+    const uploaded = await put(blobPath, trimResp.body, {
+      access: 'public',
+      contentType: 'video/mp4',
+      // The pathname already contains a UUID, so suppress the random
+      // suffix the SDK appends by default — keeps URLs predictable.
+      addRandomSuffix: false,
+    })
+    trimmedUrl = uploaded.url
   } catch (err) {
-    console.error('[baselines/from-swing] trim service error:', err)
-    return NextResponse.json({ error: 'Trim service unreachable' }, { status: 502 })
+    console.error('[baselines/from-swing] trim/upload pipeline error:', err)
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Trim service unreachable' },
+      { status: 502 },
+    )
   }
 
   if (!isAllowedBlobUrl(trimmedUrl)) {
     return NextResponse.json(
-      { error: `Trim service blob_url must be https on ${ALLOWED_BLOB_HOST_SUFFIX}` },
+      { error: `Uploaded blob_url must be https on ${ALLOWED_BLOB_HOST_SUFFIX}` },
       { status: 502 },
     )
   }

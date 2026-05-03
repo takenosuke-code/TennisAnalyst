@@ -91,6 +91,16 @@ vi.mock('@/lib/supabase', () => ({
   supabaseAdmin: buildAdminClient(),
 }))
 
+// @vercel/blob's put() is the upload-side primitive we now use to write
+// the trimmed mp4 to Vercel Blob (Railway used to do this, but its
+// hand-rolled Python upload protocol broke and we routed around it).
+// The mock just returns a fake URL on the allowed host so the route's
+// validation passes.
+let putMock: ReturnType<typeof vi.fn>
+vi.mock('@vercel/blob', () => ({
+  put: (...args: unknown[]) => putMock(...args),
+}))
+
 const originalFetch = globalThis.fetch
 let fetchMock: ReturnType<typeof vi.fn>
 
@@ -124,13 +134,36 @@ beforeEach(() => {
   }
   deactivateError = null
 
-  fetchMock = vi.fn(async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({ blob_url: TRIMMED_BLOB_URL }),
-    text: async () => '',
-  }))
+  // Default Railway response: 200 OK with a small mp4 byte payload.
+  // The route streams response.body into put(); we just need a body
+  // that satisfies `if (!trimResp.body)` (any ReadableStream works).
+  fetchMock = vi.fn(async () => {
+    const fakeBytes = new Uint8Array([0, 0, 0, 0])
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(fakeBytes)
+        controller.close()
+      },
+    })
+    return {
+      ok: true,
+      status: 200,
+      body: stream,
+      json: async () => ({}),
+      text: async () => '',
+    } as unknown as Response
+  })
   globalThis.fetch = fetchMock as unknown as typeof fetch
+
+  // Default put() response: returns the same TRIMMED_BLOB_URL so the
+  // route's allowlist check passes.
+  putMock = vi.fn(async () => ({
+    url: TRIMMED_BLOB_URL,
+    pathname: 'baseline-trims/x.mp4',
+    contentType: 'video/mp4',
+    contentDisposition: 'inline',
+    downloadUrl: TRIMMED_BLOB_URL,
+  }))
 
   process.env.RAILWAY_SERVICE_URL = 'https://railway.test'
   process.env.EXTRACT_API_KEY = 'test-key'
@@ -239,13 +272,29 @@ describe('POST /api/baselines/from-swing', () => {
     expect(res.status).toBe(502)
   })
 
-  it('returns 502 when Railway returns a disallowed blob URL host', async () => {
+  it('returns 502 when the uploaded blob URL ends up off-allowlist', async () => {
+    // Vercel Blob always returns vercel-storage.com URLs, but a future
+    // SDK bug or middleware (e.g. proxying through a CDN) could rewrite
+    // the host. The route's allowlist is the last line of defense.
+    putMock = vi.fn(async () => ({
+      url: 'https://evil.example.com/foo.mp4',
+      pathname: 'baseline-trims/x.mp4',
+      contentType: 'video/mp4',
+      contentDisposition: 'inline',
+      downloadUrl: 'https://evil.example.com/foo.mp4',
+    }))
+    const res = await callRoute(VALID_BODY)
+    expect(res.status).toBe(502)
+  })
+
+  it('returns 502 when Railway returns an empty body', async () => {
     fetchMock = vi.fn(async () => ({
       ok: true,
       status: 200,
-      json: async () => ({ blob_url: 'https://evil.example.com/foo.mp4' }),
+      body: null,
+      json: async () => ({}),
       text: async () => '',
-    }))
+    } as unknown as Response))
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const res = await callRoute(VALID_BODY)

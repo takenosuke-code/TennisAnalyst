@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { put } from '@vercel/blob'
+import { randomUUID } from 'node:crypto'
 import { createClient } from '@/lib/supabase/server'
 import { supabaseAdmin } from '@/lib/supabase'
 import type { KeypointsJson } from '@/lib/supabase'
@@ -221,9 +223,9 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  // Ask Railway to stream-copy the segment range and hand us a new blob
-  // URL. Anything non-2xx here means we cannot produce a useful baseline,
-  // so surface it to the client.
+  // Trim via Railway, then upload from THIS function via @vercel/blob.
+  // See the matching comment in /api/baselines/from-swing/route.ts for
+  // why Railway no longer uploads itself.
   let trimmedUrl: string
   try {
     const trimResp = await fetch(`${RAILWAY_SERVICE_URL}/trim-video`, {
@@ -241,8 +243,6 @@ export async function POST(request: NextRequest) {
     if (!trimResp.ok) {
       const text = await trimResp.text().catch(() => '')
       console.error('[baselines/from-segment] trim service failed:', trimResp.status, text)
-      // Bubble Railway's error text (capped) so the client can see
-      // why ffmpeg failed without checking Vercel function logs.
       const detail = text ? text.slice(0, 500) : ''
       return NextResponse.json(
         {
@@ -253,14 +253,25 @@ export async function POST(request: NextRequest) {
         { status: 502 },
       )
     }
-    const data = (await trimResp.json()) as { blob_url?: unknown }
-    if (typeof data.blob_url !== 'string' || !data.blob_url) {
-      return NextResponse.json({ error: 'Trim service returned no blob_url' }, { status: 502 })
+    if (!trimResp.body) {
+      return NextResponse.json(
+        { error: 'Trim service returned an empty body' },
+        { status: 502 },
+      )
     }
-    trimmedUrl = data.blob_url
+    const blobPath = `baseline-trims/${randomUUID()}.mp4`
+    const uploaded = await put(blobPath, trimResp.body, {
+      access: 'public',
+      contentType: 'video/mp4',
+      addRandomSuffix: false,
+    })
+    trimmedUrl = uploaded.url
   } catch (err) {
-    console.error('[baselines/from-segment] trim service error:', err)
-    return NextResponse.json({ error: 'Trim service unreachable' }, { status: 502 })
+    console.error('[baselines/from-segment] trim/upload pipeline error:', err)
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Trim service unreachable' },
+      { status: 502 },
+    )
   }
 
   if (!isAllowedBlobUrl(trimmedUrl)) {

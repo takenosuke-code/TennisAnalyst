@@ -15,6 +15,7 @@ import uuid
 from urllib.parse import urlparse
 import cv2
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
+from fastapi.responses import Response
 from pydantic import BaseModel
 from supabase import create_client, Client
 import httpx
@@ -693,15 +694,31 @@ def _trim_with_ffmpeg(src_path: str, dst_path: str, start_ms: int, end_ms: int) 
         )
 
 
+# Cap the trim window so a misuse can't make us return a 200 MB+ payload
+# through the Vercel function (Pro caps request body around 50 MB and we
+# also bear the egress + memory cost). 60s is comfortably above any
+# real swing window (typical: 2-4s with full pre/post pad).
+_TRIM_MAX_DURATION_MS = 60_000
+
+
 @app.post("/trim-video")
 async def trim_video(
     req: TrimVideoRequest,
     authorization: str = Header(default=""),
 ):
-    """Download *video_url*, trim to [start_ms, end_ms], upload to Vercel Blob.
+    """Download *video_url*, trim to [start_ms, end_ms], stream the trimmed
+    mp4 bytes back to the caller.
 
-    Returns { blob_url }. Uses stream-copy (no re-encode) so it's fast and
-    lossless but cuts snap to the nearest keyframe.
+    2026-05 — switched from "trim + upload to Vercel Blob + return URL" to
+    "trim + return bytes". The previous flow had the Python upload to
+    Vercel Blob silently 403'ing for an unknown duration; the JS SDK on
+    Vercel uploads with the same token successfully. Letting the Next.js
+    caller do the upload via @vercel/blob's put() routes around the
+    busted Python protocol entirely. The Vercel function then
+    inserts the user_baselines row referencing the URL it just wrote.
+
+    Stream-copy (no re-encode) keeps the trim fast and lossless. Cuts
+    snap to the nearest keyframe, which is fine for a baseline preview.
     """
     expected = f"Bearer {EXTRACT_API_KEY}"
     if authorization != expected:
@@ -715,6 +732,12 @@ async def trim_video(
 
     if req.end_ms <= req.start_ms:
         raise HTTPException(status_code=400, detail="end_ms must be greater than start_ms")
+
+    if req.end_ms - req.start_ms > _TRIM_MAX_DURATION_MS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"trim window must be <= {_TRIM_MAX_DURATION_MS}ms",
+        )
 
     src_path: str | None = None
     dst_path: str | None = None
@@ -734,9 +757,31 @@ async def trim_video(
             _trim_with_ffmpeg, src_path, dst_path, req.start_ms, req.end_ms
         )
 
-        blob_path = f"baseline-trims/{uuid.uuid4()}.mp4"
-        blob_url = await _upload_file_to_blob(dst_path, blob_path)
-        return {"blob_url": blob_url}
+        with open(dst_path, "rb") as f:
+            trimmed_bytes = f.read()
+
+        # Cleanup temp files before returning so we don't pin disk.
+        # Errors deleting are non-fatal but logged.
+        for p in (src_path, dst_path):
+            if p and os.path.exists(p):
+                try:
+                    os.unlink(p)
+                except OSError as e:  # noqa: BLE001
+                    print(f"[trim-video] temp cleanup failed: {e}")
+        src_path = None
+        dst_path = None
+
+        return Response(
+            content=trimmed_bytes,
+            media_type="video/mp4",
+            headers={
+                "Content-Length": str(len(trimmed_bytes)),
+                # Surface the requested window in headers so the
+                # Next.js caller can sanity-check what came back.
+                "X-Trim-Start-Ms": str(req.start_ms),
+                "X-Trim-End-Ms": str(req.end_ms),
+            },
+        )
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
