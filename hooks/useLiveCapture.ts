@@ -170,7 +170,17 @@ const NO_BODY_TIMEOUT_MS = 1000
 // ingestion needs (warmup + activity smoothing window are both
 // frame-count-based, not time-based, so the detector is just as happy
 // at 5fps as 15fps — it just sees fewer baseline frames per second).
-const GATE_DETECTION_FPS = 5
+//
+// 2026-05 — bumped 5 → 10 for the YC demo. At 5fps the contact-frame
+// localization was ±100ms (1 frame = 200ms), and a forehand's elbow
+// angle changes 50-80° in the 200ms around contact, so the "contact"
+// keyframe could read 78° when the actual contact-frame elbow was
+// 165° — confidently-wrong cue. At 10fps the localization tightens
+// to ±50ms and the elbow-at-contact noise drops below the rule
+// threshold. Modern phone WebGPU runs rtmpose-m at ~80-120ms per
+// detect(), comfortably inside the 100ms tick budget; older WebGL/
+// WASM phones gracefully degrade via the `inflightRef` guard.
+const GATE_DETECTION_FPS = 10
 
 // Phase E — batch size for the Modal swing-extraction pipeline. Mirrors
 // the live coach's `maxSwingsPerBatch = 4` so one batch extraction
@@ -403,7 +413,23 @@ export function useLiveCapture(
       try { warmupHeartbeatStopRef.current() } catch { /* ignore */ }
       warmupHeartbeatStopRef.current = null
     }
-    detectorRef.current = new LiveSwingDetector()
+    // 2026-05 (YC demo) — detector frame-count constants rescaled for
+    // the 5fps browser pose stream. The defaults (warmupFrames=30,
+    // smoothingWindow=5, refractoryFrames=30, minSwingFrames=12,
+    // mergeGapFrames=10) were tuned for ~30fps capture and translate
+    // to 6s warmup / 1s smoothing lag / 6s post-swing lockout / 2.4s
+    // minimum swing duration at 5fps — far longer than a real
+    // groundstroke (1-1.5s). Result was the detector systematically
+    // missing fast clean swings and locking out alternates in fast
+    // rallies. Constants below preserve the same physical durations
+    // at 5fps so the detector behaves like its 30fps design point.
+    detectorRef.current = new LiveSwingDetector({
+      warmupFrames: 10,
+      smoothingWindow: 2,
+      refractoryFrames: 10,
+      minSwingFrames: 4,
+      mergeGapFrames: 3,
+    })
 
     setStatus('requesting-permissions')
     let stream: MediaStream

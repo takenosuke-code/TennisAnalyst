@@ -385,17 +385,60 @@ export function sampleKeyFrames(frames: PoseFrame[], count = 5): PoseFrame[] {
   )
 }
 
-// Build a compact prompt-safe summary of angles (no raw x/y coords)
+// Per-joint landmark dependency map. Each joint angle is only as
+// trustworthy as the WORST visibility among the landmarks that fed
+// its computation; under buildAngleSummary's `gateOnVisibility` mode
+// we emit N/A for any joint whose feeding landmarks dropped below
+// the visibility floor on the sampled frame.
+const JOINT_LANDMARK_DEPS: Record<string, number[]> = {
+  right_elbow: [12, 14, 16], // R shoulder, R elbow, R wrist
+  left_elbow: [11, 13, 15],
+  right_shoulder: [14, 12, 24], // R elbow, R shoulder, R hip
+  left_shoulder: [13, 11, 23],
+  right_knee: [24, 26, 28], // R hip, R knee, R ankle
+  left_knee: [23, 25, 27],
+  hip_rotation: [23, 24],
+  trunk_rotation: [11, 12],
+}
+const VISIBILITY_FLOOR = 0.5
+
+function angleHasGoodLandmarks(frame: PoseFrame, joint: string): boolean {
+  const ids = JOINT_LANDMARK_DEPS[joint]
+  if (!ids) return true
+  for (const id of ids) {
+    const lm = frame.landmarks?.find((l) => l.id === id)
+    if (!lm || lm.visibility < VISIBILITY_FLOOR) return false
+  }
+  return true
+}
+
+// Build a compact prompt-safe summary of angles (no raw x/y coords).
+//
+// `gateOnVisibility` (live path): drop the joint reading to "N/A" when
+// any feeding landmark on the sampled frame had visibility below 0.5.
+// Without this gate, the live coach was reading single-frame angles
+// from frames where the elbow / wrist / hip landmark was occluded or
+// below the confidence floor, then confidently calling out a cue based
+// on a number that was effectively random. Analyze flow can leave it
+// off — its rule layer (lib/coachingObservations.ts) does its own
+// visibility-weighted confidence math.
 export function buildAngleSummary(
   frames: PoseFrame[],
-  phaseNames: string[] = ['preparation', 'loading', 'contact', 'follow-through', 'finish']
+  phaseNames: string[] = ['preparation', 'loading', 'contact', 'follow-through', 'finish'],
+  options: { gateOnVisibility?: boolean } = {},
 ): string {
   const sampled = sampleKeyFrames(frames, 5)
+  const gate = options.gateOnVisibility === true
   return sampled
     .map((frame, i) => {
       const a = frame.joint_angles
       const phase = phaseNames[i] ?? `frame_${frame.frame_index}`
-      return `${phase}: elbow_R=${a.right_elbow?.toFixed(0) ?? 'N/A'}° elbow_L=${a.left_elbow?.toFixed(0) ?? 'N/A'}° shoulder_R=${a.right_shoulder?.toFixed(0) ?? 'N/A'}° knee_R=${a.right_knee?.toFixed(0) ?? 'N/A'}° hip_rot=${a.hip_rotation?.toFixed(0) ?? 'N/A'}° trunk_rot=${a.trunk_rotation?.toFixed(0) ?? 'N/A'}°`
+      const fmt = (key: string, val: number | undefined): string => {
+        if (typeof val !== 'number' || !Number.isFinite(val)) return 'N/A'
+        if (gate && !angleHasGoodLandmarks(frame, key)) return 'N/A'
+        return `${val.toFixed(0)}°`
+      }
+      return `${phase}: elbow_R=${fmt('right_elbow', a.right_elbow)} elbow_L=${fmt('left_elbow', a.left_elbow)} shoulder_R=${fmt('right_shoulder', a.right_shoulder)} knee_R=${fmt('right_knee', a.right_knee)} hip_rot=${fmt('hip_rotation', a.hip_rotation)} trunk_rot=${fmt('trunk_rotation', a.trunk_rotation)}`
     })
     .join('\n')
 }

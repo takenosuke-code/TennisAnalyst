@@ -382,7 +382,16 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
         })
         return
       }
-      const angleSummary = buildAngleSummary(swing.frames)
+      // gateOnVisibility=true drops single-joint readings to N/A when
+      // the feeding landmarks on the sampled keyframe were below
+      // visibility 0.5. Without the gate the live coach occasionally
+      // confidently called out a cue based on an angle computed from
+      // an occluded wrist or hip landmark — i.e. effectively a random
+      // number. The analyze flow's rule layer does its own visibility
+      // math and doesn't need this.
+      const angleSummary = buildAngleSummary(swing.frames, undefined, {
+        gateOnVisibility: true,
+      })
       const source = detectSwingSource(swing)
       pendingRef.current.push({
         angleSummary,
