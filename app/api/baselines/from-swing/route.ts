@@ -111,7 +111,8 @@ export async function POST(request: NextRequest) {
     sessionId,
     startFrame,
     endFrame,
-    fps,
+    startMs: clientStartMs,
+    endMs: clientEndMs,
     shotType,
     label,
     keypointsJson: clientKeypoints,
@@ -120,6 +121,8 @@ export async function POST(request: NextRequest) {
     startFrame?: unknown
     endFrame?: unknown
     peakFrame?: unknown
+    startMs?: unknown
+    endMs?: unknown
     fps?: unknown
     shotType?: unknown
     label?: unknown
@@ -135,8 +138,11 @@ export async function POST(request: NextRequest) {
   if (typeof endFrame !== 'number' || !Number.isFinite(endFrame) || endFrame <= startFrame) {
     return NextResponse.json({ error: 'endFrame must be a number greater than startFrame' }, { status: 400 })
   }
-  if (typeof fps !== 'number' || !Number.isFinite(fps) || fps <= 0) {
-    return NextResponse.json({ error: 'fps must be a positive number' }, { status: 400 })
+  if (typeof clientStartMs !== 'number' || !Number.isFinite(clientStartMs) || clientStartMs < 0) {
+    return NextResponse.json({ error: 'startMs must be a non-negative number' }, { status: 400 })
+  }
+  if (typeof clientEndMs !== 'number' || !Number.isFinite(clientEndMs) || clientEndMs <= clientStartMs) {
+    return NextResponse.json({ error: 'endMs must be a number greater than startMs' }, { status: 400 })
   }
   if (!isShotType(shotType)) {
     return NextResponse.json(
@@ -174,36 +180,86 @@ export async function POST(request: NextRequest) {
   }
   const session = sessionRaw as SessionRow
 
-  // Compute the swing's time window from frame indices + fps. This is
-  // the canonical source of truth — relying on a client-supplied
-  // start_ms/end_ms would let a malicious client trim outside the
-  // swing window or even crop into someone else's session.
-  const startMs = (startFrame / fps) * 1000
-  const endMs = (endFrame / fps) * 1000
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
-    return NextResponse.json({ error: 'Computed time window is invalid' }, { status: 400 })
+  // The trim window comes from the client (swing.startMs / swing.endMs
+  // off the SwingSegment, which were derived from real frame
+  // timestamps via allFrames[startFrame].timestamp_ms). We previously
+  // recomputed startMs as (startFrame / fps) * 1000 which drifted on
+  // 29.97fps captures and failed entirely when pose extraction's first
+  // frame's timestamp wasn't 0 — both bugs desynced the trim AND the
+  // re-zeroed pose overlay.
+  //
+  // Security: the client could lie about ms values to crop outside
+  // their session's time window, so we validate the supplied values
+  // against the parent session's actual keypoint timestamps. The
+  // bounds use min/max defensively (not frames[0]/frames[last]) in
+  // case the frames array isn't strictly time-monotonic — pose
+  // extraction occasionally drops or reorders early low-confidence
+  // frames.
+  if (!isNonEmptyKeypoints(session.keypoints_json)) {
+    return NextResponse.json(
+      {
+        error: 'Source session has no pose keypoints — cannot validate trim window. Re-upload the video and try again.',
+      },
+      { status: 400 },
+    )
   }
+  let sessionMinTs = Infinity
+  let sessionMaxTs = -Infinity
+  for (const f of session.keypoints_json.frames) {
+    const ts = typeof f.timestamp_ms === 'number' ? f.timestamp_ms : NaN
+    if (Number.isFinite(ts)) {
+      if (ts < sessionMinTs) sessionMinTs = ts
+      if (ts > sessionMaxTs) sessionMaxTs = ts
+    }
+  }
+  if (!Number.isFinite(sessionMinTs) || !Number.isFinite(sessionMaxTs)) {
+    return NextResponse.json(
+      { error: 'Source session keypoints have no valid timestamps' },
+      { status: 400 },
+    )
+  }
+
+  // Allow a small slop on either side so swings that legitimately end
+  // exactly at the last frame don't fail floating-point equality.
+  const SLOP_MS = 50
+  if (clientStartMs < sessionMinTs - SLOP_MS) {
+    return NextResponse.json(
+      { error: 'startMs is before the session timeline' },
+      { status: 400 },
+    )
+  }
+  if (clientEndMs > sessionMaxTs + SLOP_MS) {
+    return NextResponse.json(
+      { error: 'endMs is after the session timeline' },
+      { status: 400 },
+    )
+  }
+  if (clientEndMs - clientStartMs > 60_000) {
+    // Mirrors railway-service/main.py:_TRIM_MAX_DURATION_MS so we
+    // surface the cap from the Vercel side too — saves a Railway
+    // round-trip on obvious overruns.
+    return NextResponse.json(
+      { error: 'Trim window must be at most 60 seconds' },
+      { status: 400 },
+    )
+  }
+  // Single source of truth for downstream: trim request body, re-zero
+  // base, all derived from the same validated values.
+  const startMs = clientStartMs
+  const endMs = clientEndMs
 
   // Resolve keypoints. Prefer the client-supplied (already-sliced) set;
   // fall back to slicing the parent session's frames by frame range.
   // Either way we re-zero below so the trimmed video and the saved
-  // pose overlay agree at currentTime=0.
-  let baselineKeypoints: KeypointsJson | null = isNonEmptyKeypoints(clientKeypoints)
+  // pose overlay agree at currentTime=0. session.keypoints_json was
+  // already validated non-empty by the timestamp-bounds check above.
+  let baselineKeypoints: KeypointsJson = isNonEmptyKeypoints(clientKeypoints)
     ? (clientKeypoints as KeypointsJson)
-    : null
-  if (!baselineKeypoints) {
-    if (!isNonEmptyKeypoints(session.keypoints_json)) {
-      return NextResponse.json(
-        { error: 'No keypoints available for this swing' },
-        { status: 400 },
+    : sliceKeypointsByFrameRange(
+        session.keypoints_json,
+        startFrame,
+        endFrame,
       )
-    }
-    baselineKeypoints = sliceKeypointsByFrameRange(
-      session.keypoints_json,
-      startFrame,
-      endFrame,
-    )
-  }
 
   if (!baselineKeypoints.frames?.length) {
     return NextResponse.json(

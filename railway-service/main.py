@@ -663,7 +663,19 @@ class TrimVideoRequest(BaseModel):
 
 
 def _trim_with_ffmpeg(src_path: str, dst_path: str, start_ms: int, end_ms: int) -> None:
-    """Stream-copy the [start_ms, end_ms] range from src_path to dst_path.
+    """Trim the [start_ms, end_ms] range from src_path to dst_path with
+    accurate frame boundaries.
+
+    2026-05 — switched from stream-copy (`-c copy`) to a video re-encode
+    (`-c:v libx264 -preset ultrafast`). Stream-copy with `-ss` before
+    `-i` snaps the start to the nearest keyframe, then counts `-t`
+    duration from THAT snapped point — meaning the output ends earlier
+    than requested whenever the requested start fell between keyframes.
+    Symptom: "trimmed too early, the visible swing is missing." The
+    re-encode forces ffmpeg to produce the exact requested first frame
+    and the exact duration. Audio stream-copies through (baselines are
+    silent-played anyway). On a 2-4s baseline clip the re-encode adds
+    sub-second CPU on Railway's hardware.
 
     Raises RuntimeError with the captured stderr if ffmpeg fails.
     """
@@ -681,7 +693,16 @@ def _trim_with_ffmpeg(src_path: str, dst_path: str, start_ms: int, end_ms: int) 
         src_path,
         "-t",
         f"{duration_s:.3f}",
-        "-c",
+        # Re-encode video with x264 ultrafast so the output's first
+        # frame is exactly at start_s (no keyframe snap). Audio
+        # stream-copies — baselines play muted, accuracy not needed.
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
         "copy",
         "-movflags",
         "+faststart",

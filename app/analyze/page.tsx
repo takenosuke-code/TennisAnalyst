@@ -293,13 +293,18 @@ export default function AnalyzePage() {
       // The new /from-swing endpoint trims the source video to the
       // swing window via Railway and re-zeroes pose timestamps so the
       // saved baseline plays as just the swing clip (not the whole
-      // 17-second rally video). The route derives start_ms/end_ms
-      // server-side from startFrame/endFrame/fps — we send the frame
-      // bounds, not the millisecond bounds, so a malicious client can't
-      // crop outside the swing window.
-      // SwingSegment doesn't carry fps explicitly — derive it from the
-      // parent allFrames timestamps (same fps for the whole capture).
-      // Falls back to 30 inside deriveFps when timestamps are missing.
+      // 17-second rally video).
+      //
+      // 2026-05 — pass swing.startMs / swing.endMs from the SwingSegment
+      // directly instead of letting the route recompute via
+      // (frame / fps) * 1000. The fps recomputation drifted on 29.97fps
+      // captures and broke entirely when pose extraction's first frame
+      // wasn't at timestamp 0 — desyncing both the trim window and the
+      // re-zeroed pose overlay. SwingSegment.startMs/endMs come from
+      // allFrames[startFrame].timestamp_ms (real timestamps), so they
+      // bypass the drift. Server validates the values fall within the
+      // session's keypoint timestamp range, so a malicious client can't
+      // crop outside their session.
       const sessionFps = deriveFps(allFrames)
       const keypointsJson = {
         fps_sampled: sessionFps,
@@ -315,7 +320,8 @@ export default function AnalyzePage() {
           startFrame: swing.startFrame,
           endFrame: swing.endFrame,
           peakFrame: swing.peakFrame,
-          fps: sessionFps,
+          startMs: swing.startMs,
+          endMs: swing.endMs,
           shotType: override.shotType,
           label: override.label,
           keypointsJson,

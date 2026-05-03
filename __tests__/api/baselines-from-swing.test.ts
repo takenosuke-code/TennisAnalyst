@@ -179,12 +179,16 @@ async function callRoute(body: Record<string, unknown>) {
   return POST(req)
 }
 
+// startFrame=420, endFrame=510 at 30fps → start_ms ~14000, end_ms ~17000.
+// We send the ms values explicitly (the route stopped recomputing them
+// from frame indices in 2026-05 — see route comment).
 const VALID_BODY = {
   sessionId: SESSION_ID,
   startFrame: 420,
   endFrame: 510,
   peakFrame: 465,
-  fps: 30,
+  startMs: 14000,
+  endMs: 17000,
   shotType: 'forehand',
   label: 'My swing',
   // Pre-sliced keypoints from the client. Timestamps are still in
@@ -215,8 +219,38 @@ describe('POST /api/baselines/from-swing', () => {
     expect(res.status).toBe(400)
   })
 
-  it('returns 400 when fps is non-positive', async () => {
-    const res = await callRoute({ ...VALID_BODY, fps: 0 })
+  it('returns 400 when startMs is missing', async () => {
+    const noStart = { ...VALID_BODY }
+    delete (noStart as Record<string, unknown>).startMs
+    const res = await callRoute(noStart)
+    expect(res.status).toBe(400)
+  })
+
+  it('returns 400 when endMs <= startMs', async () => {
+    const res = await callRoute({ ...VALID_BODY, startMs: 5000, endMs: 5000 })
+    expect(res.status).toBe(400)
+  })
+
+  it('returns 400 when startMs is before the session timeline', async () => {
+    // Session frames are makeFrames(0, 600) at 30fps, so timestamps run
+    // 0..19967ms. A startMs well before 0 must be rejected so a malicious
+    // client can't sneak the trim into someone else's session.
+    const res = await callRoute({ ...VALID_BODY, startMs: -100, endMs: 1000 })
+    expect(res.status).toBe(400)
+  })
+
+  it('returns 400 when endMs is after the session timeline', async () => {
+    // Session ends around 19967ms; an endMs way past that (with the
+    // 50ms slop already applied) must be rejected.
+    const res = await callRoute({ ...VALID_BODY, startMs: 0, endMs: 30000 })
+    expect(res.status).toBe(400)
+  })
+
+  it('returns 400 when the trim window exceeds 60 seconds', async () => {
+    // Mirrors railway-service _TRIM_MAX_DURATION_MS — saves a Railway
+    // round-trip on obvious overruns. Session timestamps don't matter
+    // for this check, the duration cap fires first.
+    const res = await callRoute({ ...VALID_BODY, startMs: 0, endMs: 65_000 })
     expect(res.status).toBe(400)
   })
 
