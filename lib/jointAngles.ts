@@ -266,6 +266,49 @@ export function detectSwings(
     }]
   }
 
+  // Short-clip pass-through: if the whole input is under 5 seconds
+  // AND the caller isn't asking us to filter rejected strokes, skip
+  // Voronoi slicing and return the entire clip as a single swing.
+  // The alternative (Voronoi-bound the detected peaks) was producing
+  // tightly-trimmed slices on short single-swing clips when the
+  // detector picked up grip adjustments / footwork as fake additional
+  // peaks — the LLM then saw a partial swing and reported "1° hip
+  // rotation," etc. Below 5s the user is almost always uploading a
+  // single swing anyway.
+  //
+  // We still run detectStrokes to find the actual wrist-velocity peak
+  // — the rules need an accurate peakFrame to identify the contact
+  // moment. The output is the full clip with the strongest peak's
+  // peakFrame stamped on it.
+  //
+  // Gated on !dropRejected because that flag asks the rule layer to
+  // throw out low-quality strokes; bypassing the detection there
+  // would let phantom whole-clip strokes through the quality filter.
+  if (!dropRejected && allFrames.length >= 2) {
+    const firstTs = allFrames[0]?.timestamp_ms ?? 0
+    const lastTs = allFrames[allFrames.length - 1]?.timestamp_ms ?? 0
+    if (lastTs - firstTs < 5000) {
+      const peaks = detectStrokes(allFrames, {
+        fps: opts.fps,
+        dominantHand: opts.dominantHand,
+        verifyShape,
+      })
+      const primaryPeakFrame =
+        peaks.length > 0
+          ? peaks[0].peakFrame
+          : Math.floor(allFrames.length / 2)
+      return [{
+        index: 1,
+        startFrame: 0,
+        endFrame: allFrames.length - 1,
+        startMs: firstTs,
+        endMs: lastTs,
+        peakFrame: primaryPeakFrame,
+        frames: allFrames,
+      }]
+    }
+  }
+
   let strokes = detectStrokes(allFrames, {
     fps: opts.fps,
     dominantHand: opts.dominantHand,
