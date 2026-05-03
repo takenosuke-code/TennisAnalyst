@@ -288,24 +288,67 @@ function pickPeakFrame(frames: PoseFrame[], isPreSliced = false): PoseFrame | nu
  * has true excursion 20° but a naive max-min reports 10° if the line
  * doesn't actually cross the wrap (or 360° if it does). Summing
  * |shortDelta| across consecutive frames is correct in both cases.
+ *
+ * 2026-05 — normalize to [-180, 180) so ±180° map unambiguously. The
+ * old `while d > 180` form let an exact 180° pass through as a real
+ * step, which on a noisy frame (e.g. landmark label swap) propagated
+ * a ~180° step into the unwrapped series and inflated cumulative
+ * excursion to 176-182° — the bug the user reported on baseline-
+ * compare's "Show your work" block.
  */
 function shortAngleDelta(a: number, b: number): number {
-  let d = b - a
-  while (d > 180) d -= 360
-  while (d <= -180) d += 360
-  return d
+  const d = b - a
+  // Map any real number to [-180, 180). Equivalent to `((d + 180) %
+  // 360 + 360) % 360 - 180` but explicit about the wrap.
+  return ((((d + 180) % 360) + 360) % 360) - 180
 }
+
+// Per-frame angle delta beyond which the step is treated as a
+// landmark glitch (label swap, atan2 wrap on a near-vertical hip line,
+// etc.) rather than real rotation. A real player can rotate ~30-60°
+// across a single swing; a single FRAME-to-FRAME step that large is
+// almost certainly noise, especially given pose extraction's frame
+// rate (33ms at 30fps). 120° is a generous bound that lets through
+// any plausible motion while catching the obvious glitch frames.
+const ANGLE_OUTLIER_DELTA_DEG = 120
+
+// Physical max for a swing's rotation excursion. Hip / trunk
+// rotations across a complete swing rarely exceed 90-120° in the body
+// frame, and the screen-space measurement is bounded by the same
+// physical range when the camera is roughly side-on. Excursion past
+// 180° means the unwrap drifted on garbage data — abstain rather
+// than report runaway.
+const ANGLE_MAX_PHYSICAL_EXCURSION_DEG = 180
 
 function angleExcursion(frames: PoseFrame[], key: keyof JointAngles): number | null {
   // Build a continuous (unwrapped) series via shortDelta, then take
   // max - min. Unwrapping handles the ±180° wrap; max-min on the
-  // unwrapped series stays robust to per-frame jitter.
+  // unwrapped series stays robust to per-frame jitter. Per-frame
+  // outliers (delta > ANGLE_OUTLIER_DELTA_DEG) are skipped — we don't
+  // propagate their spike into the unwrapped position. If the final
+  // excursion still exceeds the physical max, we abstain (return null)
+  // rather than report a garbage number; the caller's confidence
+  // pipeline already handles abstention gracefully.
   const unwrapped: number[] = []
   let prev: number | null = null
   for (const f of frames) {
     const v = f.joint_angles?.[key]
     if (typeof v !== 'number' || !Number.isFinite(v)) continue
-    const u: number = prev === null ? v : prev + shortAngleDelta(prev, v)
+    if (prev === null) {
+      unwrapped.push(v)
+      prev = v
+      continue
+    }
+    const delta = shortAngleDelta(prev, v)
+    if (Math.abs(delta) > ANGLE_OUTLIER_DELTA_DEG) {
+      // Suspicious frame — hold the unwrapped series at the last
+      // good value rather than accumulating the spike. Keep prev
+      // unchanged so the next frame's delta is compared to a stable
+      // anchor (otherwise two glitch frames in a row would compound).
+      unwrapped.push(prev)
+      continue
+    }
+    const u = prev + delta
     unwrapped.push(u)
     prev = u
   }
@@ -316,7 +359,9 @@ function angleExcursion(frames: PoseFrame[], key: keyof JointAngles): number | n
     if (v < lo) lo = v
     if (v > hi) hi = v
   }
-  return hi - lo
+  const excursion = hi - lo
+  if (excursion > ANGLE_MAX_PHYSICAL_EXCURSION_DEG) return null
+  return excursion
 }
 
 function angleMin(frames: PoseFrame[], key: keyof JointAngles): number | null {

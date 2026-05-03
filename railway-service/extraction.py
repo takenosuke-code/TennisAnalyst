@@ -79,15 +79,25 @@ def compute_joint_angles_from_dicts(
         angles["right_knee"] = round(angle_between(pts["rh"], pts["rk"], pts["ra"]), 1)
     if all(pts[k] for k in ["lh", "lk", "la"]):
         angles["left_knee"] = round(angle_between(pts["lh"], pts["lk"], pts["la"]), 1)
+    # 2026-05 — dropped abs() on hip_rotation and trunk_rotation. The
+    # TypeScript-side computeJointAngles uses signed atan2 [-180, 180].
+    # Storing abs() on the Python side produced inflated excursions on
+    # baseline-compare: the abs() spikes near 180° whenever the hip
+    # line passes near horizontal, feeding the unwrap runaway in
+    # angleExcursion. Stored baselines extracted before this fix may
+    # still carry abs()-folded values; smoothFramesForRules re-derives
+    # joint_angles from landmarks on each /api/analyze call, so the
+    # signed values flow through automatically once the frames have
+    # landmarks attached (they do — pose data is stored per frame).
     if pts["lh"] and pts["rh"]:
         hip_vec = (pts["rh"][0] - pts["lh"][0], pts["rh"][1] - pts["lh"][1])
         angles["hip_rotation"] = round(
-            abs(math.degrees(math.atan2(hip_vec[1], hip_vec[0]))), 1
+            math.degrees(math.atan2(hip_vec[1], hip_vec[0])), 1
         )
     if pts["ls"] and pts["rs"]:
         sh_vec = (pts["rs"][0] - pts["ls"][0], pts["rs"][1] - pts["ls"][1])
         angles["trunk_rotation"] = round(
-            abs(math.degrees(math.atan2(sh_vec[1], sh_vec[0]))), 1
+            math.degrees(math.atan2(sh_vec[1], sh_vec[0])), 1
         )
 
     return angles

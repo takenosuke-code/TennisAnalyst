@@ -66,12 +66,15 @@ def compute_joint_angles(landmarks, min_visibility=0.0):
         angles["right_knee"] = round(angle_between(pts["rh"], pts["rk"], pts["ra"]), 1)
     if all(pts[k] for k in ["lh", "lk", "la"]):
         angles["left_knee"] = round(angle_between(pts["lh"], pts["lk"], pts["la"]), 1)
+    # 2026-05 — abs() removed; see railway-service/extraction.py for
+    # the rationale. Signed atan2 is what the TypeScript pipeline
+    # expects for shortAngleDelta-based unwrapping.
     if pts["lh"] and pts["rh"]:
         hip_vec = (pts["rh"][0] - pts["lh"][0], pts["rh"][1] - pts["lh"][1])
-        angles["hip_rotation"] = round(abs(math.degrees(math.atan2(hip_vec[1], hip_vec[0]))), 1)
+        angles["hip_rotation"] = round(math.degrees(math.atan2(hip_vec[1], hip_vec[0])), 1)
     if pts["ls"] and pts["rs"]:
         sh_vec = (pts["rs"][0] - pts["ls"][0], pts["rs"][1] - pts["ls"][1])
-        angles["trunk_rotation"] = round(abs(math.degrees(math.atan2(sh_vec[1], sh_vec[0]))), 1)
+        angles["trunk_rotation"] = round(math.degrees(math.atan2(sh_vec[1], sh_vec[0])), 1)
 
     return angles
 
