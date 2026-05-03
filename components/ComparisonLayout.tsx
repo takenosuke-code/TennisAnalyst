@@ -44,13 +44,6 @@ interface ComparisonLayoutProps {
   //   duration drives the loop; the shorter side holds at end frame
   //   past its own duration.
   compareMode?: 'pro' | 'baseline'
-  // Optional video windows. When provided, the corresponding
-  // VideoCanvas seeks to windowStartMs on load and loops back to it
-  // on hitting windowEndMs — so a video file that contains pre-swing
-  // footage only plays its swing window. Frame timestamps stay
-  // source-relative; pose overlay aligns naturally.
-  userVideoWindow?: { startMs: number; endMs: number } | null
-  proVideoWindow?: { startMs: number; endMs: number } | null
 }
 
 export default function ComparisonLayout({
@@ -61,36 +54,19 @@ export default function ComparisonLayout({
   proName = 'Pro',
   userName = 'You',
   compareMode = 'pro',
-  userVideoWindow = null,
-  proVideoWindow = null,
 }: ComparisonLayoutProps) {
   const { visible, showSkeleton, showTrail, showRacket } = useJointStore()
   const { mode, setMode } = useComparisonStore()
   const { syncedTime, setSyncedTime, setTimeMapping, isPlaying, setIsPlaying } = useSyncStore()
 
-  // Baseline-compare mode: independent playback with linked play/pause.
-  // - Each video plays its swing window at native speed.
-  // - Click play on either video → both play.
-  // - When the SHORTER video reaches its end it pauses there. The
-  //   longer video keeps playing until IT reaches its own end.
-  // - Both stay paused after that. User clicks play to replay; the
-  //   playEpoch counter increments and each video's restartTrigger
-  //   effect seeks back to windowStart and resumes. No automatic loop
-  //   restart — earlier auto-restart attempts produced "weird sync"
-  //   per user feedback. Manual replay is simpler and predictable.
-  const [baselineBothPlaying, setBaselineBothPlayingRaw] = useState(false)
-  const [playEpoch, setPlayEpoch] = useState(0)
-  const setBaselineBothPlaying = useCallback((p: boolean) => {
-    setBaselineBothPlayingRaw(p)
-    // Every transition into "playing" is treated as a user-initiated
-    // restart — bump the epoch so each VideoCanvas's restartTrigger
-    // effect seeks back to windowStart and resumes both videos in
-    // unison from the start of their respective swing windows. Without
-    // this, the second click of play (after both paused at end) would
-    // try to play from windowEnd and immediately re-pause via
-    // handleTimeUpdate's reachedEnd check.
-    if (p) setPlayEpoch((e) => e + 1)
-  }, [])
+  // Baseline-compare mode: zero shared state between the two videos.
+  // Each VideoCanvas operates as a standalone player with its own
+  // play / pause / scrub controls and its own pose overlay matched
+  // against its own frame data. Earlier sync attempts (master / slave
+  // time mapping, contact alignment, linked play / pause, coordinated
+  // loop restart) all produced more bugs than they solved per user
+  // feedback. Independent playback is simpler and lets the tracing
+  // come from whatever pose data was extracted on each clip.
 
   // Detect swing phases for both user and pro frame sequences
   const userPhases = useMemo(
@@ -174,46 +150,10 @@ export default function ComparisonLayout({
     return 0
   }, [userPhases])
 
-  // Contact-frame timestamps for baseline-compare mode. Used to align
-  // both videos at the contact moment so the swing-window comparison
-  // is meaningful. Falls back to mid-clip when no contact phase is
-  // detected.
-  const userContactSec = useMemo(() => {
-    const contact = userPhases.find((p) => p.phase === 'contact')
-    if (contact) return contact.timestampMs / 1000
-    if (userFrames.length > 1) {
-      const mid = userFrames[Math.floor(userFrames.length / 2)]
-      return mid?.timestamp_ms ? mid.timestamp_ms / 1000 : 0
-    }
-    return 0
-  }, [userPhases, userFrames])
-  const proContactSec = useMemo(() => {
-    const contact = proPhases.find((p) => p.phase === 'contact')
-    if (contact) return contact.timestampMs / 1000
-    if (proFrames.length > 1) {
-      const mid = proFrames[Math.floor(proFrames.length / 2)]
-      return mid?.timestamp_ms ? mid.timestamp_ms / 1000 : 0
-    }
-    return 0
-  }, [proPhases, proFrames])
-
-  // In baseline-compare mode, the side with the LATER contact frame
-  // becomes the master. That way the slave can hold at frame 0 until
-  // the master reaches the alignment moment, then both play their
-  // contact frames at the same wall-clock time. Without this, a
-  // shorter-duration master (typical baseline) would cap syncedTime
-  // and truncate the longer side — the bug the user reported.
-  const baselineMasterIsUser = useMemo(() => {
-    if (compareMode !== 'baseline') return true // pro mode: user always master
-    return userContactSec >= proContactSec
-  }, [compareMode, userContactSec, proContactSec])
-
-  // Slave start delay (seconds): wait time at frame 0 before playing,
-  // so contact frames align at the same wall-clock moment.
-  const slaveStartDelay = useMemo(() => {
-    if (compareMode !== 'baseline') return userSwingStartSec
-    return Math.max(0, Math.abs(userContactSec - proContactSec))
-  }, [compareMode, userContactSec, proContactSec, userSwingStartSec])
+  // Contact-frame / master-slave / start-delay calculations were
+  // removed in 2026-05 along with the rest of the baseline-mode sync
+  // architecture. Pro mode still uses userSwingStartSec computed
+  // above to hold the pro video before the user's swing begins.
 
   // Determine current phase for the badge
   const activePhase = useMemo(
@@ -258,29 +198,20 @@ export default function ComparisonLayout({
             showSkeleton={showSkeleton}
             showTrail={showTrail}
             showRacket={showRacket}
-            // Pro mode keeps the existing syncedTime master/slave wiring.
-            // Baseline mode runs both videos independently — no shared
-            // timeline, no master/slave seek logic, no time mapping.
-            // Each video plays its swing window at native speed.
+            // Pro mode keeps the existing syncedTime master/slave
+            // wiring. Baseline mode runs each video completely
+            // independently with its own play/pause/scrub controls
+            // and no shared state — each video's pose overlay tracks
+            // its own currentTime against its own frames, which is
+            // the most reliable way to keep tracing accurate.
             syncedTime={compareMode === 'pro' ? syncedTime : undefined}
             onTimeUpdate={compareMode === 'pro' ? handleTimeUpdate : undefined}
-            onPlayPause={
-              compareMode === 'baseline'
-                ? setBaselineBothPlaying
-                : handlePlayPause
-            }
+            onPlayPause={compareMode === 'pro' ? handlePlayPause : undefined}
             isPrimary
             isSecondary={false}
-            windowStartMs={userVideoWindow?.startMs}
-            windowEndMs={userVideoWindow?.endMs}
             timeMapping={null}
             playbackRate={1}
             proStartDelay={0}
-            syncPlaying={
-              compareMode === 'baseline' ? baselineBothPlaying : undefined
-            }
-            holdAtEnd={compareMode === 'baseline'}
-            restartTrigger={compareMode === 'baseline' ? playEpoch : undefined}
             label={userName}
           />
           <div className="relative">
@@ -293,26 +224,14 @@ export default function ComparisonLayout({
               showRacket={showRacket}
               syncedTime={compareMode === 'pro' ? syncedTime : undefined}
               onTimeUpdate={compareMode === 'pro' ? handleTimeUpdate : undefined}
-              onPlayPause={
-                compareMode === 'baseline'
-                  ? setBaselineBothPlaying
-                  : handlePlayPause
-              }
-              syncPlaying={
-                compareMode === 'baseline' ? baselineBothPlaying : isPlaying
-              }
+              onPlayPause={compareMode === 'pro' ? handlePlayPause : undefined}
+              syncPlaying={compareMode === 'pro' ? isPlaying : undefined}
               isPrimary={compareMode === 'baseline'}
               isSecondary={compareMode === 'pro'}
-              windowStartMs={proVideoWindow?.startMs}
-              windowEndMs={proVideoWindow?.endMs}
               timeMapping={compareMode === 'baseline' ? null : timeMapping}
               playbackRate={compareMode === 'baseline' ? 1 : proPlaybackRate}
               proStartDelay={
                 compareMode === 'baseline' ? 0 : userSwingStartSec
-              }
-              holdAtEnd={compareMode === 'baseline'}
-              restartTrigger={
-                compareMode === 'baseline' ? playEpoch : undefined
               }
               label={proName}
             />
