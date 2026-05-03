@@ -674,6 +674,16 @@ export default function VideoCanvas({
     const video = videoRef.current
     if (!video) return
     if (video.paused) {
+      // If parked at windowEnd from holdAtEnd, seek back to windowStart
+      // before resuming so playback isn't immediately punted out by
+      // the reachedEnd check on the next timeupdate. Without this, the
+      // first frame of video.play() lands at windowEnd, fires the
+      // holdAtEnd branch, and the video pauses again — the user sees
+      // "click play, nothing happens."
+      if (hasWindow && video.currentTime >= windowEndSec - 0.05) {
+        video.currentTime = windowStartSec
+        hasFiredEndRef.current = false
+      }
       video.play()
       setPlaying(true)
       onPlayPause?.(true)

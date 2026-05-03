@@ -68,29 +68,29 @@ export default function ComparisonLayout({
   const { mode, setMode } = useComparisonStore()
   const { syncedTime, setSyncedTime, setTimeMapping, isPlaying, setIsPlaying } = useSyncStore()
 
-  // Baseline-compare mode: simple coordinated playback — when one video
-  // plays the other plays, when both reach their respective ends both
-  // restart. No master/slave time mapping. Each video plays at native
-  // speed in its swing window. Tracing works on each video
-  // independently because there's no shared timeline forcing one
-  // video's currentTime onto the other.
-  const [baselineBothPlaying, setBaselineBothPlaying] = useState(false)
-  const [userAtEnd, setUserAtEnd] = useState(false)
-  const [proAtEnd, setProAtEnd] = useState(false)
-  const [restartCount, setRestartCount] = useState(0)
-  // When BOTH videos have hit their respective ends, bump the restart
-  // counter — each VideoCanvas's restartTrigger effect seeks back to
-  // windowStart and resumes playback. The shorter clip has been waiting
-  // at end frame for the longer one to finish, which is the "shorter
-  // waits before playing again" behavior the user asked for.
-  useEffect(() => {
-    if (compareMode !== 'baseline') return
-    if (userAtEnd && proAtEnd) {
-      setRestartCount((c) => c + 1)
-      setUserAtEnd(false)
-      setProAtEnd(false)
-    }
-  }, [compareMode, userAtEnd, proAtEnd])
+  // Baseline-compare mode: independent playback with linked play/pause.
+  // - Each video plays its swing window at native speed.
+  // - Click play on either video → both play.
+  // - When the SHORTER video reaches its end it pauses there. The
+  //   longer video keeps playing until IT reaches its own end.
+  // - Both stay paused after that. User clicks play to replay; the
+  //   playEpoch counter increments and each video's restartTrigger
+  //   effect seeks back to windowStart and resumes. No automatic loop
+  //   restart — earlier auto-restart attempts produced "weird sync"
+  //   per user feedback. Manual replay is simpler and predictable.
+  const [baselineBothPlaying, setBaselineBothPlayingRaw] = useState(false)
+  const [playEpoch, setPlayEpoch] = useState(0)
+  const setBaselineBothPlaying = useCallback((p: boolean) => {
+    setBaselineBothPlayingRaw(p)
+    // Every transition into "playing" is treated as a user-initiated
+    // restart — bump the epoch so each VideoCanvas's restartTrigger
+    // effect seeks back to windowStart and resumes both videos in
+    // unison from the start of their respective swing windows. Without
+    // this, the second click of play (after both paused at end) would
+    // try to play from windowEnd and immediately re-pause via
+    // handleTimeUpdate's reachedEnd check.
+    if (p) setPlayEpoch((e) => e + 1)
+  }, [])
 
   // Detect swing phases for both user and pro frame sequences
   const userPhases = useMemo(
@@ -280,10 +280,7 @@ export default function ComparisonLayout({
               compareMode === 'baseline' ? baselineBothPlaying : undefined
             }
             holdAtEnd={compareMode === 'baseline'}
-            onWindowEnd={
-              compareMode === 'baseline' ? () => setUserAtEnd(true) : undefined
-            }
-            restartTrigger={compareMode === 'baseline' ? restartCount : undefined}
+            restartTrigger={compareMode === 'baseline' ? playEpoch : undefined}
             label={userName}
           />
           <div className="relative">
@@ -314,11 +311,8 @@ export default function ComparisonLayout({
                 compareMode === 'baseline' ? 0 : userSwingStartSec
               }
               holdAtEnd={compareMode === 'baseline'}
-              onWindowEnd={
-                compareMode === 'baseline' ? () => setProAtEnd(true) : undefined
-              }
               restartTrigger={
-                compareMode === 'baseline' ? restartCount : undefined
+                compareMode === 'baseline' ? playEpoch : undefined
               }
               label={proName}
             />
