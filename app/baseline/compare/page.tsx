@@ -489,6 +489,26 @@ export default function BaselineComparePage() {
                   // and the user sees the 3-second clip cut to 2
                   // seconds and looped (the bug they reported).
                   compareMode="baseline"
+                  // Today's video URL is the user's full upload (or
+                  // the rally URL on analyze→compare handoff). The
+                  // frames in todayFramesForCompare are sliced to a
+                  // single swing with rally-relative timestamps —
+                  // possibly starting at e.g. 1000ms. Without the
+                  // window, today's <video> plays from currentTime=0
+                  // (pre-swing footage) while pose data only covers
+                  // the swing range, breaking the overlay. Setting
+                  // the window makes the video play exactly the swing
+                  // range so video time and frame timestamps agree.
+                  proVideoWindow={
+                    todayFramesForCompare.length > 1
+                      ? {
+                          startMs: todayFramesForCompare[0].timestamp_ms,
+                          endMs:
+                            todayFramesForCompare[todayFramesForCompare.length - 1]
+                              .timestamp_ms,
+                        }
+                      : null
+                  }
                 />
               </div>
             </div>

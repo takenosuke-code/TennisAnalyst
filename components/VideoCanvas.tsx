@@ -147,6 +147,21 @@ interface VideoCanvasProps {
   label?: string
   playbackRate?: number
   proStartDelay?: number
+  // Optional video window: when provided, the <video> element seeks to
+  // windowStartMs on load and loops back to windowStartMs whenever
+  // currentTime reaches windowEndMs. The pose overlay continues to
+  // match its own video.currentTime against frame.timestamp_ms — both
+  // source-relative — so windowing the video without re-zeroing frames
+  // keeps overlay alignment correct.
+  //
+  // Use case: baseline-compare's "today" video. The clip the user
+  // uploaded contains a swing in some sub-range (frames carry rally-
+  // relative timestamps from pose extraction). Without windowing, the
+  // video plays pre-swing footage at currentTime=0 while the pose
+  // frames don't cover that range — overlay breaks. Windowing makes
+  // the video play exactly the swing range, so pose and video align.
+  windowStartMs?: number
+  windowEndMs?: number
 }
 
 export default function VideoCanvas({
@@ -175,7 +190,12 @@ export default function VideoCanvas({
   label,
   playbackRate = 1.0,
   proStartDelay = 0,
+  windowStartMs,
+  windowEndMs,
 }: VideoCanvasProps) {
+  const hasWindow = typeof windowStartMs === 'number' && typeof windowEndMs === 'number'
+  const windowStartSec = hasWindow ? (windowStartMs as number) / 1000 : 0
+  const windowEndSec = hasWindow ? (windowEndMs as number) / 1000 : 0
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   // Tracks the most recent syncedTime so the secondary can detect
@@ -362,7 +382,9 @@ export default function VideoCanvas({
     // For secondary (pro) video: hold at start until the user's swing begins.
     // This prevents the pro video from stuttering during pre-swing dead time.
     if (isSecondary && proStartDelay > 0 && syncedTime < proStartDelay) {
-      video.currentTime = 0
+      // If a window is set, "frame 0" of the slave is windowStartSec
+      // in the source video, not literal 0.
+      video.currentTime = hasWindow ? windowStartSec : 0
       video.pause()
       prevSyncedTimeRef.current = syncedTime
       return
@@ -373,6 +395,15 @@ export default function VideoCanvas({
     let targetTime = syncedTime
     if (isSecondary && timeMapping) {
       targetTime = timeMapping(syncedTime * 1000) / 1000
+    }
+    // When the secondary has a window, syncedTime is window-relative
+    // (master emits it that way). Translate to source-relative time
+    // for the seek. Subtract the start delay so contact alignment
+    // still applies before the window offset.
+    if (isSecondary && hasWindow) {
+      targetTime = Math.max(0, syncedTime - proStartDelay) + windowStartSec
+      // Clamp to window end so slave doesn't seek past the swing window.
+      if (targetTime > windowEndSec) targetTime = windowEndSec
     }
 
     // Loop / replay detection: when syncedTime drops sharply backward,
@@ -485,12 +516,32 @@ export default function VideoCanvas({
   }, [src])
 
   const handleTimeUpdate = () => {
-    const t = videoRef.current?.currentTime ?? 0
+    const video = videoRef.current
+    if (!video) return
+    const t = video.currentTime ?? 0
+    // Loop within the window: if the video reaches windowEndMs, seek
+    // back to windowStartMs. Browsers' built-in `loop` attribute would
+    // jump to 0 instead, breaking the swing-window playback model.
+    if (hasWindow && t >= windowEndSec - 0.02) {
+      video.currentTime = windowStartSec
+      tracerRef.current.reset()
+      lastFrameIndexRef.current = -1
+      // After the seek, keep playing — the timeupdate event will fire
+      // again from the new position.
+      if (isPrimary && !video.paused) {
+        // Emit window-relative time = 0 so the slave snaps back too.
+        onTimeUpdate?.(0)
+      }
+      setCurrentTime(windowStartSec)
+      return
+    }
     setCurrentTime(t)
     // Only the primary video drives syncedTime to avoid a feedback loop
-    // where two synced videos ping-pong time updates infinitely.
+    // where two synced videos ping-pong time updates infinitely. When
+    // a window is set, syncedTime is window-relative so the slave's
+    // start-delay math works against a 0-anchored clock.
     if (isPrimary) {
-      onTimeUpdate?.(t)
+      onTimeUpdate?.(hasWindow ? Math.max(0, t - windowStartSec) : t)
     }
   }
 
@@ -523,6 +574,12 @@ export default function VideoCanvas({
     if (video && !Number.isFinite(video.duration)) {
       video.currentTime = 1e101
       video.currentTime = 0
+    }
+    // Seek to windowStartMs on load so playback starts inside the
+    // swing window rather than at the source video's t=0 (which would
+    // be pre-swing footage with no pose data).
+    if (video && hasWindow) {
+      video.currentTime = windowStartSec
     }
     recomputeDuration()
   }

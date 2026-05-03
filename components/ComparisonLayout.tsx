@@ -44,6 +44,13 @@ interface ComparisonLayoutProps {
   //   duration drives the loop; the shorter side holds at end frame
   //   past its own duration.
   compareMode?: 'pro' | 'baseline'
+  // Optional video windows. When provided, the corresponding
+  // VideoCanvas seeks to windowStartMs on load and loops back to it
+  // on hitting windowEndMs — so a video file that contains pre-swing
+  // footage only plays its swing window. Frame timestamps stay
+  // source-relative; pose overlay aligns naturally.
+  userVideoWindow?: { startMs: number; endMs: number } | null
+  proVideoWindow?: { startMs: number; endMs: number } | null
 }
 
 export default function ComparisonLayout({
@@ -54,6 +61,8 @@ export default function ComparisonLayout({
   proName = 'Pro',
   userName = 'You',
   compareMode = 'pro',
+  userVideoWindow = null,
+  proVideoWindow = null,
 }: ComparisonLayoutProps) {
   const { visible, showSkeleton, showTrail, showRacket } = useJointStore()
   const { mode, setMode } = useComparisonStore()
@@ -236,6 +245,8 @@ export default function ComparisonLayout({
             // mode the user is always master.
             isPrimary={baselineMasterIsUser}
             isSecondary={compareMode === 'baseline' && !baselineMasterIsUser}
+            windowStartMs={userVideoWindow?.startMs}
+            windowEndMs={userVideoWindow?.endMs}
             // When user is the slave (baseline-compare with later pro
             // contact), the slave needs a time mapping and start delay
             // mirroring what the pro side normally gets.
@@ -271,6 +282,8 @@ export default function ComparisonLayout({
               syncPlaying={isPlaying}
               isPrimary={!baselineMasterIsUser}
               isSecondary={baselineMasterIsUser}
+              windowStartMs={proVideoWindow?.startMs}
+              windowEndMs={proVideoWindow?.endMs}
               // Baseline mode: identity mapping (no phase warping). Pro
               // mode: keep the existing computeTimeMapping behavior.
               timeMapping={compareMode === 'baseline' ? null : timeMapping}
