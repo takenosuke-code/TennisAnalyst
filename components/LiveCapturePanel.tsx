@@ -20,6 +20,7 @@ import {
 } from '@/lib/liveSessionRecovery'
 import { extractPoseViaRailway, RailwayExtractError } from '@/lib/poseExtractionRailway'
 import LiveSwingCounter from './LiveSwingCounter'
+import CoachDebugPanel from './CoachDebugPanel'
 
 const SHOT_TYPES = ['forehand', 'backhand', 'serve', 'volley'] as const
 
@@ -1329,6 +1330,14 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
           </div>
         ) : null}
       </div>
+
+      {/*
+        Live LLM debug panel — shows the angle summaries shipped to the
+        coach and the cue (or silence/error) that came back, per batch.
+        Lets the player sanity-check the live pipeline during a demo
+        without needing devtools open. Cap at 30 entries inside the store.
+      */}
+      <CoachDebugPanel />
 
       {/* Resume prompt — appears on mount when an orphaned upload exists. */}
       {orphan && !pendingResult && !isRecording ? (

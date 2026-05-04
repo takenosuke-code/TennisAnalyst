@@ -117,6 +117,7 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
   } = options
 
   const appendTranscriptEntry = useLiveStore((s) => s.appendTranscriptEntry)
+  const appendCoachDebugEntry = useLiveStore((s) => s.appendCoachDebugEntry)
   const setTtsAvailable = useLiveStore((s) => s.setTtsAvailable)
   const ttsEnabled = useLiveStore((s) => s.ttsEnabled)
   const setLastBatchAtMs = useLiveStore((s) => s.setLastBatchAtMs)
@@ -294,6 +295,7 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
       }
     }
 
+    const requestStartedAtMs = Date.now()
     let result = await tryPost()
     if (result.kind === 'fail') {
       // One retry with short backoff. After the second failure we drop the
@@ -301,6 +303,7 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
       await new Promise((r) => setTimeout(r, 2_000))
       result = await tryPost()
     }
+    const latencyMs = Date.now() - requestStartedAtMs
 
     lastBatchWallMsRef.current = Date.now()
     setLastBatchAtMs(lastBatchWallMsRef.current)
@@ -337,6 +340,24 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
       setCoachingError('Coaching paused — connection issue. Retrying.')
     }
 
+    // Dev visibility: log every batch outcome (cue / silence / error) into
+    // the live store so CoachDebugPanel can render what the model saw and
+    // what came back. Silence and errors don't get a transcript line; this
+    // is the only surface that shows the player they happened.
+    appendCoachDebugEntry({
+      id: `coach-debug-${batchIndex}-${producedAt}`,
+      sessionMs: sessionDurationMs,
+      swingCount: swings.length,
+      angleSummaries: wireSwings.map((s) => s.angleSummary),
+      outcome:
+        result.kind === 'ok'
+          ? { kind: 'cue', text: result.text }
+          : result.kind === 'silence'
+            ? { kind: 'silence' }
+            : { kind: 'error' },
+      latencyMs,
+    })
+
     // If more swings arrived while we were in flight, evaluate again.
     if (pendingRef.current.length >= maxSwingsPerBatch) {
       void fireBatchRef.current()
@@ -344,6 +365,7 @@ export function useLiveCoach(options: UseLiveCoachOptions = {}): UseLiveCoachRet
       scheduleIdleTimer()
     }
   }, [
+    appendCoachDebugEntry,
     appendTranscriptEntry,
     clearGraceTimer,
     clearIdleTimer,
