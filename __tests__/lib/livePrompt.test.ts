@@ -28,7 +28,7 @@ const beginnerProfile: UserProfile = {
   skill_tier: 'beginner',
   dominant_hand: 'right',
   backhand_style: 'two_handed',
-  primary_goal: 'fundamentals',
+  primary_goal: 'learning',
   primary_goal_note: null,
   onboarded_at: '2026-04-20T00:00:00Z',
 }

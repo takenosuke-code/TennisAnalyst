@@ -566,8 +566,13 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
 
   // Mirror the live `isRecording` state into a ref the orientation
   // matchMedia handler reads — keeps that handler effect stable while
-  // still seeing the latest recording status.
+  // still seeing the latest recording status. The disable is needed
+  // because the new react-hooks/immutability lint rule false-positives
+  // on ref-current writes inside useEffect (refs are intentionally
+  // mutable; this is the standard "stable callback reads latest state"
+  // pattern).
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/immutability
     isRecordingRef.current = isRecording
   }, [isRecording])
 
@@ -1255,7 +1260,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
             <div className="text-5xl">🎾</div>
             <p className="text-white font-medium">Lean your phone on anything side-on. Tap Start and play.</p>
             <p className="text-white/50 text-sm text-center max-w-sm px-4">
-              Your bag, a bench, the fence — whatever you've got. We coach you every few swings and save the session for later review.
+              Your bag, a bench, the fence — whatever you&apos;ve got. We coach you every few swings and save the session for later review.
             </p>
           </div>
         ) : null}
@@ -1651,7 +1656,7 @@ export default function LiveCapturePanel({ onSessionComplete }: LiveCapturePanel
             // exhausted, only Continue is offered.
             <div data-testid="extract-failure" className="space-y-3">
               <p className="text-red-200 text-sm">
-                Server analysis didn't complete
+                Server analysis didn&apos;t complete
                 {extractFailure.reason && extractFailure.reason !== 'unknown'
                   ? ` (${extractFailure.reason})`
                   : ''}

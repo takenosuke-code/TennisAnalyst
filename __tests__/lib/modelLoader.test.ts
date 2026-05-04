@@ -39,8 +39,10 @@ function makeCacheStorageStub() {
     match: vi.fn(async (key: string) => {
       const buf = store.get(key)
       if (!buf) return undefined
-      // Return a fresh Response each call so callers can read it.
-      return new Response(buf, {
+      // Return a fresh Response each call so callers can read it. Cast
+      // because Response's BodyInit typings tightened in newer TS libs and
+      // no longer accept Uint8Array directly even though runtimes do.
+      return new Response(buf as unknown as BodyInit, {
         headers: { 'content-length': String(buf.byteLength) },
       })
     }),
